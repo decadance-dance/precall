@@ -128,10 +128,19 @@ fn origin_basename(url: &str) -> String {
 
 /// `owner/name` of a GitHub remote URL (ssh or https).
 fn github_repo(url: &str) -> Option<String> {
-    let (_, rest) = url.split_once("github.com")?;
-    let rest = rest.trim_start_matches([':', '/']).trim_end_matches('/');
-    let rest = rest.strip_suffix(".git").unwrap_or(rest);
-    let (owner, name) = rest.split_once('/')?;
+    // `scheme://[user@]host[:port]/path` or scp-like `[user@]host:path`.
+    let (authority, path) = match url.split_once("://") {
+        Some((_, rest)) => rest.split_once('/')?,
+        None => url.split_once(':')?,
+    };
+    let host = authority.rsplit('@').next()?;
+    let host = host.split(':').next()?;
+    if !host.eq_ignore_ascii_case("github.com") {
+        return None;
+    }
+    let path = path.trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let (owner, name) = path.split_once('/')?;
     (!owner.is_empty() && !name.is_empty() && !name.contains('/'))
         .then(|| format!("{owner}/{name}"))
 }
@@ -286,7 +295,8 @@ pub fn import(project: Option<&str>, file: &Path) -> Result<String> {
             .branches
             .iter()
             .find(|b| {
-                b.id.eq_ignore_ascii_case(&item.title) || b.title.eq_ignore_ascii_case(&item.title)
+                let title = item.title.to_lowercase();
+                b.id == title || b.title.to_lowercase() == title
             })
             .map(|b| b.id.clone());
         let branch = match matched {
@@ -409,6 +419,18 @@ mod tests {
                 Some("acme/widget"),
             ),
             ("https://example.org/x/kiln.git", "kiln", None),
+            (
+                "https://mirror.example/github.com/acme/tulip.git",
+                "tulip",
+                None,
+            ),
+            ("git@github.com.evil.example:acme/tulip.git", "tulip", None),
+            (
+                "https://user@GitHub.com:443/acme/tulip.git",
+                "tulip",
+                Some("acme/tulip"),
+            ),
+            ("git://github.com/acme/tulip", "tulip", Some("acme/tulip")),
         ] {
             assert_eq!(origin_basename(url), base, "{url}");
             assert_eq!(github_repo(url).as_deref(), gh, "{url}");

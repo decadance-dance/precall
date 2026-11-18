@@ -842,3 +842,195 @@ fn import_appends_when_two_lines_fill_one_branch() {
         "new nodes go last:\n{show}"
     );
 }
+
+// ---- review round 1 (PR #18) ----
+
+fn store_git(dir: &Path, args: &[&str]) -> String {
+    let mut all = vec![
+        "-c",
+        "user.name=Tester",
+        "-c",
+        "user.email=tester@example.org",
+    ];
+    all.extend_from_slice(args);
+    git(dir, &all)
+}
+
+#[test]
+fn store_commits_hold_only_the_files_the_command_wrote() {
+    let e = small_env();
+    let store = e.store("kiln");
+    std::fs::write(store.join("scratch.txt"), "local draft\n").unwrap();
+    std::fs::write(store.join("staged.txt"), "staged work\n").unwrap();
+    git(&store, &["add", "staged.txt"]);
+    assert_eq!(k(&e, &["note", "api-gateway", "check routing"]).code, 0);
+    assert_eq!(
+        git(&store, &["show", "--format=", "--name-only", "HEAD"]),
+        "map/layout.jsonl\n"
+    );
+    assert_eq!(k(&e, &["rm", "fetcher"]).code, 0);
+    assert_eq!(
+        git(&store, &["show", "--format=", "--name-only", "HEAD"]),
+        "map/services.jsonl\n"
+    );
+    assert_eq!(
+        git(&store, &["status", "--porcelain"]),
+        "A  staged.txt\n?? scratch.txt\n"
+    );
+}
+
+#[test]
+fn a_failed_commit_leaves_the_store_as_it_was() {
+    use std::os::unix::fs::PermissionsExt;
+    let e = small_env();
+    let store = e.store("kiln");
+    let hook = store.join(".git/hooks/pre-commit");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let snapshot = |dir: &Path| -> Vec<(String, Vec<u8>)> {
+        let mut v: Vec<(String, Vec<u8>)> = [
+            "rrecall.toml",
+            "map/layout.jsonl",
+            "map/services.jsonl",
+            "map/decisions.jsonl",
+        ]
+        .iter()
+        .map(|f| {
+            (
+                f.to_string(),
+                std::fs::read(dir.join(f)).unwrap_or_default(),
+            )
+        })
+        .collect();
+        v.push((
+            "status".into(),
+            git(dir, &["status", "--porcelain"]).into_bytes(),
+        ));
+        v
+    };
+    let before = snapshot(&store);
+    assert_eq!(k(&e, &["note", "api-gateway", "retry me"]).code, 1);
+    assert_eq!(k(&e, &["rm", "fetcher"]).code, 1);
+    assert_eq!(snapshot(&store), before);
+    // A fresh store whose import fails keeps its config and gets no map files.
+    e.ok(&["init", "tulip"]);
+    let tulip = e.store("tulip");
+    std::fs::create_dir_all(tulip.join(".git/hooks")).unwrap();
+    std::fs::copy(&hook, tulip.join(".git/hooks/pre-commit")).unwrap();
+    let cfg = std::fs::read(tulip.join("rrecall.toml")).unwrap();
+    let file = e.write("outline.txt", SMALL_OUTLINE);
+    assert_eq!(
+        e.run(&["--project", "tulip", "import", file.to_str().unwrap()])
+            .code,
+        1
+    );
+    assert_eq!(std::fs::read(tulip.join("rrecall.toml")).unwrap(), cfg);
+    assert!(!tulip.join("map/layout.jsonl").exists());
+    assert_eq!(git(&tulip, &["status", "--porcelain"]), "");
+    // Once the hook is gone, the same command commits.
+    std::fs::remove_file(&hook).unwrap();
+    assert_eq!(k(&e, &["note", "api-gateway", "retry me"]).code, 0);
+    assert_eq!(
+        git(&store, &["log", "-1", "--format=%s"]),
+        "note layout/api-gateway\n"
+    );
+}
+
+#[test]
+fn branch_files_keep_lf_and_untouched_files_keep_their_bytes() {
+    let e = small_env();
+    let store = e.store("kiln");
+    assert_eq!(
+        std::fs::read_to_string(store.join(".gitattributes")).unwrap(),
+        "*.jsonl text eol=lf\n"
+    );
+    git(&store, &["config", "core.autocrlf", "true"]);
+    std::fs::remove_file(store.join("map/decisions.jsonl")).unwrap();
+    git(&store, &["checkout-index", "--", "map/decisions.jsonl"]);
+    assert!(
+        !std::fs::read(store.join("map/decisions.jsonl"))
+            .unwrap()
+            .contains(&b'\r'),
+        "LF on checkout"
+    );
+    // A branch file the command does not change is not rewritten, whatever its line endings.
+    let crlf = std::fs::read_to_string(store.join("map/decisions.jsonl"))
+        .unwrap()
+        .replace('\n', "\r\n");
+    std::fs::write(store.join("map/decisions.jsonl"), &crlf).unwrap();
+    assert_eq!(k(&e, &["note", "api-gateway", "review"]).code, 0);
+    assert_eq!(
+        std::fs::read_to_string(store.join("map/decisions.jsonl")).unwrap(),
+        crlf
+    );
+}
+
+#[test]
+fn why_follows_edits_to_a_config_branch() {
+    let e = small_env();
+    let store = e.store("kiln");
+    let cfg = std::fs::read_to_string(store.join("rrecall.toml")).unwrap();
+    let edited = cfg.replace("Which services run in production?", "Who runs it?");
+    std::fs::write(store.join("rrecall.toml"), &edited).unwrap();
+    store_git(&store, &["commit", "-qam", "Change services question"]);
+    std::fs::write(
+        store.join("rrecall.toml"),
+        format!("# unrelated comment\n{edited}"),
+    )
+    .unwrap();
+    store_git(&store, &["commit", "-qam", "Add a comment"]);
+    let why = k(&e, &["why", "services"]).stdout;
+    let subjects: Vec<&str> = why.lines().filter(|l| l.starts_with("- ")).collect();
+    assert_eq!(subjects.len(), 2, "{why}");
+    assert!(
+        subjects[0].ends_with(" import outline.txt: +6 nodes, +1 branches"),
+        "{why}"
+    );
+    assert!(subjects[1].ends_with(" Change services question"), "{why}");
+}
+
+#[test]
+fn max_tokens_holds_for_json_and_markdown() {
+    // Every budget around the sizes of the first nodes, so each cut boundary is crossed.
+    let e = small_env();
+    for max in 10..=160 {
+        for json in [false, true] {
+            let m = max.to_string();
+            let mut args = vec!["show", "layout", "--depth", "2", "--max-tokens", &m];
+            if json {
+                args.push("--json");
+            }
+            let out = k(&e, &args).stdout;
+            let nodes = if json {
+                let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+                v["nodes"].as_array().unwrap().len()
+            } else {
+                out.matches("## ").count()
+            };
+            assert!(nodes >= 1, "max {max} json {json}: {out}");
+            assert!(
+                tokens(&out) <= max || nodes == 1,
+                "max {max} json {json}: {} tokens, {nodes} nodes",
+                tokens(&out)
+            );
+        }
+    }
+}
+
+#[test]
+fn import_matches_branch_titles_case_insensitively_beyond_ascii() {
+    let e = Env::new();
+    e.ok(&["init", "kiln"]);
+    let file = e.write("o.txt", "MÉTIER\n  First\nMétier\n  Second\n");
+    let out = e.ok(&["--project", "kiln", "import", file.to_str().unwrap()]);
+    assert!(
+        out.contains("Imported 2 nodes") && out.contains("new branches: m-tier\n"),
+        "{out}"
+    );
+    let show = e.ok(&["--project", "kiln", "show", "m-tier"]);
+    assert!(
+        show.ends_with("- First (first)\n- Second (second)\n"),
+        "{show}"
+    );
+}

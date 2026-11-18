@@ -105,14 +105,23 @@ pub fn why(store: &Store, id: &str, as_json: bool) -> Result<String> {
 
 /// Days in a `--since` window: `<N>d` or `<N>w`.
 fn window_days(since: &str) -> Result<i64> {
-    let bad = || error::usage(format!("--since `{since}`: use <N>d or <N>w, such as 7d"));
-    let (n, unit) = since.split_at(since.len().saturating_sub(1));
+    const MAX_DAYS: i64 = 36_500;
+    let bad = || {
+        error::usage(format!(
+            "--since `{since}`: use <N>d or <N>w, such as 7d, at most {MAX_DAYS} days"
+        ))
+    };
+    let (n, per) = if let Some(n) = since.strip_suffix('d') {
+        (n, 1)
+    } else if let Some(n) = since.strip_suffix('w') {
+        (n, 7)
+    } else {
+        return Err(bad());
+    };
     let n: i64 = n.parse().map_err(|_| bad())?;
-    match unit {
-        "d" => Ok(n),
-        "w" => Ok(n * 7),
-        _ => Err(bad()),
-    }
+    n.checked_mul(per)
+        .filter(|d| (0..=MAX_DAYS).contains(d))
+        .ok_or_else(bad)
 }
 
 /// `YYYY-MM-DD` of a day count since 1970-01-01 (proleptic Gregorian, H. Hinnant's algorithm).
@@ -199,7 +208,19 @@ mod tests {
     fn windows() {
         assert_eq!(window_days("7d").unwrap(), 7);
         assert_eq!(window_days("2w").unwrap(), 14);
-        for bad in ["", "d", "7", "7x", "-d", "1.5d"] {
+        for bad in [
+            "",
+            "d",
+            "7",
+            "7x",
+            "-d",
+            "1.5d",
+            "-3d",
+            "é",
+            "7é",
+            "9223372036854775807w",
+            "99999999d",
+        ] {
             assert!(window_days(bad).is_err(), "{bad}");
         }
     }

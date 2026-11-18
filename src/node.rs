@@ -113,8 +113,17 @@ pub fn check_date(d: &str) -> Result<(), String> {
         && digits(5..7)
         && digits(8..10);
     let in_range = shape && {
-        let (m, day): (u32, u32) = (d[5..7].parse().unwrap_or(0), d[8..10].parse().unwrap_or(0));
-        (1..=12).contains(&m) && (1..=31).contains(&day)
+        let num = |r: std::ops::Range<usize>| d[r].parse::<u32>().unwrap_or(0);
+        let (y, m, day) = (num(0..4), num(5..7), num(8..10));
+        let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+        let last = match m {
+            2 if leap => 29,
+            2 => 28,
+            4 | 6 | 9 | 11 => 30,
+            1..=12 => 31,
+            _ => 0,
+        };
+        (1..=last).contains(&day)
     };
     if in_range {
         Ok(())
@@ -219,6 +228,18 @@ mod tests {
     #[test]
     fn date_and_state() {
         assert_eq!(check_date("2026-02-28"), Ok(()));
+        for good in ["2024-02-29", "2000-02-29", "2026-12-31", "2026-04-30"] {
+            assert_eq!(check_date(good), Ok(()), "{good}");
+        }
+        for bad in [
+            "2026-02-29",
+            "1900-02-29",
+            "2026-02-31",
+            "2026-04-31",
+            "2026-06-31",
+        ] {
+            assert!(check_date(bad).is_err(), "{bad}");
+        }
         for bad in [
             "2026-2-28",
             "2026-13-01",
