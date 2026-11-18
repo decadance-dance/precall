@@ -70,6 +70,17 @@ impl Store {
         Ok(store)
     }
 
+    /// Adds a branch to the skeleton in memory; the caller writes it to the config.
+    pub fn add_branch(&mut self, b: BranchDef) {
+        self.nodes.insert(b.id.clone(), branch_node(&b, self.branches.len()));
+        self.branches.push(b);
+    }
+
+    /// Whether an id is taken, counting the computed `recent` branch.
+    pub fn id_taken(&self, id: &str) -> bool {
+        id == config::COMPUTED_BRANCH || self.nodes.contains_key(id)
+    }
+
     pub fn is_branch(&self, id: &str) -> bool {
         self.nodes.get(id).is_some_and(|n| n.parent.is_none())
     }

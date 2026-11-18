@@ -2,6 +2,7 @@ pub mod commands;
 pub mod config;
 pub mod error;
 pub mod node;
+pub mod outline;
 pub mod query;
 pub mod store;
 #[cfg(test)]

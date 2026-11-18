@@ -212,3 +212,90 @@ fn help_lists_m1_commands_only() {
         assert!(!help.contains(later), "{later} listed:\n{help}");
     }
 }
+
+// ---- import (spec §2) ----
+
+const SMALL_OUTLINE: &str = "\
+Layout
+  API gateway | Terminates TLS and routes /v1 to the sync service.
+    Rate limits | 50 requests per minute per token.
+  Web client | Svelte app under web/.
+Decisions
+  SQLite for feeds | One file per user keeps backups simple.
+Services | Which services run in production?
+  Sync service | Merges read state across devices.
+  Fetcher | Polls feeds every 15 minutes.
+";
+
+/// Rebuilds the outline from `show <branch> --depth 99 --json` of every branch.
+fn outline_from_map(e: &Env, project: &str) -> String {
+    let ls: serde_json::Value = serde_json::from_str(&e.ok(&["--project", project, "ls", "--depth", "1", "--json"])).unwrap();
+    let mut out = String::new();
+    for b in ls["nodes"].as_array().unwrap() {
+        let id = b["id"].as_str().unwrap();
+        let show: serde_json::Value =
+            serde_json::from_str(&e.ok(&["--project", project, "show", id, "--depth", "99", "--json"])).unwrap();
+        let nodes = show["nodes"].as_array().unwrap();
+        if nodes.len() == 1 && !["services"].contains(&id) {
+            continue; // an empty default branch was not in the outline
+        }
+        let mut level = std::collections::HashMap::new();
+        for n in nodes {
+            let l = n["parent"].as_str().map_or(0, |p| level[p] + 1);
+            level.insert(n["id"].as_str().unwrap().to_string(), l);
+            let (title, body) = (n["title"].as_str().unwrap(), n["body"].as_str().unwrap());
+            let default_question = l == 0 && id != "services";
+            out += &"  ".repeat(l);
+            out += title;
+            if !body.is_empty() && !default_question {
+                out += &format!(" | {body}");
+            }
+            out += "\n";
+        }
+    }
+    out
+}
+
+#[test]
+fn import_round_trip() {
+    let e = Env::new();
+    e.ok(&["init", "kiln"]);
+    let file = e.write("outline.txt", SMALL_OUTLINE);
+    let out = e.ok(&["--project", "kiln", "import", file.to_str().unwrap()]);
+    assert!(out.contains("services"), "{out}");
+    assert_eq!(outline_from_map(&e, "kiln"), SMALL_OUTLINE);
+
+    let store = e.store("kiln");
+    let api = e.ok(&["--project", "kiln", "show", "api-gateway", "--json"]);
+    assert!(api.contains(r#""sources":["import:outline.txt"]"#), "{api}");
+    let cfg = std::fs::read_to_string(store.join("rrecall.toml")).unwrap();
+    assert!(cfg.contains("[[skeleton.branch]]\nid = \"services\"\ntitle = \"Services\"\nquestion = \"Which services run in production?\""), "{cfg}");
+    // The new branch and the nodes land in one commit.
+    assert_eq!(git(&store, &["log", "--format=%s"]), "import outline.txt: +6 nodes, +1 branches\ninit kiln\n");
+    let files = git(&store, &["show", "--name-only", "--format=", "HEAD"]);
+    assert_eq!(files, "map/decisions.jsonl\nmap/layout.jsonl\nmap/services.jsonl\nrrecall.toml\n");
+    assert_eq!(git(&store, &["status", "--porcelain"]), "");
+    // Import seeds an empty map only.
+    let again = e.run(&["--project", "kiln", "import", file.to_str().unwrap()]);
+    assert_eq!(again.code, 2, "{}", again.stderr);
+}
+
+#[test]
+fn import_rejects_bad_outlines_and_changes_nothing() {
+    let e = Env::new();
+    e.ok(&["init", "kiln"]);
+    let long = "x".repeat(81);
+    for (text, want) in [
+        ("Layout | a detail on a default branch\n  API\n", "line 1"),
+        (&*format!("Layout\n  {long}\n"), "line 2"),
+        ("Layout\n    API\n  Web\n", "line 3"),
+    ] {
+        let file = e.write("bad.txt", text);
+        let o = e.run(&["--project", "kiln", "import", file.to_str().unwrap()]);
+        assert_eq!(o.code, 2, "{text}: {}", o.stderr);
+        assert!(o.stderr.contains(want), "{text}: {}", o.stderr);
+    }
+    let store = e.store("kiln");
+    assert_eq!(git(&store, &["status", "--porcelain"]), "");
+    assert_eq!(git(&store, &["log", "--format=%s"]), "init kiln\n");
+}

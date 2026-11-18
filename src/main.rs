@@ -82,6 +82,7 @@ fn main() -> ExitCode {
     let p = cli.project.as_deref();
     let out = match &cli.cmd {
         Cmd::Init { project } => commands::init(project.as_deref(), p),
+        Cmd::Import { outline } => commands::import(p, outline),
         Cmd::Ls { depth, json } => commands::ls(p, *depth as usize, *json),
         Cmd::Show { id, depth, max_tokens, json } => commands::show(p, id, *depth as usize, *max_tokens, *json),
         _ => Err(anyhow::anyhow!("not implemented yet")),

@@ -47,7 +47,7 @@ pub fn default_branches() -> Vec<BranchDef> {
 }
 
 /// The id of the computed branch answered by `rrecall recent`; never stored.
-const COMPUTED_BRANCH: &str = "recent";
+pub const COMPUTED_BRANCH: &str = "recent";
 
 #[derive(Deserialize, Default)]
 struct StoreConfig {

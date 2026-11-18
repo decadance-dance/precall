@@ -1,6 +1,8 @@
 //! One function per command; each returns what goes to stdout.
 
-use crate::config::{self, STORE_CONFIG};
+use crate::config::{self, BranchDef, STORE_CONFIG};
+use crate::node::{self, Node};
+use crate::outline;
 use crate::error;
 use crate::query;
 use crate::store::{self, Store};
@@ -130,4 +132,96 @@ mod tests {
             assert_eq!(github_repo(url).as_deref(), gh, "{url}");
         }
     }
+}
+
+pub fn import(project: Option<&str>, file: &Path) -> Result<String> {
+    let (_, path) = config::resolve_project(project)?;
+    let mut s = Store::load(&path)?;
+    if s.nodes.len() > s.branches.len() {
+        return Err(error::usage("the map already has nodes; `rrecall import` seeds an empty map"));
+    }
+    let text = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+    let fname = file.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+    let usage = |line: usize, e: String| error::usage(format!("{fname} line {line}: {e}"));
+    let items = outline::parse(&text).map_err(|e| error::usage(format!("{fname}: {e}")))?;
+    let source = format!("import:{fname}");
+    node::check_source(&source).map_err(|e| error::usage(format!("{e}: rename the outline file")))?;
+
+    let mut new_branches = Vec::new();
+    let mut added = 0;
+    for item in &items {
+        let matched = s
+            .branches
+            .iter()
+            .find(|b| b.id.eq_ignore_ascii_case(&item.title) || b.title.eq_ignore_ascii_case(&item.title))
+            .map(|b| b.id.clone());
+        let branch = match matched {
+            Some(id) if !item.detail.is_empty() => {
+                return Err(usage(
+                    item.line,
+                    format!("`{}` is the branch `{id}`, whose question comes from {STORE_CONFIG}; drop the detail", item.title),
+                ));
+            }
+            Some(id) => id,
+            None => {
+                let b = BranchDef {
+                    id: node::unique_slug(&item.title, |x| s.id_taken(x)),
+                    title: item.title.clone(),
+                    question: item.detail.clone(),
+                    granularity: String::new(),
+                };
+                // The same limits as a node: title 80, question as long as a body.
+                Node { parent: Some(b.id.clone()), ..new_node(&b.id, &b.title, &b.question, &source) }
+                    .validate()
+                    .map_err(|e| usage(item.line, e))?;
+                let id = b.id.clone();
+                new_branches.push(b.clone());
+                s.add_branch(b);
+                id
+            }
+        };
+        added += add_items(&mut s, &item.children, &branch, &source).map_err(|(line, e)| usage(line, e))?;
+    }
+    if !new_branches.is_empty() {
+        let toml: String = new_branches.iter().map(config::branch_toml).collect();
+        append(&path.join(STORE_CONFIG), &toml)?;
+    }
+    s.save()?;
+    s.commit(&format!("import {fname}: +{added} nodes, +{} branches", new_branches.len()))?;
+    let ids: Vec<&str> = new_branches.iter().map(|b| b.id.as_str()).collect();
+    Ok(format!(
+        "Imported {added} nodes from {fname}{}\n",
+        if ids.is_empty() { String::new() } else { format!("; new branches: {}", ids.join(", ")) }
+    ))
+}
+
+fn new_node(id: &str, title: &str, body: &str, source: &str) -> Node {
+    Node {
+        id: id.into(),
+        parent: None,
+        title: title.into(),
+        body: body.into(),
+        sources: vec![source.into()],
+        date: None,
+        state: None,
+        order: 0,
+        note: None,
+    }
+}
+
+/// Adds outline items under `parent` with core-assigned ids; returns how many nodes were added.
+fn add_items(s: &mut Store, items: &[outline::Item], parent: &str, source: &str) -> Result<usize, (usize, String)> {
+    let mut n = 0;
+    for (order, item) in items.iter().enumerate() {
+        let id = node::unique_slug(&item.title, |x| s.id_taken(x));
+        let node = Node {
+            parent: Some(parent.into()),
+            order: order as u32,
+            ..new_node(&id, &item.title, &item.detail, source)
+        };
+        node.validate().map_err(|e| (item.line, e))?;
+        s.nodes.insert(id.clone(), node);
+        n += 1 + add_items(s, &item.children, &id, source)?;
+    }
+    Ok(n)
 }
