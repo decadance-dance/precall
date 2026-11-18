@@ -29,7 +29,10 @@ impl Node {
     /// Checks a stored (non-branch) node; the error names the field.
     pub fn validate(&self) -> Result<(), String> {
         if !is_slug(&self.id) {
-            return Err(format!("id `{}` is not a slug (a-z, 0-9, single dashes)", self.id));
+            return Err(format!(
+                "id `{}` is not a slug (a-z, 0-9, single dashes)",
+                self.id
+            ));
         }
         match &self.parent {
             Some(p) if is_slug(p) => {}
@@ -72,8 +75,12 @@ fn check_text(field: &str, s: &str, max: usize) -> Result<(), String> {
 
 pub fn is_slug(s: &str) -> bool {
     !s.is_empty()
-        && s.split('-')
-            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()))
+        && s.split('-').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        })
 }
 
 /// `<kind>:<locator>` (spec §3.3).
@@ -83,8 +90,13 @@ pub fn check_source(r: &str) -> Result<(), String> {
         return bad();
     };
     let kind_ok = kind.starts_with(|c: char| c.is_ascii_lowercase())
-        && kind.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
-    if !kind_ok || locator.is_empty() || locator.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        && kind
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    if !kind_ok
+        || locator.is_empty()
+        || locator.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
         return bad();
     }
     // limit: M1 checks the format only; that the kind has an owning collector comes with plugins (M2).
@@ -94,12 +106,21 @@ pub fn check_source(r: &str) -> Result<(), String> {
 pub fn check_date(d: &str) -> Result<(), String> {
     let b = d.as_bytes();
     let digits = |r: std::ops::Range<usize>| b[r].iter().all(u8::is_ascii_digit);
-    let shape = b.len() == 10 && b[4] == b'-' && b[7] == b'-' && digits(0..4) && digits(5..7) && digits(8..10);
+    let shape = b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && digits(0..4)
+        && digits(5..7)
+        && digits(8..10);
     let in_range = shape && {
         let (m, day): (u32, u32) = (d[5..7].parse().unwrap_or(0), d[8..10].parse().unwrap_or(0));
         (1..=12).contains(&m) && (1..=31).contains(&day)
     };
-    if in_range { Ok(()) } else { Err(format!("date `{d}` is not YYYY-MM-DD")) }
+    if in_range {
+        Ok(())
+    } else {
+        Err(format!("date `{d}` is not YYYY-MM-DD"))
+    }
 }
 
 /// A slug from `title` that `taken` does not hold yet.
@@ -114,7 +135,11 @@ pub fn unique_slug(title: &str, taken: impl Fn(&str) -> bool) -> String {
         }
     }
     if slug.len() > MAX {
-        let cut = if slug.as_bytes()[MAX] == b'-' { MAX } else { slug[..MAX].rfind('-').unwrap_or(MAX) };
+        let cut = if slug.as_bytes()[MAX] == b'-' {
+            MAX
+        } else {
+            slug[..MAX].rfind('-').unwrap_or(MAX)
+        };
         slug.truncate(cut);
     }
     let slug = slug.trim_end_matches('-');
@@ -122,7 +147,10 @@ pub fn unique_slug(title: &str, taken: impl Fn(&str) -> bool) -> String {
     if !taken(base) {
         return base.to_string();
     }
-    (2..).map(|n| format!("{base}-{n}")).find(|s| !taken(s)).unwrap_or_default()
+    (2..)
+        .map(|n| format!("{base}-{n}"))
+        .find(|s| !taken(s))
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -191,7 +219,14 @@ mod tests {
     #[test]
     fn date_and_state() {
         assert_eq!(check_date("2026-02-28"), Ok(()));
-        for bad in ["2026-2-28", "2026-13-01", "2026-00-10", "2026-01-32", "26-01-01", "2026-01-01T"] {
+        for bad in [
+            "2026-2-28",
+            "2026-13-01",
+            "2026-00-10",
+            "2026-01-32",
+            "26-01-01",
+            "2026-01-01T",
+        ] {
             assert!(check_date(bad).is_err(), "{bad}");
         }
         let mut n = node();
@@ -217,7 +252,10 @@ mod tests {
 
     #[test]
     fn unique_slug_from_title() {
-        assert_eq!(unique_slug("Search Service (v2)!", |_| false), "search-service-v2");
+        assert_eq!(
+            unique_slug("Search Service (v2)!", |_| false),
+            "search-service-v2"
+        );
         assert_eq!(unique_slug("Ünïcode only", |_| false), "n-code-only");
         assert_eq!(unique_slug("!!!", |_| false), "node");
         let taken = ["search", "search-2"];

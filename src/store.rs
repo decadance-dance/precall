@@ -35,14 +35,23 @@ impl Store {
         for entry in entries {
             let name = entry.file_name().to_string_lossy().into_owned();
             let rel = format!("map/{name}");
-            if !name.strip_suffix(".jsonl").is_some_and(|b| branches.iter().any(|x| x.id == b)) {
-                bail!("{rel}: not `<branch-id>.jsonl` for a branch of {}", config::STORE_CONFIG);
+            if !name
+                .strip_suffix(".jsonl")
+                .is_some_and(|b| branches.iter().any(|x| x.id == b))
+            {
+                bail!(
+                    "{rel}: not `<branch-id>.jsonl` for a branch of {}",
+                    config::STORE_CONFIG
+                );
             }
-            let text = std::fs::read_to_string(entry.path()).with_context(|| format!("reading {rel}"))?;
+            let text =
+                std::fs::read_to_string(entry.path()).with_context(|| format!("reading {rel}"))?;
             for (i, line) in text.lines().enumerate() {
                 let at = || format!("{rel} line {}", i + 1);
                 let node: Node = serde_json::from_str(line).with_context(at)?;
-                node.validate().map_err(anyhow::Error::msg).with_context(at)?;
+                node.validate()
+                    .map_err(anyhow::Error::msg)
+                    .with_context(at)?;
                 if nodes.contains_key(&node.id) {
                     bail!("{}: id `{}` is used twice", at(), node.id);
                 }
@@ -50,13 +59,19 @@ impl Store {
                 nodes.insert(node.id.clone(), node);
             }
         }
-        let store = Store { root: root.to_path_buf(), branches, nodes };
+        let store = Store {
+            root: root.to_path_buf(),
+            branches,
+            nodes,
+        };
         for (id, rel) in &file_of {
             let mut cur = id.as_str();
             for _ in 0..=store.nodes.len() {
                 match store.nodes.get(cur).and_then(|n| n.parent.as_deref()) {
                     Some(p) if store.nodes.contains_key(p) => cur = p,
-                    Some(p) => bail!("{rel}: node `{id}` has parent `{p}`, which is not in the map"),
+                    Some(p) => {
+                        bail!("{rel}: node `{id}` has parent `{p}`, which is not in the map")
+                    }
                     None => break,
                 }
             }
@@ -72,7 +87,8 @@ impl Store {
 
     /// Adds a branch to the skeleton in memory; the caller writes it to the config.
     pub fn add_branch(&mut self, b: BranchDef) {
-        self.nodes.insert(b.id.clone(), branch_node(&b, self.branches.len()));
+        self.nodes
+            .insert(b.id.clone(), branch_node(&b, self.branches.len()));
         self.branches.push(b);
     }
 
@@ -87,7 +103,9 @@ impl Store {
 
     /// The node, or exit 1 when the map has no such id.
     pub fn get(&self, id: &str) -> Result<&Node> {
-        self.nodes.get(id).ok_or_else(|| error::not_found(format!("no node `{id}` in the map")))
+        self.nodes
+            .get(id)
+            .ok_or_else(|| error::not_found(format!("no node `{id}` in the map")))
     }
 
     /// The branch a node sits under (the node itself for a branch).
@@ -146,7 +164,8 @@ impl Store {
         for b in &self.branches {
             let path = dir.join(format!("{}.jsonl", b.id));
             match files.get(b.id.as_str()) {
-                Some(text) => std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?,
+                Some(text) => std::fs::write(&path, text)
+                    .with_context(|| format!("writing {}", path.display()))?,
                 None if path.exists() => std::fs::remove_file(&path)?,
                 None => {}
             }
@@ -171,7 +190,12 @@ impl Store {
 pub fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let o = git_cmd(dir, args).output().context("running git")?;
     if !o.status.success() {
-        bail!("git {} failed in {}: {}", args.join(" "), dir.display(), String::from_utf8_lossy(&o.stderr).trim());
+        bail!(
+            "git {} failed in {}: {}",
+            args.join(" "),
+            dir.display(),
+            String::from_utf8_lossy(&o.stderr).trim()
+        );
     }
     String::from_utf8(o.stdout).context("git printed non-UTF-8 output")
 }
@@ -182,16 +206,28 @@ fn git_status(dir: &Path, args: &[&str]) -> Result<bool> {
     match o.status.code() {
         Some(0) => Ok(true),
         Some(1) => Ok(false),
-        _ => bail!("git {} failed in {}: {}", args.join(" "), dir.display(), String::from_utf8_lossy(&o.stderr).trim()),
+        _ => bail!(
+            "git {} failed in {}: {}",
+            args.join(" "),
+            dir.display(),
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
     }
 }
 
 fn git_cmd(dir: &Path, args: &[&str]) -> std::process::Command {
     let mut c = std::process::Command::new("git");
-    c.args(["-c", "user.name=rrecall", "-c", "user.email=rrecall@localhost", "-c", "commit.gpgsign=false"])
-        .args(["-c", "init.defaultBranch=main", "-C"])
-        .arg(dir)
-        .args(args);
+    c.args([
+        "-c",
+        "user.name=rrecall",
+        "-c",
+        "user.email=rrecall@localhost",
+        "-c",
+        "commit.gpgsign=false",
+    ])
+    .args(["-c", "init.defaultBranch=main", "-C"])
+    .arg(dir)
+    .args(args);
     c
 }
 
@@ -240,7 +276,10 @@ mod tests {
         assert_eq!(s.nodes.len(), 6 + 3);
         assert_eq!(s.nodes["layout"].sources, [BRANCH_SOURCE]);
         s.save().unwrap();
-        assert_eq!(std::fs::read_to_string(t.0.join("map/layout.jsonl")).unwrap(), LAYOUT);
+        assert_eq!(
+            std::fs::read_to_string(t.0.join("map/layout.jsonl")).unwrap(),
+            LAYOUT
+        );
         let files: Vec<_> = std::fs::read_dir(t.0.join("map")).unwrap().collect();
         assert_eq!(files.len(), 1, "empty branches get no file");
     }
@@ -256,18 +295,40 @@ mod tests {
         let layout = std::fs::read_to_string(t.0.join("map/layout.jsonl")).unwrap();
         assert_eq!(layout.lines().count(), 2);
         assert!(layout.starts_with(r#"{"id":"api","#));
-        assert!(std::fs::read_to_string(t.0.join("map/done.jsonl")).unwrap().starts_with(r#"{"id":"web","#));
+        assert!(
+            std::fs::read_to_string(t.0.join("map/done.jsonl"))
+                .unwrap()
+                .starts_with(r#"{"id":"web","#)
+        );
     }
 
     #[test]
     fn corrupt_map_line_names_file_and_line() {
         let cases = [
-            ("layout.jsonl", "{\"id\":\"x\"}\n", "map/layout.jsonl line 1"),
-            ("layout.jsonl", &format!("{LAYOUT}{{\"id\":\"api\",\"parent\":\"layout\",\"title\":\"Dup\",\"body\":\"\",\"sources\":[\"import:o.txt\"],\"order\":2}}\n"), "line 4"),
+            (
+                "layout.jsonl",
+                "{\"id\":\"x\"}\n",
+                "map/layout.jsonl line 1",
+            ),
+            (
+                "layout.jsonl",
+                &format!(
+                    "{LAYOUT}{{\"id\":\"api\",\"parent\":\"layout\",\"title\":\"Dup\",\"body\":\"\",\"sources\":[\"import:o.txt\"],\"order\":2}}\n"
+                ),
+                "line 4",
+            ),
             ("nope.jsonl", LAYOUT, "map/nope.jsonl"),
             ("done.jsonl", LAYOUT, "map/done.jsonl"),
-            ("layout.jsonl", r#"{"id":"a","parent":"ghost","title":"A","body":"","sources":["import:o.txt"],"order":0}"#, "ghost"),
-            ("layout.jsonl", r#"{"id":"a","parent":"layout","title":"A","body":"","sources":["import:o.txt"],"order":0,"extra":1}"#, "line 1"),
+            (
+                "layout.jsonl",
+                r#"{"id":"a","parent":"ghost","title":"A","body":"","sources":["import:o.txt"],"order":0}"#,
+                "ghost",
+            ),
+            (
+                "layout.jsonl",
+                r#"{"id":"a","parent":"layout","title":"A","body":"","sources":["import:o.txt"],"order":0,"extra":1}"#,
+                "line 1",
+            ),
         ];
         for (file, text, want) in cases {
             let t = store_with(&[(file, text)]);

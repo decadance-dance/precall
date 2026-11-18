@@ -26,13 +26,25 @@ pub fn path(store: &Store, id: &str) -> String {
 }
 
 fn descendant_count(kids: &Kids, id: &str) -> usize {
-    kids.get(id).into_iter().flatten().map(|k| 1 + descendant_count(kids, &k.id)).sum()
+    kids.get(id)
+        .into_iter()
+        .flatten()
+        .map(|k| 1 + descendant_count(kids, &k.id))
+        .sum()
 }
 
 /// `- Title (id)`, with `+N` when N descendants are not shown.
 fn title_line(kids: &Kids, n: &Node, hidden: bool) -> String {
-    let more = if hidden { descendant_count(kids, &n.id) } else { 0 };
-    if more > 0 { format!("- {} ({}) +{more}", n.title, n.id) } else { format!("- {} ({})", n.title, n.id) }
+    let more = if hidden {
+        descendant_count(kids, &n.id)
+    } else {
+        0
+    };
+    if more > 0 {
+        format!("- {} ({}) +{more}", n.title, n.id)
+    } else {
+        format!("- {} ({})", n.title, n.id)
+    }
 }
 
 /// The tree of titles and ids, `depth` levels deep (1 = branches only).
@@ -40,8 +52,19 @@ pub fn ls(store: &Store, depth: usize, json: bool) -> String {
     let kids = store.child_map();
     let mut lines = Vec::new();
     let mut nodes = Vec::new();
-    fn walk<'a>(kids: &Kids<'a>, n: &'a Node, level: usize, depth: usize, lines: &mut Vec<String>, nodes: &mut Vec<Value>) {
-        lines.push(format!("{}{}", "  ".repeat(level - 1), title_line(kids, n, level == depth)));
+    fn walk<'a>(
+        kids: &Kids<'a>,
+        n: &'a Node,
+        level: usize,
+        depth: usize,
+        lines: &mut Vec<String>,
+        nodes: &mut Vec<Value>,
+    ) {
+        lines.push(format!(
+            "{}{}",
+            "  ".repeat(level - 1),
+            title_line(kids, n, level == depth)
+        ));
         nodes.push(match &n.parent {
             Some(p) => json!({ "id": n.id, "parent": p, "title": n.title }),
             None => json!({ "id": n.id, "title": n.title }),
@@ -55,7 +78,11 @@ pub fn ls(store: &Store, depth: usize, json: bool) -> String {
     for b in store.roots() {
         walk(&kids, b, 1, depth.max(1), &mut lines, &mut nodes);
     }
-    if json { format!("{}\n", json!({ "nodes": nodes })) } else { lines.join("\n") + "\n" }
+    if json {
+        format!("{}\n", json!({ "nodes": nodes }))
+    } else {
+        lines.join("\n") + "\n"
+    }
 }
 
 fn md_block(store: &Store, kids: &Kids, n: &Node, with_children: bool) -> String {
@@ -88,18 +115,35 @@ pub fn json_node(store: &Store, kids: &Kids, n: &Node) -> Value {
     let mut v = serde_json::to_value(n).unwrap_or(Value::Null);
     if let Value::Object(m) = &mut v {
         m.insert("path".into(), Value::String(path(store, &n.id)));
-        let ids: Vec<&str> = kids.get(n.id.as_str()).into_iter().flatten().map(|k| k.id.as_str()).collect();
+        let ids: Vec<&str> = kids
+            .get(n.id.as_str())
+            .into_iter()
+            .flatten()
+            .map(|k| k.id.as_str())
+            .collect();
         m.insert("children".into(), json!(ids));
     }
     v
 }
 
 /// One node and its subtree to `depth` (0 = the node, its children as titles).
-pub fn show(store: &Store, id: &str, depth: usize, max_tokens: Option<usize>, json: bool) -> Result<String> {
+pub fn show(
+    store: &Store,
+    id: &str,
+    depth: usize,
+    max_tokens: Option<usize>,
+    json: bool,
+) -> Result<String> {
     let root = store.get(id)?;
     let kids = store.child_map();
     let mut order: Vec<(&Node, usize)> = Vec::new();
-    fn walk<'a>(kids: &Kids<'a>, n: &'a Node, rel: usize, depth: usize, order: &mut Vec<(&'a Node, usize)>) {
+    fn walk<'a>(
+        kids: &Kids<'a>,
+        n: &'a Node,
+        rel: usize,
+        depth: usize,
+        order: &mut Vec<(&'a Node, usize)>,
+    ) {
         order.push((n, rel));
         if rel < depth {
             for k in kids.get(n.id.as_str()).into_iter().flatten() {
@@ -111,7 +155,11 @@ pub fn show(store: &Store, id: &str, depth: usize, max_tokens: Option<usize>, js
     let pieces: Vec<String> = order
         .iter()
         .map(|(n, rel)| {
-            if json { json_node(store, &kids, n).to_string() } else { md_block(store, &kids, n, *rel == depth) }
+            if json {
+                json_node(store, &kids, n).to_string()
+            } else {
+                md_block(store, &kids, n, *rel == depth)
+            }
         })
         .collect();
     let footer = |keep: usize| -> String {
@@ -132,7 +180,11 @@ pub fn show(store: &Store, id: &str, depth: usize, max_tokens: Option<usize>, js
             let ids: Vec<&str> = left.iter().map(|(n, _)| n.id.as_str()).collect();
             json!(ids).to_string()
         } else {
-            format!("[{} nodes left out; see them with: {}]\n", left.len(), tops.join(", "))
+            format!(
+                "[{} nodes left out; see them with: {}]\n",
+                left.len(),
+                tops.join(", ")
+            )
         }
     };
     let keep = match max_tokens {
@@ -183,6 +235,9 @@ pub fn find(store: &Store, text: &str, json: bool) -> Result<String> {
         let nodes: Vec<Value> = hits.iter().map(|n| json_node(store, &kids, n)).collect();
         format!("{}\n", json!({ "nodes": nodes }))
     } else {
-        hits.iter().map(|n| md_block(store, &kids, n, false)).collect::<Vec<_>>().join("\n")
+        hits.iter()
+            .map(|n| md_block(store, &kids, n, false))
+            .collect::<Vec<_>>()
+            .join("\n")
     })
 }

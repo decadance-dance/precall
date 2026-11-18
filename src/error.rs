@@ -17,15 +17,27 @@ impl fmt::Display for Fail {
 impl std::error::Error for Fail {}
 
 pub fn not_found(msg: impl Into<String>) -> anyhow::Error {
-    Fail { code: 1, msg: msg.into() }.into()
+    Fail {
+        code: 1,
+        msg: msg.into(),
+    }
+    .into()
 }
 
 pub fn usage(msg: impl Into<String>) -> anyhow::Error {
-    Fail { code: 2, msg: msg.into() }.into()
+    Fail {
+        code: 2,
+        msg: msg.into(),
+    }
+    .into()
 }
 
 pub fn no_map(msg: impl Into<String>) -> anyhow::Error {
-    Fail { code: 3, msg: msg.into() }.into()
+    Fail {
+        code: 3,
+        msg: msg.into(),
+    }
+    .into()
 }
 
 /// The process exit code for an error.

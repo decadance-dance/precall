@@ -84,9 +84,23 @@ fn main() -> ExitCode {
         Cmd::Init { project } => commands::init(project.as_deref(), p),
         Cmd::Import { outline } => commands::import(p, outline),
         Cmd::Ls { depth, json } => commands::ls(p, *depth as usize, *json),
-        Cmd::Show { id, depth, max_tokens, json } => commands::show(p, id, *depth as usize, *max_tokens, *json),
+        Cmd::Show {
+            id,
+            depth,
+            max_tokens,
+            json,
+        } => commands::show(p, id, *depth as usize, *max_tokens, *json),
         Cmd::Find { text, json } => commands::find(p, text, *json),
-        _ => Err(anyhow::anyhow!("not implemented yet")),
+        Cmd::Why { id, json } => commands::why(p, id, *json),
+        Cmd::Recent { since, json } => commands::recent(p, since, *json),
+        Cmd::Status { json } => commands::status(p, *json),
+        Cmd::Note { id, text } => commands::note(p, id, text),
+        Cmd::Rm {
+            id,
+            reason,
+            recursive,
+        } => commands::rm(p, id, reason.as_deref(), *recursive),
+        Cmd::AgentInstructions => Ok(commands::AGENT_INSTRUCTIONS.to_string()),
     };
     match out {
         Ok(text) => {

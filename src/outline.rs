@@ -38,14 +38,24 @@ pub fn parse(text: &str) -> Result<Vec<Item>, String> {
             close(&mut stack, &mut roots);
         }
         if sibling_indent.is_some_and(|d| d != indent) {
-            return Err(format!("line {line}: indent of {indent} spaces matches no level above it"));
+            return Err(format!(
+                "line {line}: indent of {indent} spaces matches no level above it"
+            ));
         }
         let (title, detail) = content.split_once('|').unwrap_or((content, ""));
         let (title, detail) = (title.trim(), detail.trim());
         if title.is_empty() {
             return Err(format!("line {line}: the title before `|` is empty"));
         }
-        stack.push((indent, Item { line, title: title.into(), detail: detail.into(), children: Vec::new() }));
+        stack.push((
+            indent,
+            Item {
+                line,
+                title: title.into(),
+                detail: detail.into(),
+                children: Vec::new(),
+            },
+        ));
     }
     while !stack.is_empty() {
         close(&mut stack, &mut roots);
@@ -58,12 +68,18 @@ mod tests {
     use super::*;
 
     fn item(line: usize, title: &str, detail: &str, children: Vec<Item>) -> Item {
-        Item { line, title: title.into(), detail: detail.into(), children }
+        Item {
+            line,
+            title: title.into(),
+            detail: detail.into(),
+            children,
+        }
     }
 
     #[test]
     fn nesting_details_and_blank_lines() {
-        let text = "Layout\n  API | HTTP API | v2\n    Auth|Tokens\n\n  Web\nServices | What runs?\n";
+        let text =
+            "Layout\n  API | HTTP API | v2\n    Auth|Tokens\n\n  Web\nServices | What runs?\n";
         assert_eq!(
             parse(text).unwrap(),
             vec![
@@ -71,7 +87,15 @@ mod tests {
                     1,
                     "Layout",
                     "",
-                    vec![item(2, "API", "HTTP API | v2", vec![item(3, "Auth", "Tokens", vec![])]), item(5, "Web", "", vec![])]
+                    vec![
+                        item(
+                            2,
+                            "API",
+                            "HTTP API | v2",
+                            vec![item(3, "Auth", "Tokens", vec![])]
+                        ),
+                        item(5, "Web", "", vec![])
+                    ]
                 ),
                 item(6, "Services", "What runs?", vec![]),
             ]

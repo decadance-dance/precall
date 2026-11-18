@@ -19,16 +19,36 @@ pub struct BranchDef {
 
 pub fn default_branches() -> Vec<BranchDef> {
     [
-        ("layout", "Layout", "Where does something live?", "one node per component, directory or service"),
-        ("how-it-works", "How it works", "How does something work?", "one node per mechanism or flow"),
-        ("people", "People", "Who is responsible for what?", "one node per person or team, with their areas"),
+        (
+            "layout",
+            "Layout",
+            "Where does something live?",
+            "one node per component, directory or service",
+        ),
+        (
+            "how-it-works",
+            "How it works",
+            "How does something work?",
+            "one node per mechanism or flow",
+        ),
+        (
+            "people",
+            "People",
+            "Who is responsible for what?",
+            "one node per person or team, with their areas",
+        ),
         (
             "done",
             "Done",
             "What was done?",
             "one node per release or finished stream of work, not per commit or PR",
         ),
-        ("blocked", "Blocked", "What is open or blocked, and on what?", "one node per blocker or open question"),
+        (
+            "blocked",
+            "Blocked",
+            "What is open or blocked, and on what?",
+            "one node per blocker or open question",
+        ),
         (
             "decisions",
             "Decisions",
@@ -66,8 +86,10 @@ struct SkeletonConfig {
 /// The default branches followed by the config's `[[skeleton.branch]]` entries.
 pub fn load_branches(store: &Path) -> Result<Vec<BranchDef>> {
     let path = store.join(STORE_CONFIG);
-    let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let cfg: StoreConfig = toml::from_str(&text).with_context(|| format!("{STORE_CONFIG} does not parse"))?;
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let cfg: StoreConfig =
+        toml::from_str(&text).with_context(|| format!("{STORE_CONFIG} does not parse"))?;
     let mut branches = default_branches();
     for b in cfg.skeleton.branch {
         let problem = if !crate::node::is_slug(&b.id) {
@@ -137,7 +159,9 @@ pub fn user_config_path() -> Result<PathBuf> {
 pub fn load_user_config() -> Result<UserConfig> {
     let path = user_config_path()?;
     match std::fs::read_to_string(&path) {
-        Ok(text) => toml::from_str(&text).with_context(|| format!("{} does not parse", path.display())),
+        Ok(text) => {
+            toml::from_str(&text).with_context(|| format!("{} does not parse", path.display()))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(UserConfig::default()),
         Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
     }
@@ -152,15 +176,24 @@ impl UserConfig {
     pub fn store_path(&self, name: &str) -> Result<PathBuf> {
         match self.project(name).and_then(|p| p.store.clone()) {
             Some(p) if p.is_absolute() => Ok(p),
-            Some(p) => anyhow::bail!("user config: store `{}` of project `{name}` is not an absolute path", p.display()),
-            None => Ok(xdg_dir("XDG_DATA_HOME", ".local/share")?.join("rrecall").join(name)),
+            Some(p) => anyhow::bail!(
+                "user config: store `{}` of project `{name}` is not an absolute path",
+                p.display()
+            ),
+            None => Ok(xdg_dir("XDG_DATA_HOME", ".local/share")?
+                .join("rrecall")
+                .join(name)),
         }
     }
 }
 
 /// A project name doubles as a directory name, so it may not climb or nest.
 pub fn check_project_name(name: &str) -> Result<()> {
-    if name.is_empty() || name.starts_with('.') || name.contains(['/', '\\']) || name.chars().any(char::is_control) {
+    if name.is_empty()
+        || name.starts_with('.')
+        || name.contains(['/', '\\'])
+        || name.chars().any(char::is_control)
+    {
         return Err(crate::error::usage(format!(
             "project name `{name}` must be a plain directory name (no `/`, not starting with `.`)"
         )));
@@ -183,7 +216,9 @@ pub fn origin_url(dir: &Path) -> Option<String> {
 /// Project name and store directory from `--project`, `RRECALL_PROJECT`, or the current repo's origin (spec §2).
 pub fn resolve_project(flag: Option<&str>) -> Result<(String, PathBuf)> {
     let user = load_user_config()?;
-    let env = std::env::var("RRECALL_PROJECT").ok().filter(|v| !v.is_empty());
+    let env = std::env::var("RRECALL_PROJECT")
+        .ok()
+        .filter(|v| !v.is_empty());
     let name = match flag.map(str::to_string).or(env) {
         Some(name) => name,
         None => {
@@ -235,11 +270,25 @@ mod tests {
             question: "Which services run?".into(),
             granularity: "one node per service".into(),
         };
-        let text = format!("# comment kept\n[[plugins]]\nid = \"repo\"\n\n{}", branch_toml(&extra));
+        let text = format!(
+            "# comment kept\n[[plugins]]\nid = \"repo\"\n\n{}",
+            branch_toml(&extra)
+        );
         std::fs::write(t.0.join(STORE_CONFIG), text).unwrap();
         let b = load_branches(&t.0).unwrap();
         let ids: Vec<_> = b.iter().map(|b| b.id.as_str()).collect();
-        assert_eq!(ids, ["layout", "how-it-works", "people", "done", "blocked", "decisions", "services"]);
+        assert_eq!(
+            ids,
+            [
+                "layout",
+                "how-it-works",
+                "people",
+                "done",
+                "blocked",
+                "decisions",
+                "services"
+            ]
+        );
         assert_eq!(b[6], extra);
         assert_eq!(b[0].title, "Layout");
         assert_eq!(b[0].question, "Where does something live?");
