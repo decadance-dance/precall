@@ -57,10 +57,9 @@ fn run(
 ) -> Result<PathBuf> {
     let argv = inst.argv(template);
     let (program, args) = argv.split_first().context("empty argv")?;
-    let in_tree = template
-        .first()
-        .is_some_and(|p| p.contains('/') && !Path::new(p).is_absolute());
-    let path = resolve_program(program, in_tree.then_some(inst.plugin.dir.as_path()))?;
+    let cwd = std::env::current_dir().context("reading the working directory")?;
+    let path_var = std::env::var_os("PATH").unwrap_or_default();
+    let path = resolve_program(program, &inst.plugin.dir, &path_var, &cwd)?;
     let stdin = serde_json::to_vec(input)?;
     let state = ctx.store.join("state").join(&inst.id);
     std::fs::create_dir_all(&state).with_context(|| format!("creating {}", state.display()))?;
@@ -136,39 +135,77 @@ fn run(
     Ok(out_path)
 }
 
-/// The file `program` names: a path as it is, a bare name looked up on `PATH`. A program inside
-/// the plugin (`tree`) must stay inside it with links resolved. It must be a native executable or
-/// a `#!` script: given anything else, the C library's exec falls back to `/bin/sh`, and §6.3
-/// promises that a plugin never runs through a shell.
-fn resolve_program(program: &str, tree: Option<&Path>) -> Result<PathBuf> {
-    let path = if program.contains('/') {
-        PathBuf::from(program)
-    } else {
-        let path = std::env::var_os("PATH").unwrap_or_default();
-        std::env::split_paths(&path)
-            .map(|d| d.join(program))
-            .find(|p| {
-                std::fs::metadata(p)
-                    .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-            })
-            .with_context(|| format!("`{program}` is not on PATH"))?
-    };
-    if let Some(tree) = tree {
-        let real = path
+/// The absolute path `program` (an expanded argv[0]) names, checked once and then spawned as
+/// it is: an absolute path stays as it is; a relative one with a `/` is taken from the
+/// (canonical) plugin directory and must stay inside it with links resolved; a bare name is
+/// looked up on `path_var`, relative entries against `cwd`, rrecall's working directory.
+/// The file must be a native executable or a `#!` script whose interpreter is one: given
+/// anything else, the C library's exec falls back to `/bin/sh`, and §6.3 promises that a plugin
+/// never runs through a shell.
+fn resolve_program(
+    program: &str,
+    plugin_dir: &Path,
+    path_var: &std::ffi::OsStr,
+    cwd: &Path,
+) -> Result<PathBuf> {
+    let p = Path::new(program);
+    let path = if p.is_absolute() {
+        p.to_path_buf()
+    } else if program.contains('/') {
+        let real = plugin_dir
+            .join(p)
             .canonicalize()
             .with_context(|| format!("cannot start `{program}`"))?;
-        if !real.starts_with(tree) {
+        if !real.starts_with(plugin_dir) {
             bail!(
                 "`{program}` resolves to {}, outside the plugin directory",
                 real.display()
             );
         }
+        real
+    } else {
+        std::env::split_paths(path_var)
+            .map(|d| cwd.join(d).join(program))
+            .find(|p| is_executable(p))
+            .with_context(|| format!("`{program}` is not on PATH"))?
+    };
+    let head = read_head(&path).with_context(|| format!("cannot start `{program}`"))?;
+    if let Some(line) = head.strip_prefix(b"#!") {
+        let line = line.split(|b| *b == b'\n').next().unwrap_or_default();
+        let line = String::from_utf8_lossy(line);
+        let interp = line.split([' ', '\t', '\r']).find(|w| !w.is_empty());
+        match interp {
+            Some(i)
+                if Path::new(i).is_absolute()
+                    && is_executable(Path::new(i))
+                    && is_native(Path::new(i)) => {}
+            _ => bail!(
+                "`{program}` does not name a native interpreter on its `#!` line (an absolute path to an executable); rrecall runs no program through a shell"
+            ),
+        }
+    } else if !is_native(&path) {
+        bail!(
+            "`{program}` is neither a native executable nor a script starting with `#!`; rrecall runs no program through a shell"
+        );
     }
-    let mut magic = [0u8; 4];
-    let n = File::open(&path)
-        .and_then(|mut f| std::io::Read::read(&mut f, &mut magic))
-        .with_context(|| format!("cannot start `{program}`"))?;
-    let native = [
+    Ok(path)
+}
+
+fn is_executable(p: &Path) -> bool {
+    std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+/// The first bytes of a file: enough for a magic number and a `#!` line.
+fn read_head(p: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut head = Vec::new();
+    File::open(p)?.take(256).read_to_end(&mut head)?;
+    Ok(head)
+}
+
+/// An ELF or Mach-O (thin or universal) executable.
+fn is_native(p: &Path) -> bool {
+    const MAGIC: [[u8; 4]; 6] = [
         *b"\x7fELF",
         [0xfe, 0xed, 0xfa, 0xce],
         [0xfe, 0xed, 0xfa, 0xcf],
@@ -176,12 +213,7 @@ fn resolve_program(program: &str, tree: Option<&Path>) -> Result<PathBuf> {
         [0xcf, 0xfa, 0xed, 0xfe],
         [0xca, 0xfe, 0xba, 0xbe],
     ];
-    if !(magic.starts_with(b"#!") || n == 4 && native.contains(&magic)) {
-        bail!(
-            "`{program}` is neither a native executable nor a script starting with `#!`; rrecall runs no program through a shell"
-        );
-    }
-    Ok(path)
+    read_head(p).is_ok_and(|h| h.len() >= 4 && MAGIC.iter().any(|m| h.starts_with(m)))
 }
 
 /// Kills `child`, which leads its own process group, and everything it started.
@@ -605,6 +637,119 @@ mod tests {
             e.contains("plugin `prs`") && e.contains("outside the plugin directory"),
             "{e}"
         );
+    }
+
+    #[test]
+    fn round2_a_shebang_must_name_a_native_interpreter() {
+        let w = World::new();
+        let sh = "/bin/sh";
+        assert!(std::path::Path::new(sh).is_file());
+        for head in [
+            "#!\n",
+            "#!   \n",
+            "#!sh\n",
+            "#!/nonexistent/sh\n",
+            "#!/etc/hosts\n",
+        ] {
+            let inst = script_plugin(
+                &w,
+                "gate",
+                &format!("{head}printf '%s' '{{\"proposals\":[]}}'\n"),
+            );
+            let e = format!(
+                "{:#}",
+                call(&w.ctx(), &inst, "collect", &command(&inst), &"{}").unwrap_err()
+            );
+            assert!(
+                e.contains("plugin `prs`") && e.contains("interpreter"),
+                "{head:?}: {e}"
+            );
+        }
+        // A script interpreter could itself fall back to the shell; only native ones run.
+        let wrapper = script_plugin(&w, "wrap", "#!/bin/sh\nexec /bin/sh \"$@\"\n");
+        let wrap = wrapper.plugin.dir.join("wrap");
+        let inst = script_plugin(
+            &w,
+            "gate",
+            &format!("#!{}\nprintf '{{}}'\n", wrap.display()),
+        );
+        let e = format!(
+            "{:#}",
+            call(&w.ctx(), &inst, "collect", &command(&inst), &"{}").unwrap_err()
+        );
+        assert!(e.contains("interpreter"), "{e}");
+        for head in ["#!/bin/sh\n", "#! /bin/sh -e\n", "#!/usr/bin/env sh\n"] {
+            let ok = script_plugin(
+                &w,
+                "gate",
+                &format!("{head}printf '%s' '{{\"proposals\":[]}}'\n"),
+            );
+            assert_eq!(
+                call(&w.ctx(), &ok, "collect", &command(&ok), &"{}").unwrap(),
+                "{\"proposals\":[]}",
+                "{head:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn round2_an_expanded_relative_program_stays_in_the_plugin() {
+        let w = World::new();
+        let elsewhere = w.t.0.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("run"), "#!/bin/sh\nprintf '{}'\n").unwrap();
+        std::fs::set_permissions(
+            elsewhere.join("run"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        w.plugin(
+            "gh",
+            "[collector]\nscope = [\"done\"]\nsource_kinds = [\"gh-pr\"]\nfingerprint = [\"git\"]\ncommand = [\"{label-x}\"]\n",
+        );
+        std::os::unix::fs::symlink(elsewhere.join("run"), w.store().join("plugins/gh/link"))
+            .unwrap();
+        let cfg: crate::config::StoreConfig = toml::from_str(
+            "[[plugins]]\nid = \"prs\"\nuse = \"gh\"\nparams = { label-x = \"./link\" }\n",
+        )
+        .unwrap();
+        let found = plugin::discover(&[w.store().join("plugins")]).unwrap();
+        let inst = plugin::instances(&cfg.plugins, &found, &cfg.branches().unwrap())
+            .unwrap()
+            .remove(0);
+        let e = format!(
+            "{:#}",
+            call(&w.ctx(), &inst, "collect", &command(&inst), &"{}").unwrap_err()
+        );
+        assert!(e.contains("outside the plugin directory"), "{e}");
+    }
+
+    #[test]
+    fn round2_a_relative_path_entry_resolves_once_from_the_lookup_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = TempDir::new();
+        let (caller, plugin_dir) = (t.0.join("caller"), t.0.join("plugin"));
+        for (dir, text) in [
+            (&caller, "#!/bin/sh\nprintf caller\n"),
+            (&plugin_dir, "printf plugin\n"),
+        ] {
+            std::fs::create_dir_all(dir.join("localbin")).unwrap();
+            std::fs::write(dir.join("localbin/gate"), text).unwrap();
+            std::fs::set_permissions(
+                dir.join("localbin/gate"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+        let path = resolve_program(
+            "gate",
+            &plugin_dir,
+            std::ffi::OsStr::new("localbin"),
+            &caller,
+        )
+        .unwrap();
+        assert_eq!(path, caller.join("localbin/gate"));
+        assert!(path.is_absolute());
     }
 
     #[test]

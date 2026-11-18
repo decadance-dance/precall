@@ -635,22 +635,14 @@ pub struct Instance {
 }
 
 impl Instance {
-    /// `template` with params filled; a program path with a `/` is taken from the plugin dir.
+    /// `template` with params filled. The program stays as written; the process runner resolves
+    /// it (a relative path against the plugin directory, a bare name on `PATH`).
     pub fn argv(&self, template: &[String]) -> Vec<String> {
         // Every placeholder was checked against the declared params when the manifest loaded.
-        let mut argv: Vec<String> = template
+        template
             .iter()
             .map(|a| fill(a, &self.params).unwrap_or_else(|_| a.clone()))
-            .collect();
-        if let Some(p) = argv.first_mut()
-            && p.contains('/')
-        {
-            *p = (self.plugin.dir.join(&*p).components())
-                .collect::<PathBuf>()
-                .to_string_lossy()
-                .into_owned();
-        }
-        argv
+            .collect()
     }
 
     pub fn params_json(&self) -> Params {
@@ -1329,7 +1321,7 @@ repo = ""
             ["gh", "api", "repos/o/r/events", "--jq", ".[0].id"]
         );
         let argv = gh.argv(c.command.as_deref().unwrap());
-        assert_eq!(argv[0], gh.plugin.dir.join("collect.sh").to_string_lossy());
+        assert_eq!(argv[0], "./collect.sh");
         assert_eq!(argv[1], "o/r");
     }
 
