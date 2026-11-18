@@ -8,6 +8,7 @@ rrecall is a Rust CLI that builds and keeps a versioned map of a software projec
 
 ## Read before
 - The first commit or PR: [git-flow.md](docs/workflow/git-flow.md). Branches, PRs into `develop` with a merge commit, cross-model review, what agents may push.
+- Cutting a release or shipping a hotfix: [releasing.md](docs/workflow/releasing.md); its notes: [release-notes.md](docs/workflow/release-notes.md).
 - Any change to the stability rules (how a run merges into the current map, when a node may be removed, how checks gate a commit): spec §4 and §5. Two runs over unchanged sources must produce the same map; a change there keeps that test green.
 - Any change to the plugin protocol (manifest fields, events, the JSON a plugin reads and writes): spec §6. Plugins outside this repo depend on it.
 
