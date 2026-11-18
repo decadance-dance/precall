@@ -40,6 +40,15 @@ pub fn no_map(msg: impl Into<String>) -> anyhow::Error {
     .into()
 }
 
+/// A run aborted before its commit: a manifest or config error, a hook's deny (spec §2).
+pub fn aborted(msg: impl Into<String>) -> anyhow::Error {
+    Fail {
+        code: 4,
+        msg: msg.into(),
+    }
+    .into()
+}
+
 /// The process exit code for an error.
 pub fn exit_code(e: &anyhow::Error) -> u8 {
     e.downcast_ref::<Fail>().map_or(1, |f| f.code)
