@@ -182,33 +182,29 @@ pub fn show(
             )
         }
     };
-    let keep = match max_tokens {
-        Some(max) => fit(&pieces, max, &footer),
-        None => pieces.len(),
-    };
-    let left = footer(keep);
-    Ok(if json {
-        let mut out = format!("{{\"nodes\":[{}]", pieces[..keep].join(","));
-        if !left.is_empty() {
-            out += &format!(",\"left_out\":{left}");
+    let render = |keep: usize| -> String {
+        let left = footer(keep);
+        if json {
+            let mut out = format!("{{\"nodes\":[{}]", pieces[..keep].join(","));
+            if !left.is_empty() {
+                out += &format!(",\"left_out\":{left}");
+            }
+            out + "}\n"
+        } else {
+            pieces[..keep].join("\n") + if left.is_empty() { "" } else { "\n" } + &left
         }
-        out + "}\n"
-    } else {
-        pieces[..keep].join("\n") + if left.is_empty() { "" } else { "\n" } + &left
-    })
-}
-
-/// How many leading pieces fit in `max` tokens (estimated as bytes / 4, rounded up) with the footer; never fewer than one.
-// limit: a first node larger than `max` is still printed, so a cut output can exceed `max`.
-fn fit(pieces: &[String], max: usize, footer: &dyn Fn(usize) -> String) -> usize {
-    let mut bytes: Vec<usize> = vec![0];
-    for p in pieces {
-        bytes.push(bytes.last().copied().unwrap_or(0) + p.len() + 1);
+    };
+    // The most leading nodes whose whole output, wrapper and cut marker included, fits the budget
+    // (tokens estimated as bytes / 4, rounded up); never fewer than one.
+    // limit: a first node larger than `max` is still printed, so a cut output can exceed `max`.
+    let mut keep = pieces.len();
+    if let Some(max) = max_tokens {
+        keep = 1;
+        while keep < pieces.len() && render(keep + 1).len().div_ceil(4) <= max {
+            keep += 1;
+        }
     }
-    (1..=pieces.len())
-        .rev()
-        .find(|&k| (bytes[k] + footer(k).len()).div_ceil(4) <= max)
-        .unwrap_or(1)
+    Ok(render(keep))
 }
 
 /// Nodes whose title or body contains `text` (case-insensitive), in tree order.
