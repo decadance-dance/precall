@@ -243,7 +243,14 @@ fn check_manifest(raw: RawManifest, dir: &Path) -> Result<Manifest, String> {
         ("runner", raw.runner.is_some()),
         ("hook", raw.hook.is_some()),
     ];
-    let kind_name = tables[raw.kind as usize].0;
+    let kind_name = match raw.kind {
+        Kind::Collector => "collector",
+        Kind::Check => "check",
+        Kind::Judge => "judge",
+        Kind::View => "view",
+        Kind::Runner => "runner",
+        Kind::Hook => "hook",
+    };
     if let Some((t, _)) = tables.iter().find(|(t, set)| *set && *t != kind_name) {
         return Err(format!("table [{t}] does not match kind `{kind_name}`"));
     }
@@ -754,14 +761,22 @@ pub fn load_with(store: &Path, user: &UserConfig, user_plugins: &Path) -> Result
         let cfg = config::load_store_config(store)?;
         let places = places(user, &cfg, store, user_plugins)?;
         let plugins = discover(&places.dirs)?;
-        instances(&cfg.plugins, &plugins, &cfg.branches()?).map_err(|e| match &places.untrusted {
-            Some(d) => e.context(format!(
-                "{} holds plugins that are not trusted: run `rrecall plugin trust {}`",
+        if let Some(d) = &places.untrusted
+            && let Some(e) = cfg
+                .plugins
+                .iter()
+                .find(|e| !plugins.contains_key(e.uses.as_deref().unwrap_or(&e.id)))
+        {
+            bail!(
+                "{}: plugin instance `{}`: no plugin `{}` was found; {} holds plugins that are not trusted: run `rrecall plugin trust {}`",
+                config::STORE_CONFIG,
+                e.id,
+                e.uses.as_deref().unwrap_or(&e.id),
                 d.display(),
                 d.display()
-            )),
-            None => e,
-        })
+            );
+        }
+        instances(&cfg.plugins, &plugins, &cfg.branches()?)
     })();
     loaded.map_err(|e| error::aborted(format!("{e:#}")))
 }
@@ -1297,5 +1312,19 @@ repo = ""
         let e = load_with(&store, &UserConfig::default(), &t.0.join("user")).unwrap_err();
         assert_eq!(crate::error::exit_code(&e), 4);
         assert!(format!("{e:#}").contains("not trusted"), "{e:#}");
+        // Other errors do not blame trust.
+        std::fs::write(
+            store.join(crate::config::STORE_CONFIG),
+            format!(
+                "repo = {}\n[[plugins]]\nid = \"github\"\nparams = {{ owner = \"o\" }}\n",
+                crate::config::toml_str(&repo.to_string_lossy())
+            ),
+        )
+        .unwrap();
+        let e = format!(
+            "{:#}",
+            load_with(&store, &UserConfig::default(), &t.0.join("user")).unwrap_err()
+        );
+        assert!(e.contains("owner") && !e.contains("trust"), "{e}");
     }
 }
