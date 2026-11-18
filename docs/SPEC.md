@@ -46,7 +46,7 @@ The project is resolved from `--project`, else `RRECALL_PROJECT`, else the curre
 
 `init` details:
 - The project name is the argument, else `--project` or `RRECALL_PROJECT`, else the basename of the `origin` URL without `.git`; with none of these it exits 2. A name is a plain directory name (no `/`, not starting with `.`). A store that already exists exits 2.
-- The store config names the sources found as the plugin instances `rrecall run` will use: inside a git repository, `[[plugins]] id = "repo"`, `use = "files"`, `params = { path = "<repo root>", git = true, preset = "codebase" }`; for a GitHub `origin`, `[[plugins]] id = "github"`, `params = { repo = "<owner>/<name>" }`.
+- The store config names the sources found as the plugin instances `rrecall run` will use: inside a git repository, the top-level `repo = "<repo root>"` (§6.2) and `[[plugins]] id = "repo"`, `use = "files"`, `params = { path = "<repo root>", git = true, preset = "codebase" }`; for a GitHub `origin`, `[[plugins]] id = "github"`, `params = { repo = "<owner>/<name>" }`.
 - When the user config has no entry for the project, `init` appends `[[projects]]` with `name` and `remotes = ["<origin url>"]` (§9), so later commands resolve the project from inside the repo. It never edits an existing entry.
 
 `import` details: one node per line, `title | detail` split at the first `|` (the detail is optional), nesting by leading spaces (no tabs), blank lines skipped. A top-level line matches a branch by title or id, case-insensitively; a matching line may not carry a detail, because the branch's question comes from the config. A new top-level line becomes a branch whose question is its detail. Limits (§3.1) are checked before anything is written; a violation exits 2 naming the line.
@@ -78,7 +78,7 @@ Exit codes:
 - Branches are not stored as lines: they come from the config, the six of §3.4 plus `[[skeleton.branch]]` entries, in that order. A branch shows as a node whose body is its question and whose source is `config:rrecall.toml`. `note` and `rm` on a branch exit 2 (I5).
 - A map store holds: `map/<branch-id>.jsonl` (one file per branch, one node per line, holding every node under that branch; the file exists only while the branch has nodes), `rrecall.toml` (the project config, §9), `rrecall.lock` (fingerprints and plugin hashes, §4.2), `plugins/` (the project's own plugins, trusted because the user owns the store).
 - Each line is one node as JSON with keys in a fixed order and no insignificant whitespace; lines are sorted by `id`. A node whose content did not change keeps a byte-identical line, so `git diff` shows only real changes and `git blame` attributes each node to the run that last changed it.
-- Generated and private-to-the-run files (`cache/`, `runs/`, `views/`) are untracked.
+- Generated and private-to-the-run files (`cache/`, `runs/`, `views/`) and the plugins' persistent state (`state/<instance-id>/`, §6.3) are untracked; `init` lists all four in `.gitignore`.
 - The store has no git remote by default. rrecall never adds one.
 - `init` writes `.gitattributes` with `*.jsonl text eol=lf`, so map lines stay LF in the working tree whatever `core.autocrlf` says (I6). A command rewrites only the branch files whose nodes changed.
 - Store commits are authored as `rrecall <rrecall@localhost>` and never signed, so they work with no git identity configured. A command commits exactly the files it wrote; other files in the store, staged or not, stay out of its commit. If the commit fails (a hook rejects it), the files get their previous content back and the command exits 1. Commits outside a run: `init <project>`; `import <file>: +<N> nodes, +<K> branches`; `note <branch>/<id>` (`: cleared` when emptied); `rm <branch>/<id>: <reason>` (default reason `removed by hand`) with one `removed <branch>/<id>` line per node removed.
@@ -86,7 +86,7 @@ Exit codes:
 
 ### 3.3 Source references
 
-A reference is a short string `<kind>:<locator>`, specific enough that a person or an agent can open it: `file:src/store.rs#L40-L80@a4586a6`, `gh-pr:owner/repo#212`, `gh-issue:owner/repo#17`, `commit:owner/repo@06aff55`, `slack:C0123ABCDEF/1795033170.000100`, `note:research/search-options.md`, `import:outline.txt`, `config:rrecall.toml`. Each kind belongs to the collector instance that declares it (§6.1 `source_kinds`, or a param such as `files`'s `ref_kind`); two enabled instances may not own the same kind. That instance's `resolve` entrypoint turns a reference back into text (§6.4). The core checks the format and that the kind has an owner.
+A reference is a short string `<kind>:<locator>`, specific enough that a person or an agent can open it: `file:src/store.rs#L40-L80@a4586a6`, `gh-pr:owner/repo#212`, `gh-issue:owner/repo#17`, `commit:owner/repo@06aff55`, `slack:C0123ABCDEF/1795033170.000100`, `note:research/search-options.md`, `import:outline.txt`, `config:rrecall.toml`. Each kind belongs to the collector instance that declares it (§6.1 `source_kinds`, or a param such as `files`'s `ref_kind`); two enabled instances may not own the same kind, and the kinds `config` and `import` belong to the core. That instance's `resolve` entrypoint turns a reference back into text (§6.4). The core checks the format and that the kind has an owner.
 
 ### 3.4 Default skeleton
 
@@ -204,11 +204,29 @@ runner = "claude"                  # a runner plugin id; the store's config may 
 model = "default"
 ```
 
+Every manifest has exactly the table named by its `kind`; a table of another kind is an error.
+
+| Table | Keys |
+| --- | --- |
+| `[collector]` | `scope` and `source_kinds` (each at least one entry); `fingerprint` or `min_interval`, not both; `command` or `prompt`, not both; optionally `resolve` or `resolve_prompt`; `runner` and `model` only with `prompt` or `resolve_prompt`; `timeout` |
+| `[check]`, `[view]`, `[runner]` | `command`, `timeout` |
+| `[judge]` | `command` or `prompt`, not both; `runner` and `model` only with `prompt`; `timeout` |
+| `[hook]` | `events` (at least one event of §6.6), `command`, `timeout` |
+
+- An argv is a list of strings; its program is looked up on `PATH`, or, when it holds a `/`, taken relative to the plugin directory. A prompt file is a path inside the plugin directory and must exist.
+- Durations are `<N>s`, `<N>m`, `<N>h` or `<N>d`. `timeout` defaults to 30s for a hook and 10m for every other kind; an instance's `timeout` (§9) overrides it.
+- `id` is kebab-case; `version` and `min_rrecall` are `x.y.z`, and a `min_rrecall` newer than the running rrecall is an error.
+- `[params]` names each param with its default. A name is a lowercase letter followed by lowercase letters, digits, `_` and `-`; a value is anything TOML holds except a date-time. An instance may set only declared params, each with the same TOML type as its default.
+- `{name}` inside an argv entry or a `source_kinds` entry is replaced by the instance's param `name` (a string as it is, any other value as JSON), so `files` declares `source_kinds = ["{ref_kind}"]`. Braces around anything but a param name (a jq filter) stay as they are; a `{name}` that names no param is an error.
+- A manifest error names the plugin and the key; any manifest, discovery or instance error stops a run before anything runs (exit 4).
+
 ### 6.2 Discovery and order
 
 Plugins come from four places, in this order: built-in (shipped inside the binary), the user directory `$XDG_CONFIG_HOME/rrecall/plugins/`, a project repository's `.rrecall/plugins/` once trusted (§6.7), and the store's `plugins/`. A later one with the same `id` replaces an earlier one. The store's config enables plugins and sets their params; the order of `[[plugins]]` entries there is the run order wherever order matters (§4.1 steps 5 and 7, §6.6).
 
-One plugin can be enabled several times. Each `[[plugins]]` entry is an **instance** with its own `id`, the plugin it `use`s, and its own params; the instance id is what the lock, the report, the commit message and `--only` name. Without `use`, the entry's `id` is the plugin's id and there is one instance.
+The project's repository is the store config's top-level `repo` (an absolute path, written by `init`), so a run loads the same plugins from any directory; without it there is no third place. A place is a directory whose subdirectories holding `rrecall-plugin.toml` are plugins; two plugins with one `id` in the same place are an error.
+
+One plugin can be enabled several times. Each `[[plugins]]` entry is an **instance** with its own `id`, the plugin it `use`s, and its own params; the instance id is what the lock, the report, the commit message and `--only` name. Without `use`, the entry's `id` is the plugin's id and there is one instance. Instance ids are kebab-case and unique; an entry that names no discovered plugin, sets an undeclared param or a param of another type, or scopes a collector to a branch the map does not have, is a config error (exit 4).
 
 ```toml
 [[plugins]]
@@ -224,25 +242,27 @@ params = { path = "/home/me/notes/myproject", preset = "notes", ref_kind = "note
 
 ### 6.3 Process contract
 
-- Input: one JSON document on stdin. Output: one JSON document on stdout. Logs: stderr, kept in the run dir.
-- Environment: `RRECALL_BIN` (the rrecall binary), `RRECALL_PROJECT`, `RRECALL_STORE`, `RRECALL_PLUGIN_DIR`, `RRECALL_STATE_DIR` (the plugin's own persistent directory), `RRECALL_RUN_ID`, and each param as `RRECALL_PARAM_<NAME>`.
+- The argv runs in the plugin's directory as its own process group, never through a shell; at the timeout the whole group is killed.
+- Input: one JSON document on stdin. Output: one JSON document on stdout. Logs: stderr. Both are kept in the run dir as `runs/<run-id>/<instance>.<entrypoint>.stdout` and `.stderr`. A non-zero exit, a timeout or more than 64 MiB of stdout is a failure.
+- Environment: rrecall's own, plus `RRECALL_BIN` (the rrecall binary), `RRECALL_PROJECT`, `RRECALL_STORE`, `RRECALL_PLUGIN_DIR`, `RRECALL_STATE_DIR` (the instance's own persistent directory, `<store>/state/<instance-id>/`, created before the call), `RRECALL_RUN_ID`, and each param as `RRECALL_PARAM_<NAME>`: the name upper-cased with `-` as `_`, a string as it is, any other value as JSON. Two params that map to one variable are a manifest error; `RRECALL_PARAM_*` variables in rrecall's own environment are not passed on.
 - A plugin reads the map through the CLI (`$RRECALL_BIN show <id> --json`); there is no other API.
 - Output is untrusted. Decoding is strict on shape (unknown fields, wrong types, a missing required field such as `sources`): one item that does not decode rejects the whole output, naming the plugin and the item. Rule violations in well-formed proposals (a removal without evidence, a change to another collector's node) are rejected per proposal by the invariants (§5), with a reason the collector sees in the next round.
 
 ### 6.4 Collector input and output
 
-Input: `{ "project", "run_id", "round", "scope": [{ "id", "title", "question", "granularity" }], "nodes": [current nodes in scope], "rejections": [the previous round's proposals with their verdicts, when round > 1], "params" }`.
+Input: `{ "project", "run_id", "round", "scope": [{ "id", "title", "question", "granularity" }], "nodes": [current nodes in scope], "rejections": [the previous round's proposals with their verdicts, when round > 1], "params" }`. A rejection is `{ "proposal", "verdicts": [ { "by", "verdict", "reason", "instruction"?, "conflict_with"?: <proposal> } ] }`; `by` is the check or judge instance id, or `core` for an invariant or a conflict, which carries the other proposal in `conflict_with`.
 
 Output: `{ "proposals": [ { "key", "op": "add" | "update" | "move" | "remove" | "add_source", "id"?, "parent"?, "parent_key"?, "title"?, "body"?, "sources", "date"?, "state"?, "evidence"?, "reason" } ] }`.
-- `key` is unique within the output and names the proposal in verdicts and in the next round.
+- `key` is non-empty, unique within the output, and names the proposal in verdicts and in the next round.
+- Required by `op`: `add` needs `title`, `body` and exactly one of `parent` and `parent_key`; `move` needs `id` and exactly one of `parent` and `parent_key`; `update`, `remove` and `add_source` need `id`. A proposal that lacks one does not decode.
 - A new node's parent is either an existing `id` (`parent`) or another proposal's `key` (`parent_key`), so a collector can add a parent and its children at once.
 - `reason` is one line that goes into the commit message. `evidence` is a source reference, required for `remove`.
 
-Resolve: the `resolve` entrypoint gets `{ "refs": [references] }` and returns `{ "texts": { "<ref>": "<text or null>" } }`. A reference that does not resolve is passed to judges as unresolved, and a judge may not accept a claim whose only sources are unresolved.
+Resolve: the `resolve` entrypoint gets `{ "refs": [references] }` and returns `{ "texts": { "<ref>": "<text or null>" } }`; a reference it omits is unresolved, and one it was not asked for fails the output. A reference that does not resolve is passed to judges as unresolved, and a judge may not accept a claim whose only sources are unresolved.
 
 ### 6.5 Check and judge input and output
 
-Input: `{ "proposals": [ { "key", "proposal", "current"?: <node>, "sources": { "<ref>": "<resolved text or null>" } } ], "map_ids": [...], "params" }`. Checks get the same input without resolved sources. Output: `{ "verdicts": [ { "key", "verdict": "accept" | "reject" | "revise", "reason", "instruction"? } ] }`. A check or judge that fails, times out or omits a verdict accepts nothing it was given: those proposals are dropped, and their collectors stay unsettled (§4.2).
+Input: `{ "proposals": [ { "key", "proposal", "current"?: <node>, "sources": { "<ref>": "<resolved text or null>" } } ], "map_ids": [...], "params" }`, where `key` is `<collector instance>/<proposal key>`. Checks get the same input without `sources`. Output: `{ "verdicts": [ { "key", "verdict": "accept" | "reject" | "revise", "reason", "instruction"? } ] }`, exactly one verdict per key given; a verdict for a key not given, a key twice, or `revise` without `instruction` fails the whole output. A check or judge that fails, times out or omits a verdict accepts nothing it was given: those proposals are dropped, and their collectors stay unsettled (§4.2).
 
 ### 6.6 Hooks and events
 
@@ -257,10 +277,12 @@ Input: `{ "proposals": [ { "key", "proposal", "current"?: <node>, "sources": { "
 
 Only `*.before` events can deny, and a hook on them fails closed. Hooks run in config order with a timeout (default 30s).
 
+A hook gets `{ "event", "project", "run_id", "data" }`, `data` being the event's payload. On a `*.before` event it prints `{}` to allow or `{ "deny": "<reason>" }` to deny; a non-zero exit, a timeout or any other output denies too, and the first deny aborts the run (exit 4) without running the hooks after it. On the other events its output is ignored and a failure is reported without changing the run.
+
 ### 6.7 Installing and trusting
 
 - `rrecall plugin add <git-url|path> [--ref <ref>]` copies the plugin into the user directory, shows its manifest and the commands it will run, and records its source and content hash in the user config. `--ref` pins a tag or commit.
-- A `.rrecall/plugins/` directory inside a project's own repository is never loaded unless the user runs `rrecall plugin trust <dir>`; the decision is remembered per path and content hash, and a changed hash needs trust again.
+- A `.rrecall/plugins/` directory inside a project's own repository is never loaded unless the user runs `rrecall plugin trust <dir>`; the decision is remembered per path and content hash, and a changed hash needs trust again. The record is a user-config entry `[[trusted]]` with `path` (the absolute path of the `.rrecall/plugins/` directory) and `hash`: `sha256:<hex>` over every entry under the directory (its relative path, whether it is a directory, a symlink, an executable or a plain file, and its content; a symlink by its target). An untrusted directory is skipped; an instance that needs one of its plugins fails with a message naming the directory to trust.
 - Plugins run with the user's permissions; rrecall is not a sandbox. The manifest preview is the safety step.
 
 ### 6.8 Runner contract and what reaches a model
@@ -284,8 +306,10 @@ The built-in `html` view writes one self-contained `views/index.html`: a collaps
 
 ## 9. Configuration
 
-- **User config** `$XDG_CONFIG_HOME/rrecall/config.toml`: projects as `[[projects]]` with `name`, an optional absolute `store` path and `remotes` (the URLs that map to it), default runner and model, installed plugins with their sources and hashes, trusted plugin directories.
-- **Store config** `rrecall.toml`: enabled plugins in order with their params and `allowed_runners`, skeleton additions, `max_rounds`, timeouts, and a cost cap per run (`max_cost_usd`). The core checks the cap before starting each runner call; calls already in flight may finish, so a run can exceed the cap by at most the cost of the calls in flight. When the cap is reached, pending proposals are dropped with the reason "budget", their collectors stay unsettled, and the run exits 5.
+Both configs reject unknown keys at every level.
+
+- **User config** `$XDG_CONFIG_HOME/rrecall/config.toml`: projects as `[[projects]]` with `name`, an optional absolute `store` path and `remotes` (the URLs that map to it), the default `runner` and `model`, installed plugins with their sources and hashes (M4), and trusted plugin directories as `[[trusted]]` (§6.7).
+- **Store config** `rrecall.toml`: the project's `repo` (§6.2); enabled plugins in order as `[[plugins]]` with `id`, `use`, `params`, `runner`, `model` (both only for a plugin with a prompt), `timeout` and `allowed_runners` (collectors only); skeleton additions (`[[skeleton.branch]]`); `max_rounds`; and a cost cap per run (`max_cost_usd`). The core checks the cap before starting each runner call; calls already in flight may finish, so a run can exceed the cap by at most the cost of the calls in flight. When the cap is reached, pending proposals are dropped with the reason "budget", their collectors stay unsettled, and the run exits 5.
 
 ## 10. Built-in plugins for the first release
 
