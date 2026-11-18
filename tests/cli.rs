@@ -192,6 +192,13 @@ fn init_names_and_store_overrides() {
         !cfg.contains("[[plugins]]"),
         "no sources found outside a repo: {cfg}"
     );
+    // A branch added in the config appears as a branch.
+    let extra = "\n[[skeleton.branch]]\nid = \"services\"\ntitle = \"Services\"\nquestion = \"Which services run?\"\n";
+    std::fs::write(custom.join("rrecall.toml"), format!("{cfg}{extra}")).unwrap();
+    assert!(
+        e.ok(&["--project", "kiln", "ls"])
+            .ends_with("- Decisions (decisions)\n- Services (services)\n")
+    );
     // A second init of the same project is a usage error.
     let again = e.run(&["init", "kiln"]);
     assert_eq!(again.code, 2, "{}", again.stderr);
