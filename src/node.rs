@@ -83,23 +83,27 @@ pub fn is_slug(s: &str) -> bool {
         })
 }
 
+/// A source kind: a lowercase letter, then lowercase letters, digits and `-`.
+pub fn is_kind(kind: &str) -> bool {
+    kind.starts_with(|c: char| c.is_ascii_lowercase())
+        && kind
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
 /// `<kind>:<locator>` (spec §3.3).
 pub fn check_source(r: &str) -> Result<(), String> {
     let bad = || Err(format!("source `{r}` is not `<kind>:<locator>`"));
     let Some((kind, locator)) = r.split_once(':') else {
         return bad();
     };
-    let kind_ok = kind.starts_with(|c: char| c.is_ascii_lowercase())
-        && kind
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
-    if !kind_ok
+    if !is_kind(kind)
         || locator.is_empty()
         || locator.chars().any(|c| c.is_whitespace() || c.is_control())
     {
         return bad();
     }
-    // limit: M1 checks the format only; that the kind has an owning collector comes with plugins (M2).
+    // limit: the format only; a proposal's kinds are checked against `plugin::owner` by the run pipeline.
     Ok(())
 }
 

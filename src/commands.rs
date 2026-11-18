@@ -49,6 +49,11 @@ pub fn init(name_arg: Option<&str>, project_flag: Option<&str>) -> Result<String
     );
     let mut found = Vec::new();
     if let Some(top) = &top {
+        // Top-level keys go before the first table.
+        cfg += &format!(
+            "\n# The project's repository: its .rrecall/plugins/ loads once trusted.\nrepo = {}\n",
+            config::toml_str(top)
+        );
         cfg += "\n# Sources rrecall init found, as the plugin instances `rrecall run` will use.\n";
         cfg += &format!(
             "[[plugins]]\nid = \"repo\"\nuse = \"files\"\nparams = {{ path = {}, git = true, preset = \"codebase\" }}\n",
@@ -69,7 +74,7 @@ pub fn init(name_arg: Option<&str>, project_flag: Option<&str>) -> Result<String
         .and_then(|()| store::git(&path, &["init", "-q"]))
         .and_then(|_| {
             let files = [
-                (".gitignore", "cache/\nruns/\nviews/\n".to_string()),
+                (".gitignore", "cache/\nruns/\nviews/\nstate/\n".to_string()),
                 // Map lines stay LF in the working tree whatever core.autocrlf says (spec §5 I6).
                 (".gitattributes", "*.jsonl text eol=lf\n".to_string()),
                 (STORE_CONFIG, cfg),

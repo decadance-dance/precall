@@ -1,13 +1,14 @@
 //! The store config `rrecall.toml` and the user config (spec §9), and project resolution (§2).
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 pub const STORE_CONFIG: &str = "rrecall.toml";
 
 /// A branch of the skeleton (spec §3.4).
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BranchDef {
     pub id: String,
@@ -69,48 +70,117 @@ pub fn default_branches() -> Vec<BranchDef> {
 /// The id of the computed branch answered by `rrecall recent`; never stored.
 pub const COMPUTED_BRANCH: &str = "recent";
 
-#[derive(Deserialize, Default)]
-struct StoreConfig {
-    // limit: other top-level keys (plugins, max_rounds, ...) are read by M2; M1 ignores them.
+/// The store config `rrecall.toml` (spec §9). Unknown keys are errors at every level.
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct StoreConfig {
     #[serde(default)]
-    skeleton: SkeletonConfig,
+    pub(crate) skeleton: SkeletonConfig,
+    /// The plugin instances, in run order (spec §6.2).
+    #[serde(default)]
+    pub plugins: Vec<PluginEntry>,
+    /// The project's repository, whose `.rrecall/plugins/` loads once trusted (spec §6.7).
+    #[serde(default)]
+    pub repo: Option<PathBuf>,
+    #[serde(default)]
+    pub max_rounds: Option<u32>,
+    #[serde(default)]
+    pub max_cost_usd: Option<f64>,
 }
 
-#[derive(Deserialize, Default)]
+/// One `[[plugins]]` entry: a plugin instance (spec §6.2).
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SkeletonConfig {
+pub struct PluginEntry {
+    pub id: String,
+    /// The plugin's id; the entry's `id` when absent.
+    #[serde(default, rename = "use")]
+    pub uses: Option<String>,
+    #[serde(default)]
+    pub params: toml::Table,
+    #[serde(default)]
+    pub runner: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default, deserialize_with = "duration_opt")]
+    pub timeout: Option<Duration>,
+    #[serde(default)]
+    pub allowed_runners: Option<Vec<String>>,
+}
+
+/// `<N>s`, `<N>m`, `<N>h` or `<N>d`, N a positive integer.
+pub fn parse_duration(s: &str) -> Result<Duration, String> {
+    let bad = || format!("`{s}` is not a duration (<N>s, <N>m, <N>h or <N>d)");
+    let unit = match s.chars().last() {
+        Some('s') => 1,
+        Some('m') => 60,
+        Some('h') => 3600,
+        Some('d') => 86400,
+        _ => return Err(bad()),
+    };
+    let digits = &s[..s.len() - 1];
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(bad());
+    }
+    match digits.parse::<u64>().ok().and_then(|n| n.checked_mul(unit)) {
+        Some(secs) if secs > 0 => Ok(Duration::from_secs(secs)),
+        _ => Err(bad()),
+    }
+}
+
+/// Serde helper for an optional duration field.
+pub fn duration_opt<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
+    let s = String::deserialize(d)?;
+    parse_duration(&s)
+        .map(Some)
+        .map_err(serde::de::Error::custom)
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SkeletonConfig {
     #[serde(default)]
     branch: Vec<BranchDef>,
 }
 
 /// The default branches followed by the config's `[[skeleton.branch]]` entries.
 pub fn load_branches(store: &Path) -> Result<Vec<BranchDef>> {
+    load_store_config(store)?.branches()
+}
+
+pub fn load_store_config(store: &Path) -> Result<StoreConfig> {
     let path = store.join(STORE_CONFIG);
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let cfg: StoreConfig =
-        toml::from_str(&text).with_context(|| format!("{STORE_CONFIG} does not parse"))?;
-    let mut branches = default_branches();
-    for b in cfg.skeleton.branch {
-        let problem = if !crate::node::is_slug(&b.id) {
-            Some("is not a slug (a-z, 0-9, single dashes)")
-        } else if b.id == COMPUTED_BRANCH {
-            Some("is the computed branch answered by `rrecall recent`")
-        } else if branches.iter().any(|x| x.id == b.id) {
-            Some("is defined twice")
-        } else if b.title.trim().is_empty() || b.title.chars().count() > crate::node::TITLE_MAX {
-            Some("needs a title of 1 to 80 characters")
-        } else if b.question.chars().count() > crate::node::BODY_MAX {
-            Some("has a question longer than 600 characters")
-        } else {
-            None
-        };
-        if let Some(p) = problem {
-            anyhow::bail!("{STORE_CONFIG}: branch `{}` {p}", b.id);
+    toml::from_str(&text).with_context(|| format!("{STORE_CONFIG} does not parse"))
+}
+
+impl StoreConfig {
+    /// The default branches followed by the config's `[[skeleton.branch]]` entries.
+    pub fn branches(&self) -> Result<Vec<BranchDef>> {
+        let mut branches = default_branches();
+        for b in self.skeleton.branch.iter().cloned() {
+            let problem = if !crate::node::is_slug(&b.id) {
+                Some("is not a slug (a-z, 0-9, single dashes)")
+            } else if b.id == COMPUTED_BRANCH {
+                Some("is the computed branch answered by `rrecall recent`")
+            } else if branches.iter().any(|x| x.id == b.id) {
+                Some("is defined twice")
+            } else if b.title.trim().is_empty() || b.title.chars().count() > crate::node::TITLE_MAX
+            {
+                Some("needs a title of 1 to 80 characters")
+            } else if b.question.chars().count() > crate::node::BODY_MAX {
+                Some("has a question longer than 600 characters")
+            } else {
+                None
+            };
+            if let Some(p) = problem {
+                anyhow::bail!("{STORE_CONFIG}: branch `{}` {p}", b.id);
+            }
+            branches.push(b);
         }
-        branches.push(b);
+        Ok(branches)
     }
-    Ok(branches)
 }
 
 /// The `[[skeleton.branch]]` entry with this id in a config text, if the text parses and has one.
@@ -132,10 +202,27 @@ pub fn branch_toml(b: &BranchDef) -> String {
 
 /// The user config `$XDG_CONFIG_HOME/rrecall/config.toml` (spec §9), the parts M1 reads.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UserConfig {
-    // limit: default runner and model, installed and trusted plugins come with M2 to M4; ignored here.
+    // limit: installed plugins (`plugin add`, spec §6.7) add their record in M4; until then that key is unknown.
     #[serde(default)]
     pub projects: Vec<ProjectEntry>,
+    /// Default runner and model for declarative plugins (spec §9).
+    #[serde(default)]
+    pub runner: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Trusted project plugin directories (spec §6.7).
+    #[serde(default)]
+    pub trusted: Vec<Trusted>,
+}
+
+/// A project's `.rrecall/plugins/` directory the user trusts at this content hash.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Trusted {
+    pub path: PathBuf,
+    pub hash: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -298,6 +385,72 @@ mod tests {
         assert_eq!(b[6], extra);
         assert_eq!(b[0].title, "Layout");
         assert_eq!(b[0].question, "Where does something live?");
+    }
+
+    #[test]
+    fn store_config_is_strict() {
+        let t = TempDir::new();
+        let good = "repo = \"/src/kiln\"\nmax_rounds = 3\nmax_cost_usd = 1.5\n\n[[plugins]]\nid = \"notes\"\nuse = \"files\"\nparams = { path = \"/n\", git = false }\nrunner = \"codex\"\nmodel = \"m\"\ntimeout = \"2m\"\nallowed_runners = [\"codex\"]\n\n[[plugins]]\nid = \"github\"\n";
+        std::fs::write(t.0.join(STORE_CONFIG), good).unwrap();
+        let cfg = load_store_config(&t.0).unwrap();
+        assert_eq!(cfg.repo.as_deref(), Some(Path::new("/src/kiln")));
+        assert_eq!(cfg.max_rounds, Some(3));
+        assert_eq!(cfg.plugins.len(), 2);
+        let notes = &cfg.plugins[0];
+        assert_eq!(notes.uses.as_deref(), Some("files"));
+        assert_eq!(notes.params["git"], toml::Value::Boolean(false));
+        assert_eq!(notes.timeout, Some(std::time::Duration::from_secs(120)));
+        assert_eq!(
+            notes.allowed_runners.as_deref(),
+            Some(&["codex".to_string()][..])
+        );
+        assert_eq!(cfg.plugins[1].uses, None);
+        for bad in [
+            "colour = \"red\"\n",
+            "[[plugins]]\nid = \"x\"\nenabled = true\n",
+            "[[plugins]]\nid = \"x\"\ntimeout = \"soon\"\n",
+        ] {
+            std::fs::write(t.0.join(STORE_CONFIG), bad).unwrap();
+            let e = format!("{:#}", load_store_config(&t.0).unwrap_err());
+            assert!(e.contains(STORE_CONFIG), "{bad}: {e}");
+            assert!(load_branches(&t.0).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn user_config_is_strict() {
+        let u: UserConfig = toml::from_str(
+            "runner = \"claude\"\nmodel = \"default\"\n[[projects]]\nname = \"kiln\"\n[[trusted]]\npath = \"/src/kiln/.rrecall/plugins\"\nhash = \"sha256:00\"\n",
+        )
+        .unwrap();
+        assert_eq!(u.trusted[0].hash, "sha256:00");
+        assert_eq!(u.runner.as_deref(), Some("claude"));
+        assert!(toml::from_str::<UserConfig>("theme = \"dark\"\n").is_err());
+        assert!(toml::from_str::<UserConfig>("[[trusted]]\npath = \"/x\"\n").is_err());
+    }
+
+    #[test]
+    fn durations() {
+        for (s, secs) in [("30s", 30), ("10m", 600), ("2h", 7200), ("1d", 86400)] {
+            assert_eq!(
+                parse_duration(s),
+                Ok(std::time::Duration::from_secs(secs)),
+                "{s}"
+            );
+        }
+        for bad in [
+            "",
+            "10",
+            "m",
+            "1.5h",
+            "-1s",
+            "10 m",
+            "1w",
+            "0s",
+            "99999999999999999999d",
+        ] {
+            assert!(parse_duration(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

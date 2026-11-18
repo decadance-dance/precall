@@ -143,7 +143,16 @@ fn init_creates_store_with_default_skeleton_and_found_sources() {
     );
     assert_eq!(
         std::fs::read_to_string(store.join(".gitignore")).unwrap(),
-        "cache/\nruns/\nviews/\n"
+        "cache/\nruns/\nviews/\nstate/\n"
+    );
+    // The repo is recorded so a run finds its `.rrecall/plugins/` from any directory.
+    assert!(
+        cfg.starts_with("# ")
+            && cfg.contains(&format!(
+                "\nrepo = \"{}\"\n",
+                repo.canonicalize().unwrap().display()
+            )),
+        "{cfg}"
     );
     assert_eq!(git(&store, &["remote"]), "", "no remote is ever added");
     assert_eq!(git(&store, &["log", "--format=%s"]), "init lanternfish\n");
@@ -189,7 +198,7 @@ fn init_names_and_store_overrides() {
     assert!(!e.store("kiln").exists());
     let cfg = std::fs::read_to_string(custom.join("rrecall.toml")).unwrap();
     assert!(
-        !cfg.contains("[[plugins]]"),
+        !cfg.contains("[[plugins]]") && !cfg.contains("repo ="),
         "no sources found outside a repo: {cfg}"
     );
     // A branch added in the config appears as a branch.

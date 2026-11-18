@@ -4,8 +4,11 @@ pub mod error;
 pub mod history;
 pub mod node;
 pub mod outline;
+pub mod plugin;
+pub mod process;
 pub mod query;
 pub mod store;
+pub mod wire;
 #[cfg(test)]
 pub(crate) mod testutil {
     use std::path::PathBuf;
