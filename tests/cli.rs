@@ -1018,6 +1018,14 @@ fn max_tokens_holds_for_json_and_markdown() {
                 out.matches("## ").count()
             };
             assert!(nodes >= 1, "max {max} json {json}: {out}");
+            let mut whole = vec!["show", "layout", "--depth", "2"];
+            if json {
+                whole.push("--json");
+            }
+            let full = k(&e, &whole).stdout;
+            if tokens(&full) <= max {
+                assert_eq!(out, full, "max {max} json {json}: the full answer fits");
+            }
             assert!(
                 tokens(&out) <= max || nodes == 1,
                 "max {max} json {json}: {} tokens, {nodes} nodes",
@@ -1069,4 +1077,95 @@ fn a_failed_init_commit_leaves_no_store() {
     assert!(!e.user_config().exists(), "no project registered");
     std::fs::remove_file(&gitconfig).unwrap();
     e.ok(&["init", "kiln"]);
+}
+
+// ---- review round 2 (PR #18) ----
+
+#[test]
+fn an_index_sync_failure_after_the_commit_keeps_the_committed_files() {
+    let e = small_env();
+    let store = e.store("kiln");
+    assert_eq!(k(&e, &["note", "api-gateway", "before"]).code, 0);
+    // Another git process holds the store's index: the commit lands, updating the index fails.
+    std::fs::write(store.join(".git/index.lock"), "").unwrap();
+    let o = k(&e, &["note", "api-gateway", "index lock repro"]);
+    std::fs::remove_file(store.join(".git/index.lock")).unwrap();
+    assert_eq!(o.code, 1, "{}", o.stderr);
+    assert!(
+        o.stderr.contains("landed") && o.stderr.contains("reset -q -- map/layout.jsonl"),
+        "{}",
+        o.stderr
+    );
+    assert_eq!(
+        git(&store, &["log", "-1", "--format=%s"]),
+        "note layout/api-gateway\n"
+    );
+    assert!(
+        git(&store, &["show", "HEAD:map/layout.jsonl"]).contains(r#""note":"index lock repro""#)
+    );
+    assert!(
+        k(&e, &["show", "api-gateway"])
+            .stdout
+            .contains("note: index lock repro\n")
+    );
+    // The fix the message names makes the store consistent again.
+    git(&store, &["reset", "-q", "--", "map/layout.jsonl"]);
+    assert_eq!(git(&store, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn a_failed_init_in_an_existing_directory_keeps_the_directory_and_its_files() {
+    use std::os::unix::fs::PermissionsExt;
+    let e = Env::new();
+    let store = e.store("already");
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(store.join("keep.txt"), "mine\n").unwrap();
+    let hooks = e.root.join("hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    std::fs::write(hooks.join("pre-commit"), "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(
+        hooks.join("pre-commit"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let gitconfig = e.root.join("home/.gitconfig");
+    std::fs::write(
+        &gitconfig,
+        format!("[core]\n\thooksPath = {}\n", hooks.display()),
+    )
+    .unwrap();
+    assert_eq!(e.run(&["init", "already"]).code, 1);
+    let mut left: Vec<String> = std::fs::read_dir(&store)
+        .unwrap()
+        .map(|f| f.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["keep.txt"], "only what was there before");
+    assert_eq!(
+        std::fs::read_to_string(store.join("keep.txt")).unwrap(),
+        "mine\n"
+    );
+    std::fs::remove_file(&gitconfig).unwrap();
+    e.ok(&["init", "already"]);
+}
+
+#[test]
+fn max_tokens_prints_the_full_answer_when_it_fits() {
+    let e = Env::new();
+    e.ok(&["init", "kiln"]);
+    let file = e.write("o.txt", "A\n  B\n  C\n");
+    e.ok(&["--project", "kiln", "import", file.to_str().unwrap()]);
+    let full = e.ok(&["--project", "kiln", "show", "a", "--depth", "1"]);
+    for json in [false, true] {
+        let mut base = vec!["--project", "kiln", "show", "a", "--depth", "1"];
+        if json {
+            base.push("--json");
+        }
+        let full = e.ok(&base);
+        let m = tokens(&full).to_string();
+        let mut args = base.clone();
+        args.extend(["--max-tokens", &m]);
+        assert_eq!(e.ok(&args), full, "json {json}");
+    }
+    assert_eq!(full.matches("## ").count(), 3);
 }

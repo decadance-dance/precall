@@ -224,35 +224,51 @@ pub fn write_and_commit(root: &Path, changes: &[Change], message: &str) -> Resul
     if changes.is_empty() {
         return Ok(false);
     }
-    let before: Vec<Option<Vec<u8>>> = changes
+    let paths: Vec<&str> = changes.iter().map(|(rel, _)| rel.as_str()).collect();
+    let before: Vec<Option<Vec<u8>>> = paths
         .iter()
-        .map(|(rel, _)| std::fs::read(root.join(rel)).ok())
+        .map(|rel| std::fs::read(root.join(rel)).ok())
         .collect();
-    let result = write_files(root, changes).and_then(|()| commit_paths(root, changes, message));
-    if let Err(e) = result {
-        let mut e = e;
-        for ((rel, _), old) in changes.iter().zip(before) {
-            let path = root.join(rel);
-            let restored = match old {
-                Some(bytes) => std::fs::write(&path, bytes),
-                None if path.exists() => std::fs::remove_file(&path),
-                None => Ok(()),
-            };
-            if let Err(r) = restored {
-                e = e.context(format!("and restoring {rel} failed: {r}"));
+    let committed =
+        match write_files(root, changes).and_then(|()| commit_paths(root, &paths, message)) {
+            Ok(committed) => committed,
+            Err(mut e) => {
+                // Nothing was committed: put the files back as they were.
+                for (rel, old) in paths.iter().zip(before) {
+                    let path = root.join(rel);
+                    let restored = match old {
+                        Some(bytes) => std::fs::write(&path, bytes),
+                        None if path.exists() => std::fs::remove_file(&path),
+                        None => Ok(()),
+                    };
+                    if let Err(r) = restored {
+                        e = e.context(format!("and restoring {rel} failed: {r}"));
+                    }
+                }
+                return Err(e);
             }
-        }
-        return Err(e);
+        };
+    if committed {
+        // The commit landed, so the files stay; only the index can lag behind it.
+        let mut reset = vec!["reset", "-q", "--"];
+        reset.extend(&paths);
+        git_status(root, None, &reset).with_context(|| {
+            let subject = message.lines().next().unwrap_or("");
+            format!(
+                "the commit `{subject}` landed, but updating the store's git index failed; \
+                 once no other git process uses the store, run: git -C {} {}",
+                root.display(),
+                reset.join(" ")
+            )
+        })?;
     }
-    result
+    Ok(committed)
 }
 
-/// Commits the given paths through a private index started from HEAD, then points the
-/// real index at the new commit for those paths only.
-fn commit_paths(root: &Path, changes: &[Change], message: &str) -> Result<bool> {
+/// Commits the given paths through a private index started from HEAD, leaving the real index alone.
+fn commit_paths(root: &Path, paths: &[&str], message: &str) -> Result<bool> {
     let index = root.join(".git").join("rrecall-index");
     let _ = std::fs::remove_file(&index);
-    let paths: Vec<&str> = changes.iter().map(|(rel, _)| rel.as_str()).collect();
     let has_head = git_run(root, None, &["rev-parse", "--verify", "-q", "HEAD"])?
         .status
         .success();
@@ -261,7 +277,7 @@ fn commit_paths(root: &Path, changes: &[Change], message: &str) -> Result<bool> 
             git_in(root, Some(&index), &["read-tree", "HEAD"])?;
         }
         let mut add = vec!["add", "-A", "--"];
-        add.extend(&paths);
+        add.extend(paths);
         git_in(root, Some(&index), &add)?;
         if has_head && git_status(root, Some(&index), &["diff", "--cached", "--quiet", "HEAD"])? {
             return Ok(false);
@@ -270,13 +286,7 @@ fn commit_paths(root: &Path, changes: &[Change], message: &str) -> Result<bool> 
         Ok(true)
     })();
     let _ = std::fs::remove_file(&index);
-    if committed? {
-        let mut reset = vec!["reset", "-q", "--"];
-        reset.extend(&paths);
-        git_status(root, None, &reset)?;
-        return Ok(true);
-    }
-    Ok(false)
+    committed
 }
 
 /// Runs git in `dir` as rrecall (store commits need no configured identity and are never signed).

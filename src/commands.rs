@@ -81,9 +81,13 @@ pub fn init(name_arg: Option<&str>, project_flag: Option<&str>) -> Result<String
             store::write_and_commit(&path, &changes, &format!("init {name}"))
         });
     if let Err(e) = made {
-        if created {
-            let _ = std::fs::remove_dir_all(&path);
-        }
+        // Undo only what this init made: the whole directory if it created it, else the
+        // `.git` it added (absent before, checked above); the files it wrote are already restored.
+        let _ = if created {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_dir_all(path.join(".git"))
+        };
         return Err(e);
     }
 
@@ -313,6 +317,8 @@ pub fn import(project: Option<&str>, file: &Path) -> Result<String> {
             .branches
             .iter()
             .find(|b| {
+                // limit: lowercasing is not full Unicode case folding: titles that differ only in
+                // final sigma (`ΟΣ` vs `οσ`) or other folding-only pairs stay two branches.
                 let title = item.title.to_lowercase();
                 b.id == title || b.title.to_lowercase() == title
             })

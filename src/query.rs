@@ -194,17 +194,35 @@ pub fn show(
             pieces[..keep].join("\n") + if left.is_empty() { "" } else { "\n" } + &left
         }
     };
-    // The most leading nodes whose whole output, wrapper and cut marker included, fits the budget
-    // (tokens estimated as bytes / 4, rounded up); never fewer than one.
-    // limit: a first node larger than `max` is still printed, so a cut output can exceed `max`.
-    let mut keep = pieces.len();
-    if let Some(max) = max_tokens {
-        keep = 1;
-        while keep < pieces.len() && render(keep + 1).len().div_ceil(4) <= max {
-            keep += 1;
-        }
+    // The byte length of `render(keep)`, computed without building it.
+    let mut prefix = vec![0];
+    for p in &pieces {
+        prefix.push(prefix[prefix.len() - 1] + p.len());
     }
-    Ok(render(keep))
+    let size = |keep: usize| -> usize {
+        let body = prefix[keep] + keep - 1;
+        let left = footer(keep).len();
+        match (json, left) {
+            (true, 0) => "{\"nodes\":[".len() + body + "]}\n".len(),
+            (true, l) => "{\"nodes\":[".len() + body + "],\"left_out\":".len() + l + "}\n".len(),
+            (false, 0) => body,
+            (false, l) => body + 1 + l,
+        }
+    };
+    // The full answer when it fits the budget (tokens estimated as bytes / 4, rounded up), else
+    // the longest prefix of nodes that fits with its cut marker; never fewer than one node.
+    // limit: a first node larger than `max` is still printed, so a cut output can exceed `max`.
+    let n = pieces.len();
+    let keep = match max_tokens {
+        Some(max) if size(n).div_ceil(4) > max => (1..n)
+            .rev()
+            .find(|&k| size(k).div_ceil(4) <= max)
+            .unwrap_or(1),
+        _ => n,
+    };
+    let out = render(keep);
+    debug_assert_eq!(out.len(), size(keep));
+    Ok(out)
 }
 
 /// Nodes whose title or body contains `text` (case-insensitive), in tree order.
