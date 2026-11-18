@@ -1,0 +1,307 @@
+Layout
+  Sync server | Rust service under server/ that stores read state and subscriptions per user.
+    HTTP routes | server/src/routes/: /v1/feeds, /v1/items, /v1/sync, /v1/auth.
+      /v1/feeds | List, add and remove subscriptions.
+      /v1/items | Page through items with filters.
+      /v1/sync | Exchange changes since a cursor.
+      /v1/auth | Log in, log out, manage app passwords.
+    Storage layer | server/src/db/: one SQLite file per user, opened through a small pool.
+      Connection pool | At most 4 open files per worker thread.
+      WAL mode | Every user database runs in WAL mode.
+    Migrations | server/migrations/: numbered SQL files applied at startup.
+    Config loader | server/src/config.rs reads lanternfish.toml and LF_* environment variables.
+  Fetcher | Go worker under fetcher/ that polls feeds and writes new items to the queue.
+    Scheduler | fetcher/schedule.go spreads polls over the hour by feed hash.
+    Parser | fetcher/parse/: RSS 2.0, Atom 1.0 and JSON Feed into one item struct.
+      RSS 2.0 | Handles missing guids and relative links.
+      Atom 1.0 | Prefers the alternate link over self.
+      JSON Feed | Versions 1.0 and 1.1.
+    Politeness | fetcher/http.go honours ETag, Last-Modified and Retry-After.
+    Dead feed detector | fetcher/dead.go marks a feed dead after 14 days of errors.
+  Web client | Svelte app under web/ served as static files by the sync server.
+    Reader view | web/src/reader/: article pane, keyboard navigation, mark-as-read.
+    Feed list | web/src/feeds/: folders, unread counts, drag to reorder.
+    Offline cache | web/src/cache/: IndexedDB copy of the last 500 items.
+      Eviction | Oldest read items leave first.
+      Quota errors | The cache shrinks by half when the browser refuses writes.
+    Settings page | web/src/settings/: theme, refresh interval, OPML import and export.
+  Mobile app | Kotlin Multiplatform app under mobile/ for Android and iOS.
+    Shared core | mobile/shared/: sync client and item store shared by both platforms.
+    Android shell | mobile/android/: Compose UI and the background sync worker.
+    iOS shell | mobile/ios/: SwiftUI views over the shared core.
+  Queue | Redis stream `items` between the fetcher and the sync server.
+    Stream layout | One entry per new item, keyed by feed id and item guid.
+    Consumer group | The sync server reads as group `ingest`, one consumer per instance.
+    Retention | Entries older than 3 days are trimmed by MAXLEN.
+  Infrastructure code | Terraform and Ansible under infra/.
+    Terraform modules | infra/tf/: VPC, two VMs, object storage for backups.
+    Ansible roles | infra/ansible/: sync server, fetcher, Redis, Caddy.
+    Caddy config | infra/ansible/roles/caddy/: TLS and the reverse proxy for /v1.
+    Backups | infra/ansible/roles/backup/: nightly restic of the SQLite files.
+  Docs site | Static site under docs/ built with mdBook.
+    User guide | docs/guide/: install, import OPML, keyboard shortcuts.
+    Self-hosting guide | docs/self-host/: Docker Compose and bare-metal setups.
+    API reference | docs/api/: generated from the OpenAPI file in server/openapi.yaml.
+  Test suites | Tests live next to each component; end-to-end tests under e2e/.
+    Server tests | cargo test in server/; fixtures build SQLite files in temp dirs.
+    Fetcher tests | go test in fetcher/; a fake HTTP server replays recorded feeds.
+    End-to-end tests | e2e/: Playwright drives the web client against a Compose stack.
+    Load tests | e2e/load/: k6 scripts for 10k users syncing every minute.
+  Release tooling | Scripts under tools/release/ that tag, build and publish.
+    Version bump | tools/release/bump.sh updates the three manifests in one commit.
+    Changelog | tools/release/changelog.py builds CHANGELOG.md from merged PR titles.
+    Container images | tools/release/images.sh builds and pushes the server and fetcher images.
+How it works
+  Feed polling | The fetcher wakes each minute and polls the feeds due in that minute.
+    Due calculation | A feed is due when now minus last poll exceeds its interval.
+    Adaptive interval | Feeds that rarely change are polled less often, down to every 6 hours.
+    Conditional requests | ETag and Last-Modified make most polls a 304 with no body.
+    Error backoff | Each failed poll doubles the interval up to 24 hours.
+  Item deduplication | The same story from two feeds shows once.
+    Guid first | Items with the same guid in a feed are one item.
+    Link hash | Without a guid, the canonical link's hash identifies the item.
+    Cross-feed merge | Items with the same canonical link across feeds share read state.
+  Sync protocol | Clients send a cursor and receive changes since it.
+    Cursor | A per-user monotonic counter stored with each change.
+    Change log | server/src/sync/log.rs keeps 30 days of changes per user.
+      Compaction | Repeated flips of one flag collapse to the last value.
+      Size | About 2 MB per active user for 30 days.
+    Full resync | A cursor older than the change log triggers a full download.
+      Trigger | A cursor older than the oldest log entry.
+      Cost | Downloads at most the last 5,000 items.
+    Conflict rule | Read wins over unread when two devices disagree.
+  Authentication | Accounts are local to each server; no third-party login.
+    Password hashing | Argon2id with parameters in config, checked at startup.
+    Session tokens | Opaque 32-byte tokens, stored hashed, valid for 90 days.
+      Rotation | A token used after 60 days is replaced on the next request.
+      Revocation | Logging out deletes the token hash.
+    App passwords | Separate tokens for mobile apps, revocable one by one.
+  Read state | Each item has read, starred and hidden flags per user.
+    Mark all read | Marks items up to a timestamp, so new arrivals stay unread.
+    Star | Starred items are never trimmed by retention.
+    Hide | Hidden items vanish from lists but stay searchable.
+  Retention | Old items are deleted to keep each user's database small.
+    Default window | Unstarred items older than 90 days are deleted nightly.
+    Per-feed override | A feed can keep items forever or for a shorter window.
+    Vacuum | SQLite VACUUM runs weekly per user database.
+  Search | Full-text search over titles and bodies.
+    FTS5 index | Each user database has an FTS5 table fed by triggers.
+      Triggers | Insert, update and delete triggers keep the index current.
+      Rebuild | `lanternfish admin reindex` rebuilds one user's index.
+    Query syntax | Plain words, quoted phrases and feed:<name> filters.
+    Ranking | bm25 with a boost for unread items.
+  OPML import | Users bring subscriptions from other readers.
+    Parser | Accepts nested outlines and maps them to folders.
+    Duplicate feeds | Feeds already subscribed are skipped and reported.
+    Large files | Imports over 2,000 feeds run as a background job.
+  Notifications | Optional push for feeds the user marks as important.
+    Web push | VAPID keys per server; the web client registers a service worker.
+    Mobile push | Through the platform push services, via a small relay.
+    Quiet hours | No pushes between configured hours, per user.
+People
+  Mirela Okonkwo | Maintainer; owns the sync server and the release process.
+    Sync server | Reviews every change under server/.
+    Releases | Cuts releases and signs the container images.
+    Roadmap | Keeps the roadmap issue up to date each month.
+  Tomasz Brightwater | Owns the fetcher and the queue.
+    Fetcher | Reviews every change under fetcher/.
+    Feed bugs | Triages issues labelled feed-bug.
+    Queue | Owns the Redis setup and its limits.
+  Ayo Lindqvist | Owns the web client.
+    Web client | Reviews every change under web/.
+    Accessibility | Runs the accessibility audit before each release.
+    Design | Keeps the design tokens and the icon set.
+  Priya Castellano | Owns the mobile app.
+    Android | Publishes the Android builds.
+    iOS | Publishes the iOS builds through TestFlight.
+    Shared core | Reviews changes to mobile/shared/ with Mirela.
+  Jun Halvorsen | Runs the hosted demo instance and the infrastructure code.
+    Demo instance | Keeps demo.lanternfish.invalid running and resets it weekly.
+    Infrastructure | Reviews every change under infra/.
+    Backups | Tests a restore every quarter.
+  Docs team | Two volunteers who keep the docs site current.
+    User guide | Updates the guide for every user-facing change.
+    Translations | Coordinates the German and Portuguese translations.
+    Screenshots | Refreshes screenshots before each release.
+  Security contact | security@lanternfish.invalid, read by Mirela and Jun.
+    Disclosure policy | 90 days, described in SECURITY.md.
+    Advisories | Published as GitHub security advisories.
+    Dependency alerts | Triaged weekly by whoever is on rotation.
+  Community moderators | Three volunteers moderate the forum and chat.
+    Forum | Moderates forum.lanternfish.invalid.
+    Chat | Moderates the Matrix room.
+    Code of conduct | Enforces CODE_OF_CONDUCT.md and reports to Mirela.
+  Packagers | Downstream packagers outside the core team.
+    Debian | Packages the server for Debian testing.
+    Nix | Maintains the Nix package and module.
+    Homebrew | Maintains the Homebrew formula for the CLI.
+Done
+  Release 1.0 | First stable release with sync, web client and OPML import.
+    Sync protocol v1 | Cursor-based sync shipped and documented.
+      Spec document | docs/api/sync.md describes the protocol.
+      Compatibility | Clients older than 1.0 are refused with a clear error.
+    Web client 1.0 | Reader view, folders and keyboard navigation.
+    OPML import | Import and export of subscriptions.
+    Self-hosting guide | Docker Compose setup documented.
+  Release 1.1 | Search and per-feed retention.
+    Full-text search | FTS5 search with feed filters.
+      Feed filter | feed:<name> limits results to one feed.
+      Phrase search | Quoted phrases match exactly.
+    Per-feed retention | Keep-forever and short windows per feed.
+    Faster startup | Migrations batched, startup down from 9 s to 2 s.
+  Release 1.2 | Mobile apps and app passwords.
+    Android app | First Android release on the Play Store.
+    iOS app | First iOS release on the App Store.
+    App passwords | Revocable per-device tokens.
+    Push notifications | Web and mobile push for important feeds.
+  Fetcher rewrite | Moved the fetcher from Python to Go.
+    Parser parity | All 1,200 recorded feeds parse the same as before.
+    Memory use | Fetcher memory dropped from 800 MB to 90 MB.
+    Politeness | Conditional requests and Retry-After added.
+  Queue migration | Moved from PostgreSQL LISTEN/NOTIFY to a Redis stream.
+    Consumer groups | Several sync instances share the ingest load.
+    Backpressure | The fetcher pauses when the stream is over 100k entries.
+    Cutover | Done in one maintenance window with no lost items.
+  Accessibility pass | The web client meets WCAG 2.1 AA.
+    Keyboard support | Every action reachable without a mouse.
+    Contrast | All themes pass contrast checks.
+    Screen readers | Article pane announces title and feed.
+  Hosted demo | Public demo instance with sample feeds.
+    Weekly reset | Demo data resets every Monday.
+    Sample feeds | Forty public feeds across topics.
+    Rate limits | Demo accounts limited to 50 feeds.
+  Docs site launch | mdBook site replaced the wiki.
+    Guide migration | All wiki pages moved or retired.
+    API reference | Generated from OpenAPI on every release.
+    Search | Built-in mdBook search enabled.
+  Load test baseline | 10k simulated users syncing every minute.
+    Server capacity | One 4-core VM handles the baseline at 40% CPU.
+    Redis capacity | Stream stays under 5k entries at peak.
+    Report | Results in docs/self-host/capacity.md.
+Blocked
+  iOS background sync | iOS kills the sync task after 30 seconds on large accounts.
+    Repro | Accounts with over 50k unread items time out.
+      Device | Reproduced on an iPhone 12 and an iPhone 15.
+      Logs | The OS reports the task as expired, not crashed.
+    Option: smaller pages | Sync in pages of 500 changes.
+      Prototype | Branch sync-pages shows 30% faster first sync.
+      Risk | More round trips on slow networks.
+    Option: push-triggered sync | Silent push wakes the app for a short sync.
+      Limit | iOS throttles silent pushes it considers excessive.
+      Unknown | Whether the throttle applies per app or per device.
+    Waiting on | Priya to test silent push limits on iOS 18.
+  Fetcher IPv6 | Some feeds are reachable over IPv6 only; the demo VM has no IPv6.
+    Hosting ticket | The provider enables IPv6 on request; ticket open.
+    Workaround | None; those feeds show as dead on the demo.
+    Owner | Jun.
+  Search in mobile | The mobile apps cannot search offline.
+    Size concern | An FTS index on device could double storage use.
+    Option: server search only | Search needs a connection.
+    Decision needed | Mirela and Priya to decide before 1.3.
+  Debian package | Blocked on a newer Rust toolchain in Debian testing.
+    Required version | The server needs Rust 1.80 or newer.
+    Status | Toolchain update is in progress upstream.
+    Workaround | Users install the container image instead.
+  Push relay cost | The mobile push relay costs more than donations cover.
+    Current cost | About 40 EUR a month at current volume.
+    Option: self-hosted relay | Each server runs its own relay with its own keys.
+    Option: drop mobile push | Keep web push only.
+  Large OPML timeouts | Imports over 5,000 feeds time out behind some proxies.
+    Cause | The proxy closes the request before the background job is queued.
+      Proxies | Seen behind nginx with a 60 second timeout.
+      Size | A 5,000-feed OPML file is about 1.5 MB.
+    Fix idea | Upload first, then queue the job and poll its status.
+    Owner | Ayo.
+  Translation coverage | Portuguese translation is 40% complete.
+    Needed for | The 1.3 release notes promise Portuguese.
+    Volunteers | One active translator.
+    Fallback | Ship 1.3 with English fallback strings.
+  Flaky e2e tests | Two Playwright tests fail one run in ten.
+    Tests | reader-keyboard.spec and opml-import.spec.
+    Suspected cause | The web client starts before the Compose stack is healthy.
+    Owner | Ayo.
+  Redis memory alerts | The demo Redis hits its memory alert during resets.
+    Cause | The weekly reset re-fetches all sample feeds at once.
+    Fix idea | Spread the reset over an hour.
+    Owner | Jun.
+Decisions
+  SQLite per user | Each user gets their own SQLite file instead of one shared database.
+    Reason | Backups, deletion and moves are file operations; no shared lock.
+      Backup | restic copies changed files only.
+      Deletion | Deleting an account deletes one file.
+    Cost | Cross-user queries need a fan-out job.
+    Decided | Before 1.0, in the storage design discussion.
+  Go for the fetcher | The fetcher was rewritten in Go rather than Rust.
+    Reason | Tomasz knows Go well and the feed parsing libraries are mature.
+    Cost | Two languages in the repository.
+    Decided | During the fetcher rewrite.
+  Redis stream as queue | Redis streams replaced PostgreSQL notifications.
+    Reason | Consumer groups and trimming come built in.
+    Cost | One more service to run.
+    Decided | During the queue migration.
+  No third-party login | Accounts are local; no OAuth providers.
+    Reason | Self-hosters should not need an external account.
+    Revisit | If many users ask for it after 1.3.
+  Read wins on conflict | When devices disagree, read beats unread.
+    Reason | Users complained more about items reappearing than disappearing.
+    Cost | An accidental mark-read on one device cannot be undone by another.
+  Kotlin Multiplatform for mobile | One shared core for Android and iOS.
+    Reason | The sync client is the hard part and should exist once.
+    Cost | iOS builds are slower and need a Mac runner.
+    Alternative rejected | Two native apps with duplicated sync code.
+  mdBook for docs | The docs site uses mdBook instead of a wiki.
+    Reason | Docs live in the repo and change with the code.
+    Cost | Non-developers need git to edit.
+  90-day retention default | Unstarred items are kept for 90 days by default.
+    Reason | Keeps typical user databases under 200 MB.
+    Override | Per feed, and starred items are kept forever.
+  Apache-2.0 license | The project is licensed under Apache-2.0.
+    Reason | Patent grant and compatibility with the libraries in use.
+    Contributor terms | Contributions under the same license; no CLA.
+Services | Which services run in production?
+  sync-server | The Rust sync server, two instances behind Caddy.
+    Health check | GET /v1/health returns 200 with the schema version.
+      Schema version | Lets the load balancer drain old instances during upgrades.
+      Timeout | 2 seconds.
+    Logs | JSON lines to stdout, collected by journald.
+    Metrics | Prometheus endpoint on port 9102.
+      Sync latency | Histogram of /v1/sync durations.
+      Active users | Gauge of users synced in the last hour.
+      Database opens | Counter of SQLite file opens.
+    Scaling | Stateless apart from the user files on shared storage.
+  fetcher | The Go fetcher, one instance per 50k feeds.
+    Health check | Writes a heartbeat key to Redis every 30 seconds.
+    Logs | JSON lines to stdout.
+    Metrics | Prometheus endpoint on port 9103.
+  redis | Redis 7 holding the items stream.
+    Persistence | AOF every second.
+      Rewrite | AOF rewrite runs when the file doubles.
+      Recovery | Tested by killing Redis during the load test.
+    Memory limit | 2 GB with an alert at 80%.
+    Version policy | Follow the latest minor release within a month.
+  caddy | Reverse proxy and TLS.
+    Certificates | Automatic ACME certificates.
+    Routing | /v1 to the sync server, everything else to the web client files.
+    Rate limiting | 50 requests per minute per token on /v1.
+      Exemptions | The mobile apps' sync calls are exempt.
+      Response | 429 with Retry-After.
+  backup job | Nightly restic backup of the user SQLite files.
+    Schedule | 03:00 UTC every night.
+    Retention | 7 daily, 4 weekly, 6 monthly snapshots.
+      Prune | restic forget --prune runs on Sundays.
+      Encryption | Repository key held by Mirela and Jun.
+    Restore test | Quarterly, by Jun.
+  push relay | Relays push messages to Apple and Google.
+    Keys | Platform keys stored in the server's secret store.
+    Limits | 10 pushes per user per hour.
+    Logs | Only delivery counts are logged, never message content.
+  demo instance | demo.lanternfish.invalid, a single VM.
+    Reset job | Monday 04:00 UTC.
+    Monitoring | Uptime check every 5 minutes.
+    Sample data | Forty feeds and three demo accounts.
+  docs site | Static files on object storage behind a CDN.
+    Build | Built by CI on every release tag.
+    Preview | Pull requests get a preview link.
+  forum | Discourse instance run by a volunteer.
+    Backups | Daily, kept for 30 days.
+    Moderation | By the community moderators.

@@ -2,7 +2,7 @@
 
 Why rrecall exists and what it must never become: [VISION.md](VISION.md). This document is what it does and the plan to build it. Sections are cited as `spec §N`. A change to behavior described here updates this file in the same PR.
 
-Status: design, before milestone 1.
+Status: milestone 1 (store and queries) built; milestone 2 next.
 
 ## 1. Terms
 
@@ -26,12 +26,12 @@ Status: design, before milestone 1.
 
 | Who | Command | What it does |
 | --- | --- | --- |
-| Maintainer | `rrecall init [<project>]` | Creates the map store with the default skeleton and a config naming the sources found (repo path, `origin` remote). |
-| Maintainer | `rrecall import <outline>` | Seeds an empty map from an indented outline (`title | detail` per line). Top-level lines that match a branch title or id fill that branch; the others become new branches, added to the config in the same commit. Every imported node gets the source `import:<file>`. |
+| Maintainer | `rrecall init [<project>]` | Creates the map store with the default skeleton and a config naming the sources found (repo path, `origin` remote), and registers the project in the user config. |
+| Maintainer | `rrecall import <outline>` | Seeds an empty map from an indented outline (`title | detail` per line). Top-level lines that match a branch title or id fill that branch; the others become new branches, added to the config in the same commit. Every imported node gets the source `import:<file>`. A map that already has nodes is a usage error. |
 | Maintainer | `rrecall run [--only <plugin>] [--force]` | Runs the pipeline (§4). `--force` ignores fingerprints and collects every source again. |
 | Maintainer | `rrecall open` | Renders the HTML view and opens it. |
-| Maintainer | `rrecall note <id> <text>` | Adds the user's annotation to a node; runs never change it. |
-| Maintainer | `rrecall rm <id> [--reason <text>]` | Removes a node by hand, for the cases a run may not (a node with a note or children, §5 I3). |
+| Maintainer | `rrecall note <id> <text>` | Adds the user's annotation to a node; runs never change it. An empty text clears it. |
+| Maintainer | `rrecall rm <id> [--reason <text>] [--recursive]` | Removes a node by hand, for the cases a run may not (a node with a note or children, §5 I3). A node with children needs `--recursive`, which removes them too. |
 | Maintainer | `rrecall doctor` | Checks that each enabled plugin's requirements (binaries, logins, access) are met; prints what a run would skip. |
 | Maintainer | `rrecall plugin list | add <git-url|path> [--ref <ref>] | trust <dir>` | Manages plugins (§6.7). |
 | Agent and maintainer | `rrecall ls [--depth N]` | The tree of titles and ids. Default depth 2. |
@@ -42,11 +42,18 @@ Status: design, before milestone 1.
 | Agent and maintainer | `rrecall status` | Last run, its result, sources that were unreachable, proposals left rejected. |
 | Maintainer | `rrecall agent-instructions` | Prints a short paragraph to paste into an agent's instruction file: that the map exists and which commands answer which question. |
 
-The project is resolved from `--project`, else `RRECALL_PROJECT`, else the current directory's git `origin` remote looked up in the user config (§9). Query commands print compact Markdown by default and JSON with `--json`.
+The project is resolved from `--project`, else `RRECALL_PROJECT`, else the current directory's git `origin` remote looked up in the user config (§9). Remote URLs match as exact strings. With none of the three (no flag, no variable, no `origin` in the current directory), the command exits 2; an `origin` the user config does not list, or a project whose store does not exist, exits 3. Query commands print compact Markdown by default and JSON with `--json`.
+
+`init` details:
+- The project name is the argument, else `--project` or `RRECALL_PROJECT`, else the basename of the `origin` URL without `.git`; with none of these it exits 2. A name is a plain directory name (no `/`, not starting with `.`). A store that already exists exits 2.
+- The store config names the sources found as the plugin instances `rrecall run` will use: inside a git repository, `[[plugins]] id = "repo"`, `use = "files"`, `params = { path = "<repo root>", git = true, preset = "codebase" }`; for a GitHub `origin`, `[[plugins]] id = "github"`, `params = { repo = "<owner>/<name>" }`.
+- When the user config has no entry for the project, `init` appends `[[projects]]` with `name` and `remotes = ["<origin url>"]` (§9), so later commands resolve the project from inside the repo. It never edits an existing entry.
+
+`import` details: one node per line, `title | detail` split at the first `|` (the detail is optional), nesting by leading spaces (no tabs), blank lines skipped. A top-level line matches a branch by title or id, case-insensitively; a matching line may not carry a detail, because the branch's question comes from the config. A new top-level line becomes a branch whose question is its detail. Limits (§3.1) are checked before anything is written; a violation exits 2 naming the line.
 
 Exit codes:
 - `0`: done. For `run`: every collector ran and every proposal was settled (accepted, or rejected by checks and judges that ran); rejected proposals are a normal outcome, listed in the report.
-- `1`: not found. `2`: usage error. `3`: no map for this project.
+- `1`: not found, or any other error (a corrupt map file, a git or file system failure); the message says which. `2`: usage error. `3`: no map for this project.
 - `4`: the run was aborted before its commit (manifest error, a hook denied the run or the commit, another run holds the store lock). The store is unchanged.
 - `5`: the run committed what was accepted, but not everything ran: a source was unreachable, the budget ran out, or a check or judge failed and its proposals were dropped. The report says which; the lock keeps those collectors unsettled (§4.2), so the next run collects them again.
 
@@ -68,10 +75,13 @@ Exit codes:
 
 ### 3.2 Storage
 
-- A map store holds: `map/<branch-id>.jsonl` (one file per branch, one node per line), `rrecall.toml` (the project config, §9), `rrecall.lock` (fingerprints and plugin hashes, §4.2), `plugins/` (the project's own plugins, trusted because the user owns the store).
+- Branches are not stored as lines: they come from the config, the six of §3.4 plus `[[skeleton.branch]]` entries, in that order. A branch shows as a node whose body is its question and whose source is `config:rrecall.toml`. `note` and `rm` on a branch exit 2 (I5).
+- A map store holds: `map/<branch-id>.jsonl` (one file per branch, one node per line, holding every node under that branch; the file exists only while the branch has nodes), `rrecall.toml` (the project config, §9), `rrecall.lock` (fingerprints and plugin hashes, §4.2), `plugins/` (the project's own plugins, trusted because the user owns the store).
 - Each line is one node as JSON with keys in a fixed order and no insignificant whitespace; lines are sorted by `id`. A node whose content did not change keeps a byte-identical line, so `git diff` shows only real changes and `git blame` attributes each node to the run that last changed it.
 - Generated and private-to-the-run files (`cache/`, `runs/`, `views/`) are untracked.
 - The store has no git remote by default. rrecall never adds one.
+- `init` writes `.gitattributes` with `*.jsonl text eol=lf`, so map lines stay LF in the working tree whatever `core.autocrlf` says (I6). A command rewrites only the branch files whose nodes changed.
+- Store commits are authored as `rrecall <rrecall@localhost>` and never signed, so they work with no git identity configured. A command commits exactly the files it wrote; other files in the store, staged or not, stay out of its commit. If the commit fails (a hook rejects it), the files get their previous content back and the command exits 1. Commits outside a run: `init <project>`; `import <file>: +<N> nodes, +<K> branches`; `note <branch>/<id>` (`: cleared` when emptied); `rm <branch>/<id>: <reason>` (default reason `removed by hand`) with one `removed <branch>/<id>` line per node removed.
 - Default location: `$XDG_DATA_HOME/rrecall/<project>/` (`~/.local/share/rrecall/<project>/`), overridable per project in the user config.
 
 ### 3.3 Source references
@@ -82,15 +92,15 @@ A reference is a short string `<kind>:<locator>`, specific enough that a person 
 
 Six stored branches, one per question an agent asks, plus one computed answer:
 
-| Branch id | Question | Granularity told to collectors |
-| --- | --- | --- |
-| `layout` | Where does something live? | one node per component, directory or service |
-| `how-it-works` | How does something work? | one node per mechanism or flow |
-| `people` | Who is responsible for what? | one node per person or team, with their areas |
-| `done` | What was done? | one node per release or finished stream of work, not per commit or PR |
-| `blocked` | What is open or blocked, and on what? | one node per blocker or open question |
-| `decisions` | Why was a decision made? | one node per decision, with its reason, date and source |
-| `recent` (computed) | What was worked on lately? | answered by `rrecall recent` from the store's history and dated nodes; not stored, so it does not churn |
+| Branch id | Title | Question | Granularity told to collectors |
+| --- | --- | --- | --- |
+| `layout` | Layout | Where does something live? | one node per component, directory or service |
+| `how-it-works` | How it works | How does something work? | one node per mechanism or flow |
+| `people` | People | Who is responsible for what? | one node per person or team, with their areas |
+| `done` | Done | What was done? | one node per release or finished stream of work, not per commit or PR |
+| `blocked` | Blocked | What is open or blocked, and on what? | one node per blocker or open question |
+| `decisions` | Decisions | Why was a decision made? | one node per decision, with its reason, date and source |
+| `recent` (computed) | | What was worked on lately? | answered by `rrecall recent` from the store's history and dated nodes; not stored, so it does not churn |
 
 A project adds branches in its config (`[[skeleton.branch]]` with `id`, `title`, `question`, `granularity`; for example `services`). The granularity text goes into every collector's input for that branch. A run never adds, removes or renames a branch; only a config change does, and it shows as its own commit.
 
@@ -263,10 +273,10 @@ A runner gets `{ "prompt", "input", "output_schema", "model", "timeout", "read_o
 
 ## 7. Query output for agents
 
-- Markdown, one node per block: `## <path> (<id>)`, the body, then `sources:` with the short references. Children appear as titles with ids unless `--depth` asks for more.
+- Markdown, one node per block: `## <path> (<id>)`, the body, then `sources:` with the short references, then `date`, `state` and `note` when set. The path is the titles from the branch down, joined by ` > `. Children appear as titles with ids (`- <title> (<id>)`) unless `--depth` asks for more; a title line ends with `+N` when N descendants are not shown.
 - `ls` prints titles and ids to depth 2 by default; for the reference map (about 300 nodes) that stays under about 1,500 tokens. Deeper levels are one `show <id>` away.
-- `--max-tokens N` cuts the output at a node boundary and ends with how many nodes were left out and the command to see them.
-- `--json` prints the same nodes as JSON for scripts.
+- `--max-tokens N` cuts the output at a node boundary and ends with how many nodes were left out and the command to see them. Tokens are estimated as bytes / 4, rounded up. The first node is always printed.
+- `--json` prints the same nodes as JSON for scripts and plugins (§6.3): `show` and `find` print `{"nodes": [...]}`, each node with its stored fields plus `path` and `children` (the ids of its children); a `--max-tokens` cut adds `"left_out": [ids]`. `ls` prints `{"nodes": [{"id", "parent", "title"}]}` (`parent` absent for branches).
 
 ## 8. Views
 
@@ -274,7 +284,7 @@ The built-in `html` view writes one self-contained `views/index.html`: a collaps
 
 ## 9. Configuration
 
-- **User config** `$XDG_CONFIG_HOME/rrecall/config.toml`: projects (name, store path, remote URLs that map to it), default runner and model, installed plugins with their sources and hashes, trusted plugin directories.
+- **User config** `$XDG_CONFIG_HOME/rrecall/config.toml`: projects as `[[projects]]` with `name`, an optional absolute `store` path and `remotes` (the URLs that map to it), default runner and model, installed plugins with their sources and hashes, trusted plugin directories.
 - **Store config** `rrecall.toml`: enabled plugins in order with their params and `allowed_runners`, skeleton additions, `max_rounds`, timeouts, and a cost cap per run (`max_cost_usd`). The core checks the cap before starting each runner call; calls already in flight may finish, so a run can exceed the cap by at most the cost of the calls in flight. When the cap is reached, pending proposals are dropped with the reason "budget", their collectors stay unsettled, and the run exits 5.
 
 ## 10. Built-in plugins for the first release
