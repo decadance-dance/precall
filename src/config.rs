@@ -113,6 +113,12 @@ pub fn load_branches(store: &Path) -> Result<Vec<BranchDef>> {
     Ok(branches)
 }
 
+/// The `[[skeleton.branch]]` entry with this id in a config text, if the text parses and has one.
+pub fn branch_entry(text: &str, id: &str) -> Option<BranchDef> {
+    let cfg: StoreConfig = toml::from_str(text).ok()?;
+    cfg.skeleton.branch.into_iter().find(|b| b.id == id)
+}
+
 /// TOML text of one `[[skeleton.branch]]` entry, to append to `rrecall.toml`.
 pub fn branch_toml(b: &BranchDef) -> String {
     format!(

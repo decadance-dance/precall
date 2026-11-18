@@ -1,5 +1,6 @@
 //! Answers from the store's git history: `why` and `recent` (spec §2).
 
+use crate::config::{self, STORE_CONFIG};
 use crate::error;
 use crate::node::Node;
 use crate::query;
@@ -49,16 +50,22 @@ fn commit_json(c: &Commit) -> Value {
 pub fn why(store: &Store, id: &str, as_json: bool) -> Result<String> {
     let node = store.get(id)?;
     let mut commits = if store.is_branch(id) {
-        log(
-            store,
-            &[
-                "--reverse",
-                "-G",
-                &format!("^id = \"{id}\"$"),
-                "--",
-                crate::config::STORE_CONFIG,
-            ],
-        )?
+        // The commits where this branch's entry in the config differs from the revision before.
+        let mut changed = Vec::new();
+        let mut prev = None;
+        for c in log(store, &["--reverse", "--", STORE_CONFIG])? {
+            let text = git(
+                &store.root,
+                &["show", &format!("{}:{STORE_CONFIG}", c.hash)],
+            )
+            .unwrap_or_default();
+            let entry = config::branch_entry(&text, id);
+            if entry != prev {
+                changed.push(c);
+            }
+            prev = entry;
+        }
+        changed
     } else {
         // Ids are slugs, so they need no regex escaping; the pattern matches only this node's own line.
         log(
