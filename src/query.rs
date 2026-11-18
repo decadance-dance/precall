@@ -6,11 +6,6 @@ use anyhow::Result;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The token estimate used for `--max-tokens` and the `ls` size budget: one token per 4 bytes, rounded up.
-pub fn estimate_tokens(s: &str) -> usize {
-    s.len().div_ceil(4)
-}
-
 type Kids<'a> = BTreeMap<&'a str, Vec<&'a Node>>;
 
 /// Titles from the branch down to the node.
@@ -203,7 +198,7 @@ pub fn show(
     })
 }
 
-/// How many leading pieces fit in `max` tokens with the footer; never fewer than one.
+/// How many leading pieces fit in `max` tokens (estimated as bytes / 4, rounded up) with the footer; never fewer than one.
 // limit: a first node larger than `max` is still printed, so a cut output can exceed `max`.
 fn fit(pieces: &[String], max: usize, footer: &dyn Fn(usize) -> String) -> usize {
     let mut bytes: Vec<usize> = vec![0];

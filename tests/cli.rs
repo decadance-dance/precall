@@ -822,3 +822,16 @@ fn agent_instructions_name_the_query_commands() {
     }
     assert!(tokens(&text) < 250, "a short paragraph: {}", tokens(&text));
 }
+
+#[test]
+fn import_appends_when_two_lines_fill_one_branch() {
+    let e = Env::new();
+    e.ok(&["init", "kiln"]);
+    let file = e.write("twice.txt", "Layout\n  Zed\nlayout\n  Alpha\n");
+    e.ok(&["--project", "kiln", "import", file.to_str().unwrap()]);
+    let show = e.ok(&["--project", "kiln", "show", "layout"]);
+    assert!(
+        show.ends_with("- Zed (zed)\n- Alpha (alpha)\n"),
+        "new nodes go last:\n{show}"
+    );
+}

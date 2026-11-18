@@ -365,7 +365,14 @@ fn add_items(
     source: &str,
 ) -> Result<usize, (usize, String)> {
     let mut n = 0;
-    for (order, item) in items.iter().enumerate() {
+    // New nodes go after the parent's existing children (spec §3.1 `order`).
+    let base = s
+        .nodes
+        .values()
+        .filter(|x| x.parent.as_deref() == Some(parent))
+        .count();
+    for (i, item) in items.iter().enumerate() {
+        let order = base + i;
         let id = node::unique_slug(&item.title, |x| s.id_taken(x));
         let node = Node {
             parent: Some(parent.into()),
