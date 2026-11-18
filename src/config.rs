@@ -102,6 +102,120 @@ pub fn branch_toml(b: &BranchDef) -> String {
     )
 }
 
+/// The user config `$XDG_CONFIG_HOME/rrecall/config.toml` (spec §9), the parts M1 reads.
+#[derive(Debug, Default, Deserialize)]
+pub struct UserConfig {
+    // limit: default runner and model, installed and trusted plugins come with M2 to M4; ignored here.
+    #[serde(default)]
+    pub projects: Vec<ProjectEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectEntry {
+    pub name: String,
+    #[serde(default)]
+    pub store: Option<PathBuf>,
+    #[serde(default)]
+    pub remotes: Vec<String>,
+}
+
+fn xdg_dir(var: &str, fallback: &str) -> Result<PathBuf> {
+    match std::env::var_os(var).map(PathBuf::from) {
+        Some(p) if p.is_absolute() => Ok(p),
+        _ => {
+            let home = std::env::var_os("HOME").context("HOME is not set")?;
+            Ok(PathBuf::from(home).join(fallback))
+        }
+    }
+}
+
+pub fn user_config_path() -> Result<PathBuf> {
+    Ok(xdg_dir("XDG_CONFIG_HOME", ".config")?.join("rrecall/config.toml"))
+}
+
+pub fn load_user_config() -> Result<UserConfig> {
+    let path = user_config_path()?;
+    match std::fs::read_to_string(&path) {
+        Ok(text) => toml::from_str(&text).with_context(|| format!("{} does not parse", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(UserConfig::default()),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
+impl UserConfig {
+    pub fn project(&self, name: &str) -> Option<&ProjectEntry> {
+        self.projects.iter().find(|p| p.name == name)
+    }
+
+    /// The store directory: the user config's `store`, else `$XDG_DATA_HOME/rrecall/<name>`.
+    pub fn store_path(&self, name: &str) -> Result<PathBuf> {
+        match self.project(name).and_then(|p| p.store.clone()) {
+            Some(p) if p.is_absolute() => Ok(p),
+            Some(p) => anyhow::bail!("user config: store `{}` of project `{name}` is not an absolute path", p.display()),
+            None => Ok(xdg_dir("XDG_DATA_HOME", ".local/share")?.join("rrecall").join(name)),
+        }
+    }
+}
+
+/// A project name doubles as a directory name, so it may not climb or nest.
+pub fn check_project_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.starts_with('.') || name.contains(['/', '\\']) || name.chars().any(char::is_control) {
+        return Err(crate::error::usage(format!(
+            "project name `{name}` must be a plain directory name (no `/`, not starting with `.`)"
+        )));
+    }
+    Ok(())
+}
+
+/// The `origin` remote URL of the git repository at `dir`, if any.
+pub fn origin_url(dir: &Path) -> Option<String> {
+    let o = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .ok()?;
+    let url = String::from_utf8(o.stdout).ok()?.trim().to_string();
+    (o.status.success() && !url.is_empty()).then_some(url)
+}
+
+/// Project name and store directory from `--project`, `RRECALL_PROJECT`, or the current repo's origin (spec §2).
+pub fn resolve_project(flag: Option<&str>) -> Result<(String, PathBuf)> {
+    let user = load_user_config()?;
+    let env = std::env::var("RRECALL_PROJECT").ok().filter(|v| !v.is_empty());
+    let name = match flag.map(str::to_string).or(env) {
+        Some(name) => name,
+        None => {
+            let cwd = std::env::current_dir()?;
+            let Some(url) = origin_url(&cwd) else {
+                return Err(crate::error::usage(
+                    "no project: pass --project <name>, set RRECALL_PROJECT, or run inside a repo whose origin remote is in the user config",
+                ));
+            };
+            // limit: remote URLs match as exact strings; an ssh and an https URL of one repo are two remotes.
+            match user.projects.iter().find(|p| p.remotes.contains(&url)) {
+                Some(p) => p.name.clone(),
+                None => {
+                    return Err(crate::error::no_map(format!(
+                        "no map for origin {url}: run `rrecall init` in this repo, or add the URL to a project's remotes in {}",
+                        user_config_path()?.display()
+                    )));
+                }
+            }
+        }
+    };
+    check_project_name(&name)?;
+    let path = user.store_path(&name)?;
+    if !path.join(STORE_CONFIG).is_file() {
+        return Err(crate::error::no_map(format!(
+            "no map for project `{name}` at {}: run `rrecall init {name}`",
+            path.display()
+        )));
+    }
+    Ok((name, path))
+}
+
 /// A TOML basic string with its quotes and escapes.
 pub fn toml_str(s: &str) -> String {
     toml::Value::String(s.to_string()).to_string()

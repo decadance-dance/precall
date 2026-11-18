@@ -1,8 +1,9 @@
+pub mod commands;
 pub mod config;
 pub mod error;
 pub mod node;
+pub mod query;
 pub mod store;
-
 #[cfg(test)]
 pub(crate) mod testutil {
     use std::path::PathBuf;

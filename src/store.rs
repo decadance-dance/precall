@@ -144,6 +144,46 @@ impl Store {
     }
 }
 
+impl Store {
+    /// Stages everything in the store but the ignored run files and commits it; false when nothing changed.
+    pub fn commit(&self, message: &str) -> Result<bool> {
+        git(&self.root, &["add", "-A", "."])?;
+        if git_status(&self.root, &["diff", "--cached", "--quiet"])? {
+            return Ok(false);
+        }
+        git(&self.root, &["commit", "-q", "-m", message])?;
+        Ok(true)
+    }
+}
+
+/// Runs git in `dir` as rrecall (store commits need no configured identity and are never signed).
+pub fn git(dir: &Path, args: &[&str]) -> Result<String> {
+    let o = git_cmd(dir, args).output().context("running git")?;
+    if !o.status.success() {
+        bail!("git {} failed in {}: {}", args.join(" "), dir.display(), String::from_utf8_lossy(&o.stderr).trim());
+    }
+    String::from_utf8(o.stdout).context("git printed non-UTF-8 output")
+}
+
+/// True when git exits 0, false when it exits 1; an error otherwise.
+fn git_status(dir: &Path, args: &[&str]) -> Result<bool> {
+    let o = git_cmd(dir, args).output().context("running git")?;
+    match o.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => bail!("git {} failed in {}: {}", args.join(" "), dir.display(), String::from_utf8_lossy(&o.stderr).trim()),
+    }
+}
+
+fn git_cmd(dir: &Path, args: &[&str]) -> std::process::Command {
+    let mut c = std::process::Command::new("git");
+    c.args(["-c", "user.name=rrecall", "-c", "user.email=rrecall@localhost", "-c", "commit.gpgsign=false"])
+        .args(["-c", "init.defaultBranch=main", "-C"])
+        .arg(dir)
+        .args(args);
+    c
+}
+
 fn branch_node(b: &BranchDef, index: usize) -> Node {
     Node {
         id: b.id.clone(),
