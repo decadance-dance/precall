@@ -1,0 +1,9 @@
+#!/bin/sh
+# The merge gate (CI job `ci-ok`): format, lints, tests. Every step runs; any failure fails.
+cd "$(dirname "$0")/.." || exit 1
+[ -f Cargo.toml ] || { echo "bin/check: no Cargo.toml yet, nothing to check"; exit 0; }
+status=0
+cargo fmt --check || status=1
+cargo clippy --all-targets -- -D warnings || status=1
+cargo test || status=1
+exit $status
