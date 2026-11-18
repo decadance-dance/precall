@@ -586,7 +586,16 @@ fn rewrite_of_imported_300_node_store_keeps_bytes() {
         files
     };
     let before = read_map();
-    rrecall::store::Store::load(&store).unwrap().save().unwrap();
+    let loaded = rrecall::store::Store::load(&store).unwrap();
+    // Serializing the loaded map gives the stored bytes exactly, file by file.
+    let rendered: Vec<(String, Vec<u8>)> = loaded
+        .render_map()
+        .unwrap()
+        .into_iter()
+        .map(|(rel, text)| (store.join(rel).display().to_string(), text.into_bytes()))
+        .collect();
+    assert_eq!(rendered, before);
+    loaded.save().unwrap();
     assert_eq!(read_map(), before);
     assert_eq!(git(&store, &["status", "--porcelain"]), "");
 }
@@ -1033,4 +1042,31 @@ fn import_matches_branch_titles_case_insensitively_beyond_ascii() {
         show.ends_with("- First (first)\n- Second (second)\n"),
         "{show}"
     );
+}
+
+#[test]
+fn a_failed_init_commit_leaves_no_store() {
+    use std::os::unix::fs::PermissionsExt;
+    let e = Env::new();
+    // A global hooks path (HOME is the test's own) makes every commit fail.
+    let hooks = e.root.join("hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    std::fs::write(hooks.join("pre-commit"), "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(
+        hooks.join("pre-commit"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let gitconfig = e.root.join("home/.gitconfig");
+    std::fs::write(
+        &gitconfig,
+        format!("[core]\n\thooksPath = {}\n", hooks.display()),
+    )
+    .unwrap();
+    let o = e.run(&["init", "kiln"]);
+    assert_eq!(o.code, 1, "{}", o.stderr);
+    assert!(!e.store("kiln").exists(), "no half-made store");
+    assert!(!e.user_config().exists(), "no project registered");
+    std::fs::remove_file(&gitconfig).unwrap();
+    e.ok(&["init", "kiln"]);
 }

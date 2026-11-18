@@ -80,7 +80,8 @@ Exit codes:
 - Each line is one node as JSON with keys in a fixed order and no insignificant whitespace; lines are sorted by `id`. A node whose content did not change keeps a byte-identical line, so `git diff` shows only real changes and `git blame` attributes each node to the run that last changed it.
 - Generated and private-to-the-run files (`cache/`, `runs/`, `views/`) are untracked.
 - The store has no git remote by default. rrecall never adds one.
-- Store commits are authored as `rrecall <rrecall@localhost>` and never signed, so they work with no git identity configured. Commits outside a run: `init <project>`; `import <file>: +<N> nodes, +<K> branches`; `note <branch>/<id>` (`: cleared` when emptied); `rm <branch>/<id>: <reason>` (default reason `removed by hand`) with one `removed <branch>/<id>` line per node removed.
+- `init` writes `.gitattributes` with `*.jsonl text eol=lf`, so map lines stay LF in the working tree whatever `core.autocrlf` says (I6). A command rewrites only the branch files whose nodes changed.
+- Store commits are authored as `rrecall <rrecall@localhost>` and never signed, so they work with no git identity configured. A command commits exactly the files it wrote; other files in the store, staged or not, stay out of its commit. If the commit fails (a hook rejects it), the files get their previous content back and the command exits 1. Commits outside a run: `init <project>`; `import <file>: +<N> nodes, +<K> branches`; `note <branch>/<id>` (`: cleared` when emptied); `rm <branch>/<id>: <reason>` (default reason `removed by hand`) with one `removed <branch>/<id>` line per node removed.
 - Default location: `$XDG_DATA_HOME/rrecall/<project>/` (`~/.local/share/rrecall/<project>/`), overridable per project in the user config.
 
 ### 3.3 Source references

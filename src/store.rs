@@ -150,72 +150,168 @@ impl Store {
         out
     }
 
-    /// Writes one file per non-empty branch, lines sorted by id; removes files of empty branches.
-    pub fn save(&self) -> Result<()> {
-        let mut files: BTreeMap<&str, String> = BTreeMap::new();
+    /// The serialized map: one text per non-empty branch file (`map/<id>.jsonl`), lines sorted by id.
+    pub fn render_map(&self) -> Result<BTreeMap<String, String>> {
+        let mut files: BTreeMap<String, String> = BTreeMap::new();
         for n in self.nodes.values().filter(|n| n.parent.is_some()) {
             let line = serde_json::to_string(n)?;
-            let text = files.entry(self.branch_of(&n.id)).or_default();
+            let text = files
+                .entry(format!("map/{}.jsonl", self.branch_of(&n.id)))
+                .or_default();
             text.push_str(&line);
             text.push('\n');
         }
-        let dir = self.root.join("map");
-        std::fs::create_dir_all(&dir).context("creating map/")?;
+        Ok(files)
+    }
+
+    /// Branch files whose content differs from the file on disk; `None` removes an emptied file.
+    /// Line endings do not count, so a file checked out with CRLF is left alone when its nodes did not change.
+    pub fn map_changes(&self) -> Result<Vec<Change>> {
+        let files = self.render_map()?;
+        let mut changes = Vec::new();
         for b in &self.branches {
-            let path = dir.join(format!("{}.jsonl", b.id));
-            match files.get(b.id.as_str()) {
-                Some(text) => std::fs::write(&path, text)
-                    .with_context(|| format!("writing {}", path.display()))?,
-                None if path.exists() => std::fs::remove_file(&path)?,
-                None => {}
+            let rel = format!("map/{}.jsonl", b.id);
+            let new = files.get(&rel).cloned();
+            let disk = std::fs::read_to_string(self.root.join(&rel)).ok();
+            let same = match (&disk, &new) {
+                (Some(d), Some(n)) => d.replace("\r\n", "\n") == *n,
+                (d, n) => d.is_none() && n.is_none(),
+            };
+            if !same {
+                changes.push((rel, new));
             }
         }
-        Ok(())
+        Ok(changes)
+    }
+
+    /// Writes the branch files that changed.
+    pub fn save(&self) -> Result<()> {
+        write_files(&self.root, &self.map_changes()?)
+    }
+
+    /// Writes the branch files that changed plus `extra`, and commits exactly those files.
+    pub fn save_and_commit(&self, extra: Vec<Change>, message: &str) -> Result<bool> {
+        let mut changes = extra;
+        changes.extend(self.map_changes()?);
+        write_and_commit(&self.root, &changes, message)
     }
 }
 
-impl Store {
-    /// Stages everything in the store but the ignored run files and commits it; false when nothing changed.
-    pub fn commit(&self, message: &str) -> Result<bool> {
-        git(&self.root, &["add", "-A", "."])?;
-        if git_status(&self.root, &["diff", "--cached", "--quiet"])? {
+/// A file a command writes: its path in the store and its new content (`None` removes it).
+pub type Change = (String, Option<String>);
+
+fn write_files(root: &Path, changes: &[Change]) -> Result<()> {
+    for (rel, new) in changes {
+        let path = root.join(rel);
+        match new {
+            Some(text) => {
+                if let Some(dir) = path.parent() {
+                    std::fs::create_dir_all(dir)?;
+                }
+                std::fs::write(&path, text)
+            }
+            None if path.exists() => std::fs::remove_file(&path),
+            None => Ok(()),
+        }
+        .with_context(|| format!("writing {rel}"))?;
+    }
+    Ok(())
+}
+
+/// Writes `changes` and commits exactly those paths: other files, staged or not, stay out of the
+/// commit. If the write or the commit fails, the files get their previous content back.
+pub fn write_and_commit(root: &Path, changes: &[Change], message: &str) -> Result<bool> {
+    if changes.is_empty() {
+        return Ok(false);
+    }
+    let before: Vec<Option<Vec<u8>>> = changes
+        .iter()
+        .map(|(rel, _)| std::fs::read(root.join(rel)).ok())
+        .collect();
+    let result = write_files(root, changes).and_then(|()| commit_paths(root, changes, message));
+    if let Err(e) = result {
+        let mut e = e;
+        for ((rel, _), old) in changes.iter().zip(before) {
+            let path = root.join(rel);
+            let restored = match old {
+                Some(bytes) => std::fs::write(&path, bytes),
+                None if path.exists() => std::fs::remove_file(&path),
+                None => Ok(()),
+            };
+            if let Err(r) = restored {
+                e = e.context(format!("and restoring {rel} failed: {r}"));
+            }
+        }
+        return Err(e);
+    }
+    result
+}
+
+/// Commits the given paths through a private index started from HEAD, then points the
+/// real index at the new commit for those paths only.
+fn commit_paths(root: &Path, changes: &[Change], message: &str) -> Result<bool> {
+    let index = root.join(".git").join("rrecall-index");
+    let _ = std::fs::remove_file(&index);
+    let paths: Vec<&str> = changes.iter().map(|(rel, _)| rel.as_str()).collect();
+    let has_head = git_run(root, None, &["rev-parse", "--verify", "-q", "HEAD"])?
+        .status
+        .success();
+    let committed = (|| -> Result<bool> {
+        if has_head {
+            git_in(root, Some(&index), &["read-tree", "HEAD"])?;
+        }
+        let mut add = vec!["add", "-A", "--"];
+        add.extend(&paths);
+        git_in(root, Some(&index), &add)?;
+        if has_head && git_status(root, Some(&index), &["diff", "--cached", "--quiet", "HEAD"])? {
             return Ok(false);
         }
-        git(&self.root, &["commit", "-q", "-m", message])?;
+        git_in(root, Some(&index), &["commit", "-q", "-m", message])?;
         Ok(true)
+    })();
+    let _ = std::fs::remove_file(&index);
+    if committed? {
+        let mut reset = vec!["reset", "-q", "--"];
+        reset.extend(&paths);
+        git_status(root, None, &reset)?;
+        return Ok(true);
     }
+    Ok(false)
 }
 
 /// Runs git in `dir` as rrecall (store commits need no configured identity and are never signed).
 pub fn git(dir: &Path, args: &[&str]) -> Result<String> {
-    let o = git_cmd(dir, args).output().context("running git")?;
+    git_in(dir, None, args)
+}
+
+fn git_in(dir: &Path, index: Option<&Path>, args: &[&str]) -> Result<String> {
+    let o = git_run(dir, index, args)?;
     if !o.status.success() {
-        bail!(
-            "git {} failed in {}: {}",
-            args.join(" "),
-            dir.display(),
-            String::from_utf8_lossy(&o.stderr).trim()
-        );
+        return Err(git_failed(dir, args, &o));
     }
     String::from_utf8(o.stdout).context("git printed non-UTF-8 output")
 }
 
 /// True when git exits 0, false when it exits 1; an error otherwise.
-fn git_status(dir: &Path, args: &[&str]) -> Result<bool> {
-    let o = git_cmd(dir, args).output().context("running git")?;
+fn git_status(dir: &Path, index: Option<&Path>, args: &[&str]) -> Result<bool> {
+    let o = git_run(dir, index, args)?;
     match o.status.code() {
         Some(0) => Ok(true),
         Some(1) => Ok(false),
-        _ => bail!(
-            "git {} failed in {}: {}",
-            args.join(" "),
-            dir.display(),
-            String::from_utf8_lossy(&o.stderr).trim()
-        ),
+        _ => Err(git_failed(dir, args, &o)),
     }
 }
 
-fn git_cmd(dir: &Path, args: &[&str]) -> std::process::Command {
+fn git_failed(dir: &Path, args: &[&str], o: &std::process::Output) -> anyhow::Error {
+    anyhow::anyhow!(
+        "git {} failed in {}: {}",
+        args.join(" "),
+        dir.display(),
+        String::from_utf8_lossy(&o.stderr).trim()
+    )
+}
+
+fn git_run(dir: &Path, index: Option<&Path>, args: &[&str]) -> Result<std::process::Output> {
     let mut c = std::process::Command::new("git");
     c.args([
         "-c",
@@ -228,7 +324,10 @@ fn git_cmd(dir: &Path, args: &[&str]) -> std::process::Command {
     .args(["-c", "init.defaultBranch=main", "-C"])
     .arg(dir)
     .args(args);
-    c
+    if let Some(i) = index {
+        c.env("GIT_INDEX_FILE", i);
+    }
+    c.output().context("running git")
 }
 
 fn branch_node(b: &BranchDef, index: usize) -> Node {
@@ -275,6 +374,9 @@ mod tests {
         let s = Store::load(&t.0).unwrap();
         assert_eq!(s.nodes.len(), 6 + 3);
         assert_eq!(s.nodes["layout"].sources, [BRANCH_SOURCE]);
+        // The serializer reproduces the stored bytes exactly, so nothing needs writing.
+        assert_eq!(s.render_map().unwrap()["map/layout.jsonl"], LAYOUT);
+        assert!(s.map_changes().unwrap().is_empty());
         s.save().unwrap();
         assert_eq!(
             std::fs::read_to_string(t.0.join("map/layout.jsonl")).unwrap(),

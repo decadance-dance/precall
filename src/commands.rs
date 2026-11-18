@@ -44,9 +44,6 @@ pub fn init(name_arg: Option<&str>, project_flag: Option<&str>) -> Result<String
             path.display()
         )));
     }
-    std::fs::create_dir_all(&path).with_context(|| format!("creating {}", path.display()))?;
-    store::git(&path, &["init", "-q"])?;
-    std::fs::write(path.join(".gitignore"), "cache/\nruns/\nviews/\n")?;
     let mut cfg = String::from(
         "# rrecall store config (spec §9). Add branches with [[skeleton.branch]] (id, title, question, granularity).\n",
     );
@@ -66,9 +63,29 @@ pub fn init(name_arg: Option<&str>, project_flag: Option<&str>) -> Result<String
         );
         found.push(format!("github {repo}"));
     }
-    std::fs::write(path.join(STORE_CONFIG), cfg)?;
-    let s = Store::load(&path)?;
-    s.commit(&format!("init {name}"))?;
+    let created = !path.exists();
+    let made = std::fs::create_dir_all(&path)
+        .with_context(|| format!("creating {}", path.display()))
+        .and_then(|()| store::git(&path, &["init", "-q"]))
+        .and_then(|_| {
+            let files = [
+                (".gitignore", "cache/\nruns/\nviews/\n".to_string()),
+                // Map lines stay LF in the working tree whatever core.autocrlf says (spec §5 I6).
+                (".gitattributes", "*.jsonl text eol=lf\n".to_string()),
+                (STORE_CONFIG, cfg),
+            ];
+            let changes: Vec<store::Change> = files
+                .into_iter()
+                .map(|(rel, text)| (rel.to_string(), Some(text)))
+                .collect();
+            store::write_and_commit(&path, &changes, &format!("init {name}"))
+        });
+    if let Err(e) = made {
+        if created {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+        return Err(e);
+    }
 
     let mut out = format!("Created the map of `{name}` at {}\n", path.display());
     match user.project(&name) {
@@ -89,7 +106,10 @@ pub fn init(name_arg: Option<&str>, project_flag: Option<&str>) -> Result<String
             }
         }
     }
-    let ids: Vec<&str> = s.branches.iter().map(|b| b.id.as_str()).collect();
+    let ids: Vec<String> = config::default_branches()
+        .into_iter()
+        .map(|b| b.id)
+        .collect();
     out += &format!("branches: {}\n", ids.join(", "));
     out += &format!(
         "sources: {}\n",
@@ -215,9 +235,8 @@ pub fn note(project: Option<&str>, id: &str, text: &str) -> Result<String> {
     if let Some(n) = s.nodes.get_mut(id) {
         n.note = new.clone();
     }
-    s.save()?;
     let suffix = if new.is_none() { ": cleared" } else { "" };
-    s.commit(&format!("note {branch}/{id}{suffix}"))?;
+    s.save_and_commit(Vec::new(), &format!("note {branch}/{id}{suffix}"))?;
     Ok(format!(
         "{} the note on `{id}`.\n",
         if new.is_none() { "Cleared" } else { "Set" }
@@ -246,7 +265,6 @@ pub fn rm(
         s.nodes.remove(&x);
         body += &format!("removed {branch}/{x}\n");
     }
-    s.save()?;
     let reason = reason
         .map(|r| r.split_whitespace().collect::<Vec<_>>().join(" "))
         .filter(|r| !r.is_empty());
@@ -254,7 +272,7 @@ pub fn rm(
         "rm {branch}/{id}: {}",
         reason.as_deref().unwrap_or("removed by hand")
     );
-    s.commit(&format!("{subject}\n\n{body}"))?;
+    s.save_and_commit(Vec::new(), &format!("{subject}\n\n{body}"))?;
     Ok(body)
 }
 
@@ -333,15 +351,20 @@ pub fn import(project: Option<&str>, file: &Path) -> Result<String> {
         added += add_items(&mut s, &item.children, &branch, &source)
             .map_err(|(line, e)| usage(line, e))?;
     }
+    let mut extra = Vec::new();
     if !new_branches.is_empty() {
+        let old = std::fs::read_to_string(path.join(STORE_CONFIG))
+            .with_context(|| format!("reading {STORE_CONFIG}"))?;
         let toml: String = new_branches.iter().map(config::branch_toml).collect();
-        append(&path.join(STORE_CONFIG), &toml)?;
+        extra.push((STORE_CONFIG.to_string(), Some(old + &toml)));
     }
-    s.save()?;
-    s.commit(&format!(
-        "import {fname}: +{added} nodes, +{} branches",
-        new_branches.len()
-    ))?;
+    s.save_and_commit(
+        extra,
+        &format!(
+            "import {fname}: +{added} nodes, +{} branches",
+            new_branches.len()
+        ),
+    )?;
     let ids: Vec<&str> = new_branches.iter().map(|b| b.id.as_str()).collect();
     Ok(format!(
         "Imported {added} nodes from {fname}{}\n",
