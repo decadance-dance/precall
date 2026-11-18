@@ -211,38 +211,139 @@ struct HookOutput {
     deny: Option<String>,
 }
 
-/// A `*.before` hook's answer: `Some(reason)` denies.
+/// A `*.before` hook's answer: `Some(reason)` denies. Only `{}` and `{"deny": "<reason>"}`
+/// decode.
 pub fn decode_hook(plugin: &str, stdout: &str) -> Result<Option<String>> {
-    let out: HookOutput = serde_json::from_str(stdout)
+    let obj = parse(plugin, stdout)?;
+    no_nulls(&obj).map_err(|e| anyhow!("plugin `{plugin}`: output {e}"))?;
+    let out = HookOutput::deserialize(serde_json::Value::Object(obj))
         .map_err(|e| anyhow!("plugin `{plugin}`: output does not decode: {e}"))?;
     Ok(out.deny)
 }
 
-/// The items under `field` of a `{ "<field>": [...] }` document, each decoded on its own so
-/// the error can name the item.
-fn decode_items<T: DeserializeOwned>(plugin: &str, stdout: &str, field: &str) -> Result<Vec<T>> {
-    let doc: serde_json::Value = serde_json::from_str(stdout)
+/// A JSON value parsed with every duplicate object key rejected: serde_json keeps the last
+/// one, so a later member could hide an earlier one of the wrong type.
+struct Strict(serde_json::Value);
+
+impl<'de> Deserialize<'de> for Strict {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Strict, D::Error> {
+        d.deserialize_any(StrictVisitor)
+    }
+}
+
+struct StrictVisitor;
+
+/// An inner error's message without the position serde_json adds again at the top.
+fn plain(e: &impl std::fmt::Display) -> String {
+    let m = e.to_string();
+    m.rsplit_once(" at line ")
+        .map_or(m.clone(), |(m, _)| m.to_string())
+}
+
+impl<'de> serde::de::Visitor<'de> for StrictVisitor {
+    type Value = Strict;
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a JSON value")
+    }
+    fn visit_bool<E>(self, v: bool) -> Result<Strict, E> {
+        Ok(Strict(v.into()))
+    }
+    fn visit_i64<E>(self, v: i64) -> Result<Strict, E> {
+        Ok(Strict(v.into()))
+    }
+    fn visit_u64<E>(self, v: u64) -> Result<Strict, E> {
+        Ok(Strict(v.into()))
+    }
+    fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Strict, E> {
+        serde_json::Number::from_f64(v)
+            .map(|n| Strict(n.into()))
+            .ok_or_else(|| E::custom("a number JSON cannot hold"))
+    }
+    fn visit_str<E>(self, v: &str) -> Result<Strict, E> {
+        Ok(Strict(v.into()))
+    }
+    fn visit_unit<E>(self) -> Result<Strict, E> {
+        Ok(Strict(serde_json::Value::Null))
+    }
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Strict, A::Error> {
+        use serde::de::Error;
+        let mut items = Vec::new();
+        loop {
+            let n = items.len() + 1;
+            match seq.next_element::<Strict>() {
+                Ok(Some(v)) => items.push(v.0),
+                Ok(None) => return Ok(Strict(items.into())),
+                Err(e) => return Err(A::Error::custom(format!("item {n}: {}", plain(&e)))),
+            }
+        }
+    }
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Strict, A::Error> {
+        use serde::de::Error;
+        let mut obj = serde_json::Map::new();
+        while let Some(k) = map.next_key::<String>()? {
+            if obj.contains_key(&k) {
+                return Err(A::Error::custom(format!("duplicate key `{k}`")));
+            }
+            let v = map
+                .next_value::<Strict>()
+                .map_err(|e| A::Error::custom(format!("`{k}`: {}", plain(&e))))?;
+            obj.insert(k, v.0);
+        }
+        Ok(Strict(serde_json::Value::Object(obj)))
+    }
+}
+
+/// A plugin's output: one JSON object, no duplicate keys at any level.
+fn parse(plugin: &str, stdout: &str) -> Result<serde_json::Map<String, serde_json::Value>> {
+    let doc = serde_json::from_str::<Strict>(stdout)
         .map_err(|e| anyhow!("plugin `{plugin}`: output is not one JSON document: {e}"))?;
-    let obj = doc
-        .as_object()
-        .ok_or_else(|| anyhow!("plugin `{plugin}`: output is not a JSON object"))?;
+    match doc.0 {
+        serde_json::Value::Object(o) => Ok(o),
+        _ => bail!("plugin `{plugin}`: output is not a JSON object"),
+    }
+}
+
+/// No field of an output item is nullable: an absent field is left out, never `null`.
+fn no_nulls(obj: &serde_json::Map<String, serde_json::Value>) -> Result<(), String> {
+    match obj.iter().find(|(_, v)| v.is_null()) {
+        Some((k, _)) => Err(format!("has `{k}` null; leave an absent field out")),
+        None => Ok(()),
+    }
+}
+
+/// The only member of an output object, which must be `field`.
+fn only(
+    plugin: &str,
+    mut obj: serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<serde_json::Value> {
     if let Some(k) = obj.keys().find(|k| *k != field) {
         bail!("plugin `{plugin}`: output has an unknown field `{k}`");
     }
-    let items = obj
-        .get(field)
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| anyhow!("plugin `{plugin}`: output needs a `{field}` array"))?;
+    obj.remove(field)
+        .ok_or_else(|| anyhow!("plugin `{plugin}`: output needs `{field}`"))
+}
+
+/// The items under `field` of a `{ "<field>": [...] }` document, each an object decoded on its
+/// own so the error can name the item.
+fn decode_items<T: DeserializeOwned>(plugin: &str, stdout: &str, field: &str) -> Result<Vec<T>> {
+    let serde_json::Value::Array(items) = only(plugin, parse(plugin, stdout)?, field)? else {
+        bail!("plugin `{plugin}`: output needs a `{field}` array");
+    };
     let what = field.trim_end_matches('s');
     items
-        .iter()
+        .into_iter()
         .enumerate()
         .map(|(i, v)| {
-            T::deserialize(v).map_err(|e| {
-                let key = v.get("key").and_then(|k| k.as_str());
-                let key = key.map(|k| format!(" (key `{k}`)")).unwrap_or_default();
-                anyhow!("plugin `{plugin}`: {what} {}{key}: {e}", i + 1)
-            })
+            let n = i + 1;
+            let key = v.get("key").and_then(|k| k.as_str());
+            let key = key.map(|k| format!(" (key `{k}`)")).unwrap_or_default();
+            let serde_json::Value::Object(obj) = v else {
+                bail!("plugin `{plugin}`: {what} {n} is not an object");
+            };
+            no_nulls(&obj).map_err(|e| anyhow!("plugin `{plugin}`: {what} {n}{key} {e}"))?;
+            T::deserialize(serde_json::Value::Object(obj))
+                .map_err(|e| anyhow!("plugin `{plugin}`: {what} {n}{key}: {e}"))
         })
         .collect()
 }
@@ -299,12 +400,6 @@ pub fn decode_verdicts(plugin: &str, stdout: &str, keys: &[String]) -> Result<Ve
         .collect()
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ResolveOutput {
-    texts: BTreeMap<String, Option<String>>,
-}
-
 /// A `resolve` entrypoint's output (spec §6.4): every reference asked for, `None` when it
 /// did not resolve (omitted ones included).
 pub fn decode_texts(
@@ -312,16 +407,23 @@ pub fn decode_texts(
     stdout: &str,
     refs: &[String],
 ) -> Result<BTreeMap<String, Option<String>>> {
-    let out: ResolveOutput = serde_json::from_str(stdout)
-        .map_err(|e| anyhow!("plugin `{plugin}`: resolve output does not decode: {e}"))?;
-    if let Some(r) = out.texts.keys().find(|r| !refs.contains(r)) {
-        bail!("plugin `{plugin}`: resolve output names `{r}`, which was not asked for");
+    let serde_json::Value::Object(texts) = only(plugin, parse(plugin, stdout)?, "texts")? else {
+        bail!("plugin `{plugin}`: output needs a `texts` object");
+    };
+    let mut out: BTreeMap<String, Option<String>> =
+        refs.iter().map(|r| (r.clone(), None)).collect();
+    for (r, v) in texts {
+        let text = match v {
+            serde_json::Value::String(t) => Some(t),
+            serde_json::Value::Null => None,
+            _ => bail!("plugin `{plugin}`: text of `{r}` is not a string or null"),
+        };
+        match out.get_mut(&r) {
+            Some(slot) => *slot = text,
+            None => bail!("plugin `{plugin}`: resolve output names `{r}`, which was not asked for"),
+        }
     }
-    let mut texts = out.texts;
-    Ok(refs
-        .iter()
-        .map(|r| (r.clone(), texts.remove(r).flatten()))
-        .collect())
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -507,6 +609,73 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("plugin `repo`"), "{e}");
+    }
+
+    #[test]
+    fn review_hook_output_must_be_an_object_without_nulls() {
+        for bad in [
+            "[]",
+            "[null]",
+            r#"{"deny":null}"#,
+            r#"{"deny":"a","deny":"b"}"#,
+        ] {
+            let e = decode_hook("gate", bad).unwrap_err().to_string();
+            assert!(e.contains("plugin `gate`"), "{bad}: {e}");
+        }
+    }
+
+    #[test]
+    fn review_resolve_output_shape_and_item_named() {
+        let refs = ["file:a".to_string()];
+        for (bad, want) in [
+            (r#"[{"file:a":"text"}]"#, "object"),
+            (r#"{"texts":{"file:a":7}}"#, "`file:a`"),
+            (r#"{"texts":[]}"#, "texts"),
+            (r#"{"texts":{},"more":1}"#, "more"),
+            (r#"{"texts":{"file:a":"x","file:a":"y"}}"#, "duplicate"),
+        ] {
+            let e = decode_texts("repo", bad, &refs).unwrap_err().to_string();
+            assert!(
+                e.contains("plugin `repo`") && e.contains(want),
+                "{bad}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn review_duplicate_keys_and_nulls_and_arrays_are_rejected() {
+        for (bad, want) in [
+            (
+                r#"{"proposals":false,"proposals":[]}"#,
+                "duplicate key `proposals`",
+            ),
+            (
+                &out(&[
+                    ADD,
+                    r#"{"key":"b","op":"remove","op":"update","id":"x","sources":[],"reason":"r"}"#,
+                ]),
+                "item 2",
+            ),
+            (
+                &out(&[
+                    r#"{"key":"b","op":"update","id":"x","parent":null,"sources":[],"reason":"r"}"#,
+                ]),
+                "`parent`",
+            ),
+            (&out(&[r#"["b","update","x"]"#]), "proposal 1"),
+        ] {
+            let e = decode_proposals("gh", bad).unwrap_err().to_string();
+            assert!(e.contains("plugin `gh`") && e.contains(want), "{bad}: {e}");
+        }
+        let keys = ["a".to_string()];
+        for bad in [
+            r#"{"verdicts":[{"key":"a","verdict":"accept","reason":"","reason":""}]}"#,
+            r#"{"verdicts":[{"key":"a","verdict":"accept","reason":"","instruction":null}]}"#,
+            r#"{"verdicts":[["a","accept",""]]}"#,
+        ] {
+            let e = decode_verdicts("j", bad, &keys).unwrap_err().to_string();
+            assert!(e.contains("plugin `j`"), "{bad}: {e}");
+        }
     }
 
     #[test]

@@ -7,8 +7,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
 use std::fs::File;
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -38,18 +39,28 @@ pub fn call(
     input: &impl Serialize,
 ) -> Result<String> {
     run(ctx, inst, entry, template, input)
+        .and_then(|out| {
+            let bytes =
+                std::fs::read(&out).with_context(|| format!("reading {}", out.display()))?;
+            String::from_utf8(bytes).map_err(|_| anyhow!("output is not UTF-8"))
+        })
         .with_context(|| format!("plugin `{}` ({entry})", inst.id))
 }
 
+/// Runs the process and returns the path of its stdout, without reading it.
 fn run(
     ctx: &Ctx,
     inst: &Instance,
     entry: &str,
     template: &[String],
     input: &impl Serialize,
-) -> Result<String> {
+) -> Result<PathBuf> {
     let argv = inst.argv(template);
     let (program, args) = argv.split_first().context("empty argv")?;
+    let in_tree = template
+        .first()
+        .is_some_and(|p| p.contains('/') && !Path::new(p).is_absolute());
+    let path = resolve_program(program, in_tree.then_some(inst.plugin.dir.as_path()))?;
     let stdin = serde_json::to_vec(input)?;
     let state = ctx.store.join("state").join(&inst.id);
     std::fs::create_dir_all(&state).with_context(|| format!("creating {}", state.display()))?;
@@ -57,8 +68,9 @@ fn run(
         .with_context(|| format!("creating {}", ctx.run_dir.display()))?;
     let log = |ext| ctx.run_dir.join(format!("{}.{entry}.{ext}", inst.id));
     let (out_path, err_path) = (log("stdout"), log("stderr"));
-    let mut cmd = Command::new(program);
-    cmd.args(args)
+    let mut cmd = Command::new(&path);
+    cmd.arg0(program)
+        .args(args)
         .current_dir(&inst.plugin.dir)
         .stdin(Stdio::piped())
         .stdout(
@@ -97,9 +109,11 @@ fn run(
             break status;
         }
         if started.elapsed() >= inst.timeout {
-            kill_group(&mut child);
+            let killed = kill_group(&mut child)
+                .map(|()| String::new())
+                .unwrap_or_else(|e| format!("; killing its process group failed: {e}"));
             bail!(
-                "timed out after {:?}; stderr in {}",
+                "timed out after {:?}{killed}; stderr in {}",
                 inst.timeout,
                 err_path.display()
             );
@@ -119,19 +133,72 @@ fn run(
     if size > MAX_STDOUT {
         bail!("printed {size} bytes, more than {MAX_STDOUT}");
     }
-    let bytes =
-        std::fs::read(&out_path).with_context(|| format!("reading {}", out_path.display()))?;
-    String::from_utf8(bytes).map_err(|_| anyhow!("output is not UTF-8"))
+    Ok(out_path)
+}
+
+/// The file `program` names: a path as it is, a bare name looked up on `PATH`. A program inside
+/// the plugin (`tree`) must stay inside it with links resolved. It must be a native executable or
+/// a `#!` script: given anything else, the C library's exec falls back to `/bin/sh`, and §6.3
+/// promises that a plugin never runs through a shell.
+fn resolve_program(program: &str, tree: Option<&Path>) -> Result<PathBuf> {
+    let path = if program.contains('/') {
+        PathBuf::from(program)
+    } else {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        std::env::split_paths(&path)
+            .map(|d| d.join(program))
+            .find(|p| {
+                std::fs::metadata(p)
+                    .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            })
+            .with_context(|| format!("`{program}` is not on PATH"))?
+    };
+    if let Some(tree) = tree {
+        let real = path
+            .canonicalize()
+            .with_context(|| format!("cannot start `{program}`"))?;
+        if !real.starts_with(tree) {
+            bail!(
+                "`{program}` resolves to {}, outside the plugin directory",
+                real.display()
+            );
+        }
+    }
+    let mut magic = [0u8; 4];
+    let n = File::open(&path)
+        .and_then(|mut f| std::io::Read::read(&mut f, &mut magic))
+        .with_context(|| format!("cannot start `{program}`"))?;
+    let native = [
+        *b"\x7fELF",
+        [0xfe, 0xed, 0xfa, 0xce],
+        [0xfe, 0xed, 0xfa, 0xcf],
+        [0xce, 0xfa, 0xed, 0xfe],
+        [0xcf, 0xfa, 0xed, 0xfe],
+        [0xca, 0xfe, 0xba, 0xbe],
+    ];
+    if !(magic.starts_with(b"#!") || n == 4 && native.contains(&magic)) {
+        bail!(
+            "`{program}` is neither a native executable nor a script starting with `#!`; rrecall runs no program through a shell"
+        );
+    }
+    Ok(path)
 }
 
 /// Kills `child`, which leads its own process group, and everything it started.
-fn kill_group(child: &mut Child) {
-    let _ = Command::new("kill")
-        .args(["-KILL", "--", &format!("-{}", child.id())])
-        .stderr(Stdio::null())
-        .status();
+fn kill_group(child: &mut Child) -> Result<(), std::io::Error> {
+    // std can signal only the child itself, so the group gets SIGKILL through libc.
+    let pgid = child.id() as libc::pid_t;
+    // SAFETY: killpg takes plain integers and touches no memory of ours.
+    let sent = unsafe { libc::killpg(pgid, libc::SIGKILL) };
+    let err = std::io::Error::last_os_error();
     let _ = child.kill();
     let _ = child.wait();
+    // ESRCH: the group is already gone, which is what we wanted.
+    if sent == 0 || err.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(err)
+    }
 }
 
 /// Runs the hook instances subscribed to `event`, in config order (spec §6.6). On a `*.before`
@@ -159,24 +226,29 @@ pub fn run_hooks(
         if !h.events.contains(&event) {
             continue;
         }
-        let out = call(ctx, inst, &name, &h.command, &input);
-        if event.can_deny() {
-            let deny = out
-                .and_then(|o| wire::decode_hook(&inst.id, &o))
-                .map_err(|e| {
-                    error::aborted(format!(
-                        "hook `{}` failed on `{name}`, which denies: {e:#}",
-                        inst.id
-                    ))
-                })?;
-            if let Some(reason) = deny {
-                return Err(error::aborted(format!(
-                    "hook `{}` denied `{name}`: {reason}",
-                    inst.id
-                )));
+        if !event.can_deny() {
+            // The event ignores output, so only the process itself can fail.
+            if let Err(e) = run(ctx, inst, &name, &h.command, &input) {
+                warnings.push(format!(
+                    "hook `{}` failed on `{name}`: plugin `{}` ({name}): {e:#}",
+                    inst.id, inst.id
+                ));
             }
-        } else if let Err(e) = out {
-            warnings.push(format!("hook `{}` failed on `{name}`: {e:#}", inst.id));
+            continue;
+        }
+        let deny = call(ctx, inst, &name, &h.command, &input)
+            .and_then(|o| wire::decode_hook(&inst.id, &o))
+            .map_err(|e| {
+                error::aborted(format!(
+                    "hook `{}` failed on `{name}`, which denies: {e:#}",
+                    inst.id
+                ))
+            })?;
+        if let Some(reason) = deny {
+            return Err(error::aborted(format!(
+                "hook `{}` denied `{name}`: {reason}",
+                inst.id
+            )));
         }
     }
     Ok(warnings)
@@ -426,7 +498,7 @@ mod tests {
 
         for (scenario, out, want) in [
             ("ok", r#"{"deny":"store frozen"}"#, "store frozen"),
-            ("ok", "", "does not decode"),
+            ("ok", "", "not one JSON document"),
             ("ok", r#"{"deny":"x","extra":1}"#, "does not decode"),
             ("crash", "", "exit"),
             ("sleep", "", "timed out"),
@@ -464,6 +536,75 @@ mod tests {
         );
         assert!(e.contains("hook `first`"), "{e}");
         assert!(!w.record("second").exists(), "the second hook never ran");
+    }
+
+    #[test]
+    fn review_observe_hooks_ignore_output_that_is_not_text() {
+        let w = World::new();
+        hook(&w, "audit", "\"commit.after\"");
+        let inst = w.instance("raw", "audit", "binary", "");
+        let warnings = run_hooks(
+            &w.ctx(),
+            &[inst],
+            Event::CommitAfter,
+            &serde_json::json!({}),
+        )
+        .unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// A plugin `id` whose command is `./<file>` with `content`, mode 0755.
+    fn script_plugin(w: &World, file: &str, content: &str) -> Instance {
+        use std::os::unix::fs::PermissionsExt;
+        w.plugin(
+            "gh",
+            &format!("[collector]\nscope = [\"done\"]\nsource_kinds = [\"gh-pr\"]\nfingerprint = [\"git\"]\ncommand = [\"./{file}\"]\n"),
+        );
+        let path = w.store().join("plugins/gh").join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, content).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        w.instance("prs", "gh", "ok", "")
+    }
+
+    #[test]
+    fn review_an_executable_without_shebang_is_not_run_through_a_shell() {
+        let w = World::new();
+        let inst = script_plugin(&w, "gate", "printf '%s' '{\"proposals\":[]}'\n");
+        let e = format!(
+            "{:#}",
+            call(&w.ctx(), &inst, "collect", &command(&inst), &"{}").unwrap_err()
+        );
+        assert!(e.contains("plugin `prs`") && e.contains("#!"), "{e}");
+        let ok = script_plugin(&w, "gate", "#!/bin/sh\nprintf '%s' '{\"proposals\":[]}'\n");
+        assert_eq!(
+            call(&w.ctx(), &ok, "collect", &command(&ok), &"{}").unwrap(),
+            "{\"proposals\":[]}"
+        );
+    }
+
+    #[test]
+    fn review_an_entrypoint_may_not_link_out_of_the_plugin() {
+        let w = World::new();
+        let elsewhere = w.t.0.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let inst = script_plugin(&w, "bin/run", "#!/bin/sh\n");
+        std::fs::remove_dir_all(w.store().join("plugins/gh/bin")).unwrap();
+        std::fs::write(elsewhere.join("run"), "#!/bin/sh\nprintf '{}'\n").unwrap();
+        std::fs::set_permissions(
+            elsewhere.join("run"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&elsewhere, w.store().join("plugins/gh/bin")).unwrap();
+        let e = format!(
+            "{:#}",
+            call(&w.ctx(), &inst, "collect", &command(&inst), &"{}").unwrap_err()
+        );
+        assert!(
+            e.contains("plugin `prs`") && e.contains("outside the plugin directory"),
+            "{e}"
+        );
     }
 
     #[test]

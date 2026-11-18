@@ -213,10 +213,10 @@ Every manifest has exactly the table named by its `kind`; a table of another kin
 | `[judge]` | `command` or `prompt`, not both; `runner` and `model` only with `prompt`; `timeout` |
 | `[hook]` | `events` (at least one event of §6.6), `command`, `timeout` |
 
-- An argv is a list of strings; its program is looked up on `PATH`, or, when it holds a `/`, taken relative to the plugin directory. A prompt file is a path inside the plugin directory and must exist.
+- An argv is a list of strings; its program is looked up on `PATH`, or, when it holds a `/`, taken relative to the plugin directory. A prompt file is a path inside the plugin directory and must exist. The manifest, prompt files and programs given relative to the plugin directory must stay inside it with links resolved, and a plugin directory inside its place (§6.2), so what runs is what the content hash covers.
 - Durations are `<N>s`, `<N>m`, `<N>h` or `<N>d`. `timeout` defaults to 30s for a hook and 10m for every other kind; an instance's `timeout` (§9) overrides it.
 - `id` is kebab-case; `version` and `min_rrecall` are `x.y.z`, and a `min_rrecall` newer than the running rrecall is an error.
-- `[params]` names each param with its default. A name is a lowercase letter followed by lowercase letters, digits, `_` and `-`; a value is anything TOML holds except a date-time. An instance may set only declared params, each with the same TOML type as its default.
+- `[params]` names each param with its default. A name is a lowercase letter followed by lowercase letters, digits, `_` and `-`; a value is anything TOML holds that JSON can hold too: no date-time, no `inf` or `nan`, also inside arrays and tables. An instance may set only declared params, each with the same TOML type as its default.
 - `{name}` inside an argv entry or a `source_kinds` entry is replaced by the instance's param `name` (a string as it is, any other value as JSON), so `files` declares `source_kinds = ["{ref_kind}"]`. Braces around anything but a param name (a jq filter) stay as they are; a `{name}` that names no param is an error.
 - A manifest error names the plugin and the key; any manifest, discovery or instance error stops a run before anything runs (exit 4).
 
@@ -242,11 +242,11 @@ params = { path = "/home/me/notes/myproject", preset = "notes", ref_kind = "note
 
 ### 6.3 Process contract
 
-- The argv runs in the plugin's directory as its own process group, never through a shell; at the timeout the whole group is killed.
+- The argv runs in the plugin's directory as its own process group, never through a shell: the program must be a native executable or a script starting with `#!`, since the C library would hand any other file to `/bin/sh`. At the timeout the whole group is killed.
 - Input: one JSON document on stdin. Output: one JSON document on stdout. Logs: stderr. Both are kept in the run dir as `runs/<run-id>/<instance>.<entrypoint>.stdout` and `.stderr`. A non-zero exit, a timeout or more than 64 MiB of stdout is a failure.
 - Environment: rrecall's own, plus `RRECALL_BIN` (the rrecall binary), `RRECALL_PROJECT`, `RRECALL_STORE`, `RRECALL_PLUGIN_DIR`, `RRECALL_STATE_DIR` (the instance's own persistent directory, `<store>/state/<instance-id>/`, created before the call), `RRECALL_RUN_ID`, and each param as `RRECALL_PARAM_<NAME>`: the name upper-cased with `-` as `_`, a string as it is, any other value as JSON. Two params that map to one variable are a manifest error; `RRECALL_PARAM_*` variables in rrecall's own environment are not passed on.
 - A plugin reads the map through the CLI (`$RRECALL_BIN show <id> --json`); there is no other API.
-- Output is untrusted. Decoding is strict on shape (unknown fields, wrong types, a missing required field such as `sources`): one item that does not decode rejects the whole output, naming the plugin and the item. Rule violations in well-formed proposals (a removal without evidence, a change to another collector's node) are rejected per proposal by the invariants (§5), with a reason the collector sees in the next round.
+- Output is untrusted. Decoding is strict on shape (the document is one JSON object; unknown fields, a key twice at any level, wrong types, `null` for a field (only an unresolved text may be `null`), a missing required field such as `sources`): one item that does not decode rejects the whole output, naming the plugin and the item. Rule violations in well-formed proposals (a removal without evidence, a change to another collector's node) are rejected per proposal by the invariants (§5), with a reason the collector sees in the next round.
 
 ### 6.4 Collector input and output
 

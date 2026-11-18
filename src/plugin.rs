@@ -183,7 +183,20 @@ impl Manifest {
 
 /// Reads and checks `<dir>/rrecall-plugin.toml`. Errors name the plugin and the key.
 pub fn load_manifest(dir: &Path) -> Result<Manifest> {
+    let dir = &dir
+        .canonicalize()
+        .with_context(|| format!("reading {}", dir.display()))?;
     let path = dir.join(MANIFEST);
+    let real = path
+        .canonicalize()
+        .with_context(|| format!("reading {}", path.display()))?;
+    if !real.starts_with(dir) {
+        bail!(
+            "{} resolves to {}, outside the plugin directory",
+            path.display(),
+            real.display()
+        );
+    }
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let raw: RawManifest =
@@ -223,9 +236,9 @@ fn check_manifest(raw: RawManifest, dir: &Path) -> Result<Manifest, String> {
                 "params: `{name}` is not a param name (a-z, 0-9, `_`, `-`)"
             ));
         }
-        if has_datetime(default) {
+        if let Some(what) = unfit(default) {
             return Err(format!(
-                "params: `{name}` is a date-time, which params cannot hold"
+                "params: `{name}` holds {what}, which JSON cannot hold"
             ));
         }
         if let Some(other) = env_names.insert(env_name(name), name) {
@@ -364,7 +377,8 @@ fn only_with_prompt(
     }
 }
 
-/// A file named relative to the plugin directory, inside it, that exists.
+/// A file named relative to the (canonical) plugin directory that exists and, links resolved,
+/// stays inside it: what a plugin uses is what its content hash covers.
 fn check_file(dir: &Path, file: &str) -> Result<(), String> {
     let p = Path::new(file);
     if p.is_absolute()
@@ -375,10 +389,14 @@ fn check_file(dir: &Path, file: &str) -> Result<(), String> {
             "`{file}` must be a path inside the plugin directory"
         ));
     }
-    if !dir.join(p).is_file() {
-        return Err(format!("`{file}` does not exist in {}", dir.display()));
+    match dir.join(p).canonicalize() {
+        Ok(real) if !real.starts_with(dir) => Err(format!(
+            "`{file}` resolves to {}, outside the plugin directory",
+            real.display()
+        )),
+        Ok(real) if real.is_file() => Ok(()),
+        _ => Err(format!("`{file}` does not exist in {}", dir.display())),
     }
-    Ok(())
 }
 
 fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
@@ -391,12 +409,14 @@ fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
     it.next().is_none().then_some(v)
 }
 
-fn has_datetime(v: &toml::Value) -> bool {
+/// What a param value holds that its JSON form (input, env) cannot: params are JSON values.
+fn unfit(v: &toml::Value) -> Option<&'static str> {
     match v {
-        toml::Value::Datetime(_) => true,
-        toml::Value::Array(a) => a.iter().any(has_datetime),
-        toml::Value::Table(t) => t.values().any(has_datetime),
-        _ => false,
+        toml::Value::Datetime(_) => Some("a date-time"),
+        toml::Value::Float(f) if !f.is_finite() => Some("a non-finite number"),
+        toml::Value::Array(a) => a.iter().find_map(unfit),
+        toml::Value::Table(t) => t.values().find_map(unfit),
+        _ => None,
     }
 }
 
@@ -466,7 +486,20 @@ pub fn discover(places: &[PathBuf]) -> Result<BTreeMap<String, Plugin>> {
             .collect::<std::io::Result<Vec<_>>>()
             .with_context(|| format!("reading {}", place.display()))?;
         dirs.sort();
+        let place = &place
+            .canonicalize()
+            .with_context(|| format!("reading {}", place.display()))?;
         for dir in dirs.into_iter().filter(|d| d.join(MANIFEST).is_file()) {
+            let dir = dir
+                .canonicalize()
+                .with_context(|| format!("reading {}", dir.display()))?;
+            if !dir.starts_with(place) || dir == *place {
+                bail!(
+                    "plugin directory {} resolves outside {}",
+                    dir.display(),
+                    place.display()
+                );
+            }
             let manifest = load_manifest(&dir)?;
             if let Some(other) = here.get(&manifest.id) {
                 bail!(
@@ -691,11 +724,14 @@ fn instance(
             .params
             .get(k)
             .ok_or(format!("plugin `{uses}` has no param `{k}`"))?;
-        if v.type_str() != default.type_str() || has_datetime(v) {
+        if v.type_str() != default.type_str() {
             return Err(format!(
                 "param `{k}` must be a {}, as its default in plugin `{uses}`",
                 default.type_str()
             ));
+        }
+        if let Some(what) = unfit(v) {
+            return Err(format!("param `{k}` holds {what}, which JSON cannot hold"));
         }
         params.insert(k.clone(), v.clone());
     }
@@ -749,11 +785,17 @@ pub fn owner<'a>(instances: &'a [Instance], kind: &str) -> Option<&'a Instance> 
 
 /// Step 1 of a run (spec §4.1): the store's enabled plugin instances. Any error exits 4.
 pub fn load(store: &Path) -> Result<Vec<Instance>> {
-    let user_plugins = config::user_config_path()?
-        .parent()
-        .map(|d| d.join("plugins"))
-        .context("the user config has no directory")?;
-    load_with(store, &config::load_user_config()?, &user_plugins)
+    let user = (|| -> Result<(UserConfig, PathBuf)> {
+        let plugins = config::user_config_path()?
+            .parent()
+            .map(|d| d.join("plugins"))
+            .context("the user config has no directory")?;
+        Ok((config::load_user_config()?, plugins))
+    })();
+    match user {
+        Ok((user, plugins)) => load_with(store, &user, &plugins),
+        Err(e) => Err(error::aborted(format!("{e:#}"))),
+    }
 }
 
 pub fn load_with(store: &Path, user: &UserConfig, user_plugins: &Path) -> Result<Vec<Instance>> {
@@ -1046,6 +1088,82 @@ repo = ""
     }
 
     #[test]
+    fn review_params_must_fit_json() {
+        for bad in [
+            "value = inf",
+            "value = nan",
+            "value = [1.0, -inf]",
+            "value = { a = nan }",
+        ] {
+            let e = manifest_err(&format!(
+                "{}[check]\ncommand = [\"./c\"]\n[params]\n{bad}\n",
+                head("c", "check")
+            ));
+            assert!(e.contains("`value`") && e.contains("JSON"), "{bad}: {e}");
+        }
+        let t = TempDir::new();
+        let root = t.0.join("plugins");
+        put(
+            &root,
+            "c",
+            &format!(
+                "{}[check]\ncommand = [\"./c\"]\n[params]\nx = 1.0\n",
+                head("c", "check")
+            ),
+        );
+        let cfg = entries("[[plugins]]\nid = \"c\"\nparams = { x = inf }\n");
+        let e = format!(
+            "{:#}",
+            instances(
+                &cfg.plugins,
+                &discover(&[root]).unwrap(),
+                &cfg.branches().unwrap()
+            )
+            .unwrap_err()
+        );
+        assert!(e.contains("`x`") && e.contains("JSON"), "{e}");
+    }
+
+    #[test]
+    fn review_plugin_files_stay_inside_the_plugin_tree() {
+        let t = TempDir::new();
+        let outside = t.0.join("elsewhere");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(
+            outside.join("m.toml"),
+            format!("{}[check]\ncommand = [\"./c\"]\n", head("c", "check")),
+        )
+        .unwrap();
+        std::fs::write(outside.join("p.md"), "x").unwrap();
+        // A manifest that links out of the plugin dir.
+        let place = t.0.join("p1");
+        std::fs::create_dir_all(place.join("c")).unwrap();
+        std::os::unix::fs::symlink(outside.join("m.toml"), place.join("c").join(MANIFEST)).unwrap();
+        let e = format!("{:#}", discover(&[place]).unwrap_err());
+        assert!(e.contains("outside"), "{e}");
+        // A plugin dir that links out of its place.
+        let place = t.0.join("p2");
+        std::fs::create_dir_all(&place).unwrap();
+        std::fs::copy(outside.join("m.toml"), outside.join(MANIFEST)).unwrap();
+        std::os::unix::fs::symlink(&outside, place.join("c")).unwrap();
+        let e = format!("{:#}", discover(&[place]).unwrap_err());
+        assert!(e.contains("outside"), "{e}");
+        // A prompt that links out of the plugin dir.
+        let d = put(
+            &t.0.join("p3"),
+            "j",
+            &format!("{}[judge]\nprompt = \"p.md\"\n", head("j", "judge")),
+        );
+        std::os::unix::fs::symlink(outside.join("p.md"), d.join("p.md")).unwrap();
+        let e = manifest_err_at(&d);
+        assert!(e.contains("p.md") && e.contains("outside"), "{e}");
+    }
+
+    fn manifest_err_at(d: &Path) -> String {
+        format!("{:#}", load_manifest(d).unwrap_err())
+    }
+
+    #[test]
     fn later_places_replace_earlier_ones() {
         let t = TempDir::new();
         let (user, store) = (t.0.join("user"), t.0.join("store"));
@@ -1067,7 +1185,7 @@ repo = ""
         std::fs::create_dir_all(user.join("not-a-plugin")).unwrap();
         let found = discover(&[user.clone(), store.clone(), t.0.join("absent")]).unwrap();
         assert_eq!(found.keys().collect::<Vec<_>>(), ["a", "b"]);
-        assert_eq!(found["a"].dir, store.join("a2"));
+        assert_eq!(found["a"].dir, store.join("a2").canonicalize().unwrap());
         // Two plugins with one id in one place are ambiguous.
         put(
             &store,

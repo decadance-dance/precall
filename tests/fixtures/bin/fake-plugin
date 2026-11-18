@@ -1,8 +1,9 @@
 #!/bin/sh
 # A fake plugin for tests. Its scenario comes from the env var RRECALL_PARAM_SCENARIO (the
-# instance's `scenario` param): ok (print RRECALL_PARAM_OUT), crash (exit 3), sleep (never
-# answers; the pid of the sleep it starts goes to RRECALL_PARAM_RECORD.pid). It records its argv, cwd and RRECALL_* environment to RRECALL_PARAM_RECORD and its
-# stdin to RRECALL_PARAM_RECORD.stdin, and writes one line to stderr.
+# instance's `scenario` param): ok (print RRECALL_PARAM_OUT), binary (print a byte that is not
+# UTF-8), crash (exit 3), sleep (never answers; the pid of the sleep it starts goes to
+# RRECALL_PARAM_RECORD.pid). It records its argv, cwd and RRECALL_* environment to
+# RRECALL_PARAM_RECORD and its stdin to RRECALL_PARAM_RECORD.stdin, and writes one line to stderr.
 rec="${RRECALL_PARAM_RECORD:-/dev/null}"
 {
     printf 'argv:'
@@ -14,6 +15,7 @@ cat > "$rec.stdin"
 echo "fake plugin: scenario ${RRECALL_PARAM_SCENARIO}" >&2
 case "$RRECALL_PARAM_SCENARIO" in
     ok) printf '%s' "$RRECALL_PARAM_OUT" ;;
+    binary) printf '\377' ;;
     crash) exit 3 ;;
     sleep) sleep 30 & echo $! > "$rec.pid"; wait ;;
     *) echo "fake plugin: unknown scenario" >&2; exit 64 ;;
