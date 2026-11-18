@@ -85,6 +85,7 @@ fn main() -> ExitCode {
         Cmd::Import { outline } => commands::import(p, outline),
         Cmd::Ls { depth, json } => commands::ls(p, *depth as usize, *json),
         Cmd::Show { id, depth, max_tokens, json } => commands::show(p, id, *depth as usize, *max_tokens, *json),
+        Cmd::Find { text, json } => commands::find(p, text, *json),
         _ => Err(anyhow::anyhow!("not implemented yet")),
     };
     match out {

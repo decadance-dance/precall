@@ -116,6 +116,10 @@ pub fn show(project: Option<&str>, id: &str, depth: usize, max_tokens: Option<us
     query::show(&open(project)?, id, depth, max_tokens, json)
 }
 
+pub fn find(project: Option<&str>, text: &str, json: bool) -> Result<String> {
+    query::find(&open(project)?, text, json)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

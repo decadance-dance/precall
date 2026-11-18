@@ -163,3 +163,26 @@ fn fit(pieces: &[String], max: usize, footer: &dyn Fn(usize) -> String) -> usize
         .find(|&k| (bytes[k] + footer(k).len()).div_ceil(4) <= max)
         .unwrap_or(1)
 }
+
+/// Nodes whose title or body contains `text` (case-insensitive), in tree order.
+pub fn find(store: &Store, text: &str, json: bool) -> Result<String> {
+    let kids = store.child_map();
+    let needle = text.to_lowercase();
+    let mut stack: Vec<&Node> = store.roots().into_iter().rev().collect();
+    let mut hits = Vec::new();
+    while let Some(n) = stack.pop() {
+        if n.title.to_lowercase().contains(&needle) || n.body.to_lowercase().contains(&needle) {
+            hits.push(n);
+        }
+        stack.extend(kids.get(n.id.as_str()).into_iter().flatten().rev());
+    }
+    if hits.is_empty() {
+        return Err(crate::error::not_found(format!("no node matches `{text}`")));
+    }
+    Ok(if json {
+        let nodes: Vec<Value> = hits.iter().map(|n| json_node(store, &kids, n)).collect();
+        format!("{}\n", json!({ "nodes": nodes }))
+    } else {
+        hits.iter().map(|n| md_block(store, &kids, n, false)).collect::<Vec<_>>().join("\n")
+    })
+}

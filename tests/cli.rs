@@ -299,3 +299,135 @@ fn import_rejects_bad_outlines_and_changes_nothing() {
     assert_eq!(git(&store, &["status", "--porcelain"]), "");
     assert_eq!(git(&store, &["log", "--format=%s"]), "init kiln\n");
 }
+
+// ---- queries (spec §7) on the invented 300-node fixture ----
+
+const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/lanternfish-outline.txt");
+
+/// A store `lanternfish` seeded from the 300-node fixture.
+fn fixture_env() -> Env {
+    let e = Env::new();
+    e.ok(&["init", "lanternfish"]);
+    let out = e.ok(&["--project", "lanternfish", "import", FIXTURE]);
+    assert!(out.contains("Imported 300 nodes"), "{out}");
+    e
+}
+
+fn q(e: &Env, args: &[&str]) -> String {
+    let mut all = vec!["--project", "lanternfish"];
+    all.extend_from_slice(args);
+    e.ok(&all)
+}
+
+/// Tokens are estimated as bytes / 4, rounded up: the usual rate for English text and ids.
+fn tokens(s: &str) -> usize {
+    s.len().div_ceil(4)
+}
+
+#[test]
+fn ls_on_300_node_fixture_stays_under_1500_tokens() {
+    let e = fixture_env();
+    let ls = q(&e, &["ls"]);
+    assert!(tokens(&ls) < 1500, "ls is {} tokens:\n{ls}", tokens(&ls));
+    assert_eq!(ls.lines().count(), 7 + 63, "branches and their children:\n{ls}");
+    assert!(ls.starts_with("- Layout (layout)\n  - Sync server (sync-server) +10\n"), "{ls}");
+    assert!(ls.contains("\n- Services (services)\n  - sync-server (sync-server-3) +"), "{ls}");
+    assert!(!ls.contains("HTTP routes"), "depth 3 is one show away");
+    let ls1 = q(&e, &["ls", "--depth", "1"]);
+    assert_eq!(ls1.lines().next(), Some("- Layout (layout) +52"));
+    assert_eq!(ls1.lines().count(), 7);
+    assert!(q(&e, &["ls", "--depth", "3"]).contains("    - HTTP routes (http-routes) +4\n"));
+}
+
+#[test]
+fn show_prints_block_with_children_as_titles() {
+    let e = fixture_env();
+    let show = q(&e, &["show", "sync-server"]);
+    assert_eq!(
+        show,
+        "## Layout > Sync server (sync-server)\n\
+         Rust service under server/ that stores read state and subscriptions per user.\n\
+         sources: import:lanternfish-outline.txt\n\
+         - HTTP routes (http-routes) +4\n\
+         - Storage layer (storage-layer) +2\n\
+         - Migrations (migrations)\n\
+         - Config loader (config-loader)\n"
+    );
+    let deep = q(&e, &["show", "sync-server", "--depth", "1"]);
+    assert!(deep.contains("\n## Layout > Sync server > HTTP routes (http-routes)\nserver/src/routes/"), "{deep}");
+    assert!(deep.contains("- /v1/feeds (v1-feeds)\n"), "{deep}");
+    assert_eq!(deep.matches("## ").count(), 5);
+    // A branch shows its question and the config as its source.
+    assert!(q(&e, &["show", "services"]).starts_with(
+        "## Services (services)\nWhich services run in production?\nsources: config:rrecall.toml\n"
+    ));
+}
+
+#[test]
+fn show_max_tokens_cuts_at_a_node_boundary() {
+    let e = fixture_env();
+    let full = q(&e, &["show", "layout", "--depth", "3"]);
+    assert_eq!(full.matches("## ").count(), 53);
+    let cut = q(&e, &["show", "layout", "--depth", "3", "--max-tokens", "300"]);
+    assert!(tokens(&cut) <= 300, "{} tokens:\n{cut}", tokens(&cut));
+    let shown = cut.matches("## ").count();
+    assert!(shown > 1 && shown < 53, "{cut}");
+    let footer = cut.lines().last().unwrap();
+    assert!(footer.starts_with(&format!("[{} nodes left out; see them with: rrecall show ", 53 - shown)), "{footer}");
+    // Each block printed is whole: the cut output is a prefix of the full one.
+    assert!(full.starts_with(cut.trim_end().trim_end_matches(footer).trim_end()), "{cut}");
+    // Even a tiny budget prints the first node.
+    let tiny = q(&e, &["show", "layout", "--depth", "1", "--max-tokens", "1"]);
+    assert!(tiny.starts_with("## Layout (layout)\n"), "{tiny}");
+    assert!(tiny.ends_with("[9 nodes left out; see them with: rrecall show sync-server, rrecall show fetcher, rrecall show web-client, rrecall show mobile-app, rrecall show queue, rrecall show infrastructure-code, rrecall show docs-site, rrecall show test-suites, rrecall show release-tooling]\n"), "{tiny}");
+}
+
+#[test]
+fn show_json_has_nodes_paths_children_and_left_out() {
+    let e = fixture_env();
+    let v: serde_json::Value = serde_json::from_str(&q(&e, &["show", "fetcher", "--json"])).unwrap();
+    let n = &v["nodes"][0];
+    assert_eq!(n["id"], "fetcher");
+    assert_eq!(n["parent"], "layout");
+    assert_eq!(n["path"], "Layout > Fetcher");
+    assert_eq!(n["sources"], serde_json::json!(["import:lanternfish-outline.txt"]));
+    assert_eq!(n["children"], serde_json::json!(["scheduler", "parser", "politeness", "dead-feed-detector"]));
+    assert!(v.get("left_out").is_none());
+    let cut: serde_json::Value =
+        serde_json::from_str(&q(&e, &["show", "fetcher", "--depth", "1", "--max-tokens", "1", "--json"])).unwrap();
+    assert_eq!(cut["nodes"].as_array().unwrap().len(), 1);
+    assert_eq!(cut["left_out"], serde_json::json!(["scheduler", "parser", "politeness", "dead-feed-detector"]));
+}
+
+#[test]
+fn find_matches_title_or_body_with_paths() {
+    let e = fixture_env();
+    let f = q(&e, &["find", "RETRY-after"]);
+    assert_eq!(f.matches("## ").count(), 3, "{f}");
+    assert!(f.contains("## Layout > Fetcher > Politeness (politeness)\n"), "{f}");
+    assert!(f.contains("## Services > caddy > Rate limiting > Response (response)\n"), "{f}");
+    let v: serde_json::Value = serde_json::from_str(&q(&e, &["find", "Politeness", "--json"])).unwrap();
+    let ids: Vec<&str> = v["nodes"].as_array().unwrap().iter().map(|n| n["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["politeness", "politeness-2"]);
+    let o = e.run(&["--project", "lanternfish", "find", "kubernetes"]);
+    assert_eq!(o.code, 1, "{}", o.stderr);
+}
+
+#[test]
+fn rewrite_of_imported_300_node_store_keeps_bytes() {
+    let e = fixture_env();
+    let store = e.store("lanternfish");
+    let read_map = || {
+        let mut files: Vec<(String, Vec<u8>)> = std::fs::read_dir(store.join("map"))
+            .unwrap()
+            .map(|f| f.unwrap().path())
+            .map(|p| (p.display().to_string(), std::fs::read(&p).unwrap()))
+            .collect();
+        files.sort();
+        files
+    };
+    let before = read_map();
+    rrecall::store::Store::load(&store).unwrap().save().unwrap();
+    assert_eq!(read_map(), before);
+    assert_eq!(git(&store, &["status", "--porcelain"]), "");
+}
