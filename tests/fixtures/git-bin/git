@@ -1,0 +1,5 @@
+#!/bin/sh
+# A recording `git` for tests: appends its argv (one line, args joined by spaces) and the value
+# of GIT_ALLOW_PROTOCOL to $FAKE_GIT_LOG, then runs the real git at $FAKE_GIT_REAL.
+printf '%s | GIT_ALLOW_PROTOCOL=%s\n' "$*" "$GIT_ALLOW_PROTOCOL" >> "${FAKE_GIT_LOG:?}"
+exec "${FAKE_GIT_REAL:?}" "$@"
