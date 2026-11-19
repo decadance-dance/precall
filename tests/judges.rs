@@ -58,6 +58,21 @@ fn each_labeled_set_is_a_judge_input_with_one_label_per_proposal() {
                 assert_eq!(first, t, "{judge}: `{r}` resolves twice");
             }
         }
+        // §6.5: `nodes` holds the branches the adds and moves land in, their parents included.
+        let shown: std::collections::BTreeSet<&str> =
+            input.nodes.iter().map(|n| n.id.as_str()).collect();
+        for j in &input.proposals {
+            if let Some(parent) = &j.proposal.parent {
+                let branch = rrecall::config::default_branches()
+                    .iter()
+                    .any(|b| &b.id == parent);
+                assert!(
+                    branch || shown.contains(parent.as_str()),
+                    "{judge}: {} lands under `{parent}`, which `nodes` lacks",
+                    j.key
+                );
+            }
+        }
         for n in &input.nodes {
             n.validate()
                 .unwrap_or_else(|e| panic!("{judge}: {}: {e}", n.id));

@@ -194,7 +194,118 @@
         }
       }
     ],
-    "nodes": [],
+    "nodes": [
+      {
+        "id": "config-loader",
+        "parent": "sync-server",
+        "title": "Config loader",
+        "body": "server/src/config.rs reads lanternfish.toml and LF_* environment variables.",
+        "sources": [
+          "file:server/src/config.rs#L1-L40@3c1f9a2"
+        ],
+        "order": 3
+      },
+      {
+        "id": "connection-pool",
+        "parent": "storage-layer",
+        "title": "Connection pool",
+        "body": "At most 4 open files per worker thread.",
+        "sources": [
+          "file:server/src/db/pool.rs#L1-L40@3c1f9a2"
+        ],
+        "order": 0
+      },
+      {
+        "id": "dead-feed-detector",
+        "parent": "fetcher",
+        "title": "Dead feed detector",
+        "body": "fetcher/dead.go marks a feed dead after 14 days of errors.",
+        "sources": [
+          "file:fetcher/dead.go#L1-L40@3c1f9a2"
+        ],
+        "order": 3
+      },
+      {
+        "id": "fetcher",
+        "parent": "layout",
+        "title": "Fetcher",
+        "body": "Go worker under fetcher/ that polls feeds and writes new items to the queue.",
+        "sources": [
+          "file:fetcher/main.go#L1-L40@3c1f9a2"
+        ],
+        "order": 1
+      },
+      {
+        "id": "migrations",
+        "parent": "sync-server",
+        "title": "Migrations",
+        "body": "server/migrations/: numbered SQL files applied at startup.",
+        "sources": [
+          "file:server/src/db/migrate.rs#L1-L40@3c1f9a2"
+        ],
+        "order": 2
+      },
+      {
+        "id": "politeness",
+        "parent": "fetcher",
+        "title": "Politeness",
+        "body": "fetcher/http.go honours ETag, Last-Modified and Retry-After.",
+        "sources": [
+          "file:fetcher/http.go#L1-L40@3c1f9a2"
+        ],
+        "order": 2
+      },
+      {
+        "id": "scheduler",
+        "parent": "fetcher",
+        "title": "Scheduler",
+        "body": "fetcher/schedule.go spreads polls over the hour by feed hash.",
+        "sources": [
+          "file:fetcher/schedule.go#L1-L40@3c1f9a2"
+        ],
+        "order": 0
+      },
+      {
+        "id": "settings-page",
+        "parent": "web-client",
+        "title": "Settings page",
+        "body": "web/src/settings/: theme, refresh interval, OPML import and export.",
+        "sources": [
+          "file:web/src/settings/index.svelte#L1-L40@3c1f9a2"
+        ],
+        "order": 3
+      },
+      {
+        "id": "storage-layer",
+        "parent": "sync-server",
+        "title": "Storage layer",
+        "body": "server/src/db/: one SQLite file per user, opened through a small pool.",
+        "sources": [
+          "file:server/src/db/mod.rs#L1-L40@3c1f9a2"
+        ],
+        "order": 1
+      },
+      {
+        "id": "sync-server",
+        "parent": "layout",
+        "title": "Sync server",
+        "body": "Rust service under server/ that stores read state and subscriptions per user.",
+        "sources": [
+          "file:server/Cargo.toml#L1-L40@3c1f9a2"
+        ],
+        "order": 0
+      },
+      {
+        "id": "web-client",
+        "parent": "layout",
+        "title": "Web client",
+        "body": "Svelte app under web/ served as static files by the sync server.",
+        "sources": [
+          "file:web/package.json#L1-L40@3c1f9a2"
+        ],
+        "order": 2
+      }
+    ],
     "map_ids": [
       "arm-builds",
       "blocked",
