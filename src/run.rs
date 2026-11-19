@@ -12,7 +12,7 @@ use crate::secrets;
 use crate::store::{self, Store};
 use crate::wire::{
     self, CollectorInput, Event, FetchInput, JudgeInput, JudgeItem, PluginInput, Proposal,
-    Rejection, ResolveInput, RoundVerdict, RunnerInput, Verdict, VerdictKind,
+    Rejection, ResolveInput, RoundVerdict, RunnerInput, Usage, Verdict, VerdictKind,
 };
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
@@ -167,18 +167,25 @@ impl From<anyhow::Error> for CallFail {
     }
 }
 
+/// Total spent, the cost per plugin instance and the tokens of those whose runner reported them.
+#[derive(Default, Clone)]
+struct Spent {
+    total: f64,
+    cost: BTreeMap<String, f64>,
+    tokens: BTreeMap<String, Usage>,
+}
+
 /// The cost cap: checked before each runner call; calls in flight may finish.
 #[derive(Default)]
 struct Budget {
     cap: Option<f64>,
-    /// Total spent and the cost per plugin instance.
-    spent: Mutex<(f64, BTreeMap<String, f64>)>,
+    spent: Mutex<Spent>,
     refused: AtomicBool,
 }
 
 impl Budget {
     fn reserve(&self) -> Result<(), CallFail> {
-        let spent = self.spent.lock().unwrap_or_else(|p| p.into_inner()).0;
+        let spent = self.spent.lock().unwrap_or_else(|p| p.into_inner()).total;
         if self.cap.is_some_and(|cap| spent >= cap) {
             self.refused.store(true, Ordering::SeqCst);
             return Err(CallFail::Budget);
@@ -186,11 +193,24 @@ impl Budget {
         Ok(())
     }
 
-    fn spend(&self, who: &str, cost: f64) {
+    fn spend(&self, who: &str, cost: f64, usage: Option<Usage>) {
         let mut s = self.spent.lock().unwrap_or_else(|p| p.into_inner());
-        s.0 += cost;
-        *s.1.entry(who.to_string()).or_default() += cost;
+        s.total += cost;
+        *s.cost.entry(who.to_string()).or_default() += cost;
+        if let Some(u) = usage {
+            *s.tokens.entry(who.to_string()).or_default() += u;
+        }
     }
+}
+
+/// `input N (cached C), output O`: input counts every input token, cached or not.
+fn tokens_line(u: &Usage) -> String {
+    format!(
+        "input {} (cached {}), output {}",
+        u.input_tokens + u.cache_read_tokens + u.cache_write_tokens,
+        u.cache_read_tokens,
+        u.output_tokens
+    )
 }
 
 /// How a proposal ended a round.
@@ -1002,7 +1022,7 @@ impl Run {
         )
         .with_context(|| format!("runner of plugin `{}`", caller.id))?;
         let ro = wire::decode_runner(&r.id, &out)?;
-        self.budget.spend(&caller.id, ro.cost_usd);
+        self.budget.spend(&caller.id, ro.cost_usd, ro.usage);
         // The model goes into the tracked lock (spec §6.3).
         Ok((
             ro.output.to_string(),
@@ -1532,7 +1552,11 @@ impl Run {
         if let Some(d) = &self.drift {
             s += &format!("- drift: {d}\n");
         }
-        let (total, per) = self
+        let Spent {
+            total,
+            cost: per,
+            tokens,
+        } = self
             .budget
             .spent
             .lock()
@@ -1541,6 +1565,15 @@ impl Run {
         if total > 0.0 || !per.is_empty() {
             let list: Vec<String> = per.iter().map(|(id, c)| format!("{id} ${c:.2}")).collect();
             s += &format!("- cost: ${total:.2} ({})\n", list.join(", "));
+        }
+        if !tokens.is_empty() {
+            let mut sum = Usage::default();
+            let mut list = Vec::new();
+            for (id, u) in &tokens {
+                sum += *u;
+                list.push(format!("{id}: {}", tokens_line(u)));
+            }
+            s += &format!("- tokens: {}; {}\n", tokens_line(&sum), list.join("; "));
         }
         s += &format!("- wall time: {wall:.1}s\n");
         if !self.log.is_empty() {

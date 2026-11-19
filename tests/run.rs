@@ -1159,6 +1159,38 @@ fn a_runner_reports_the_model_that_goes_into_the_lock() {
         lock["collectors"]["writer"]["model"],
         "fake-1 api_key=[redacted:high-entropy-assignment]"
     );
+    // No runner call reported its tokens.
+    assert!(!w.report().contains("- tokens"), "{}", w.report());
+}
+
+#[test]
+fn the_report_sums_each_plugins_tokens_over_its_rounds_and_calls() {
+    let w = W::new();
+    w.seed("layout", &[API]);
+    let update = json!({"key": "u", "op": "update", "id": "api", "title": "API", "body": "HTTP API, v2.", "sources": ["file:api.md"], "reason": "v2"});
+    let cite = json!({"key": "s", "op": "add_source", "id": "api", "sources": ["note:api.md"], "reason": "cited"});
+    let usage = |i: u64, o: u64, r: u64, c: u64| json!({"input_tokens": i, "output_tokens": o, "cache_read_tokens": r, "cache_write_tokens": c});
+    // Both change `api`, so both go back and `writer` runs a second round.
+    let r1 = json!({"output": {"proposals": [cite]}, "cost_usd": 0.0, "model": "fake-1", "usage": usage(100, 20, 1000, 5)});
+    let r2 = json!({"output": {"proposals": []}, "cost_usd": 0.0, "model": "fake-1", "usage": usage(10, 2, 300, 0)});
+    w.config(&format!(
+        "{}{}{}",
+        w.inst("repo", "col", &format!("out = {}", q(&props(&[update])))),
+        w.inst("writer", "prompted", ""),
+        w.inst(
+            "runner",
+            "runner",
+            &format!("scenario = \"seq\", out = {}", q(&format!("{r1}\n{r2}")))
+        ),
+    ));
+    w.run(&[]);
+    assert_eq!(w.input("runner", 2)["input"]["round"], 2);
+    // Input is every input token: uncached, read from and written to a cache.
+    let report = w.report();
+    assert!(
+        report.contains("\n- tokens: input 1415 (cached 1300), output 22; writer: input 1415 (cached 1300), output 22\n"),
+        "{report}"
+    );
 }
 
 #[test]
@@ -1410,12 +1442,21 @@ fn the_builtin_claude_runner_runs_a_declarative_collector() {
         w.inst("writer", "prompted", ""),
         w.inst("judge", "judge", "scenario = \"all\", out = \"accept\""),
     ));
+    // The fake claude's result: 1 input, 4 read from the cache, 3 written to it, 2 output.
+
     w.run_code(&[], 0);
     assert!(w.map("layout").contains("Queue"));
     let lock = w.lock();
     assert_eq!(lock["collectors"]["writer"]["runner"], "claude");
     assert_eq!(lock["collectors"]["writer"]["model"], "claude-fake-1");
     assert!(w.report().contains("$0.25"), "{}", w.report());
+    assert!(
+        w.report().contains(
+            "\n- tokens: input 8 (cached 4), output 2; writer: input 8 (cached 4), output 2\n"
+        ),
+        "{}",
+        w.report()
+    );
     let argv = std::fs::read_to_string(w.root.join("home/agent/claude.argv.1")).unwrap();
     assert!(argv.contains("\n--model\nopus-test\n"), "{argv}");
     let stdin = std::fs::read_to_string(w.root.join("home/agent/claude.stdin.1")).unwrap();

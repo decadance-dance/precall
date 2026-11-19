@@ -163,6 +163,12 @@ impl T {
     }
 }
 
+/// A runner output's `usage`: input, output, cache read, cache write.
+fn usage(input: u64, output: u64, read: u64, write: u64) -> Value {
+    json!({"input_tokens": input, "output_tokens": output,
+        "cache_read_tokens": read, "cache_write_tokens": write})
+}
+
 fn json_of(o: &Out) -> Value {
     assert!(o.ok, "stderr: {}", o.stderr);
     serde_json::from_str(&o.stdout).unwrap()
@@ -191,7 +197,8 @@ fn claude_runs_read_only_with_the_prompt_on_stdin_and_reports_cost_and_model() {
     let out = json_of(&t.call("claude", "claude-fake-1", 60, None));
     assert_eq!(
         out,
-        json!({"output": {"texts": {"note:a": "A"}}, "cost_usd": 0.25, "model": "claude-fake-1"})
+        json!({"output": {"texts": {"note:a": "A"}}, "cost_usd": 0.25, "model": "claude-fake-1",
+            "usage": usage(1, 2, 4, 3)})
     );
     let argv = t.argv("claude.argv.1");
     for want in ["-p", "--safe-mode", "--session-id"] {
@@ -336,6 +343,7 @@ fn codex_runs_read_only_in_a_clean_home_and_prices_its_tokens() {
         (out["cost_usd"].as_f64().unwrap() - 1.6).abs() < 1e-9,
         "{out}"
     );
+    assert_eq!(out["usage"], usage(500_000, 100_000, 1_000_000, 0));
     assert_eq!(out["output"], json!({"texts": {"note:a": null}}));
     let argv = t.argv("codex.argv.1");
     assert_eq!(
@@ -372,6 +380,7 @@ fn codex_without_a_session_log_counts_its_turn_events_and_the_requested_model() 
         (out["model"].as_str(), out["cost_usd"].as_f64()),
         (Some("m7"), Some(1.0))
     );
+    assert_eq!(out["usage"], usage(1_000_000, 0, 0, 0));
     assert_eq!(after(&t.argv("codex.argv.1"), "-m"), "m7");
     let o = t.call("codex", "m7", 60, None);
     assert!(!o.ok && o.stderr.contains("`m7`"), "{}", o.stderr);
@@ -465,6 +474,8 @@ fn claude_wrap_up_charges_the_killed_turn_too() {
         (out["cost_usd"].as_f64().unwrap() - 0.6).abs() < 1e-9,
         "{out}"
     );
+    // The killed turn's streamed usage plus the wrap-up's result.
+    assert_eq!(out["usage"], usage(1_000_001, 2, 4, 3));
     let o = t.call("claude", "m", WRAP_TIMEOUT, None);
     assert!(
         !o.ok && o.stderr.contains("`claude-fake-1`") && o.stderr.contains("`prices`"),
@@ -527,6 +538,7 @@ fn a_killed_turn_that_reported_its_cost_is_charged_that_cost() {
         (out["cost_usd"].as_f64().unwrap() - 0.75).abs() < 1e-9,
         "{out}"
     );
+    assert_eq!(out["usage"], usage(2, 4, 8, 6));
 }
 
 #[test]
