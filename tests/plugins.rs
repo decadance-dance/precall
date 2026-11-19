@@ -945,12 +945,30 @@ fn init_waits_for_the_user_config_lock() {
     let cfg_dir = w.root.join("config/rrecall");
     std::fs::create_dir_all(&cfg_dir).unwrap();
     let held = rrecall::lock::lock_file(&cfg_dir.join("config.toml.lock"), true).unwrap();
-    let init = w.spawn(&["init", "kettle"]);
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    let mut init = w.spawn(&["init", "kettle"]);
+    // Unlocked, init finishes well within this window; locked out, it must still be waiting
+    // at its end, having written neither the user config nor the store.
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < until {
+        if let Some(status) = init.try_wait().unwrap() {
+            let mut err = String::new();
+            use std::io::Read;
+            init.stderr
+                .take()
+                .unwrap()
+                .read_to_string(&mut err)
+                .unwrap();
+            panic!(
+                "init finished ({status}) while another command held the user config lock: {err}"
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     assert!(
         !cfg_dir.join("config.toml").exists(),
-        "init wrote the user config while another command held its lock"
+        "init wrote the user config"
     );
+    assert!(!w.store().exists(), "init created the store");
     drop(held);
     let o = init.wait_with_output().unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
