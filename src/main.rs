@@ -166,7 +166,7 @@ fn main() -> ExitCode {
         Cmd::Plugin(PluginCmd::Add { source, git_ref }) => {
             rrecall::plugin_cmd::add(source, git_ref.as_deref())
         }
-        Cmd::Plugin(PluginCmd::Trust { dir }) => rrecall::plugin_cmd::trust(dir),
+        Cmd::Plugin(PluginCmd::Trust { dir }) => rrecall::plugin_cmd::trust(p, dir),
         Cmd::Builtin { id, entry } => commands::builtin(id, entry.as_deref()),
     };
     match out {

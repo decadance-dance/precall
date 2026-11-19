@@ -18,9 +18,11 @@ use std::time::Duration;
 type Line = (bool, String);
 
 pub fn doctor(project: Option<&str>) -> Result<String> {
+    // A user config a run cannot load exits 4, as the plugin loader says; project resolution
+    // reads it too, and would exit 1 first.
+    let user = config::load_user_config().map_err(|e| error::aborted(format!("{e:#}")))?;
     let (name, store) = config::resolve_project(project)?;
     let instances = plugin::load(&store)?;
-    let user = config::load_user_config()?;
     // The rest of a run's step 1 that concerns plugins (spec §6.8): a run would abort on it.
     run::check_allowed(&instances, &user).map_err(error::aborted)?;
     let ctx = Ctx {
@@ -30,6 +32,14 @@ pub fn doctor(project: Option<&str>) -> Result<String> {
         // Not under runs/: `status` reads the last run there, and doctor is no run.
         run_dir: store.join("cache/doctor"),
     };
+    // Fingerprints get a fresh state dir each time, so a probe never changes what a run reads.
+    let scratch = ctx.run_dir.join("state");
+    match std::fs::remove_dir_all(&scratch) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(e).with_context(|| format!("removing {}", scratch.display()));
+        }
+        _ => {}
+    }
     let cwd = std::env::current_dir().context("reading the working directory")?;
     let path_var = std::env::var_os("PATH").unwrap_or_default();
     let mut lines: Vec<Vec<Line>> = instances
@@ -124,7 +134,9 @@ fn own_checks(ctx: &Ctx, inst: &Instance, path_var: &std::ffi::OsStr, cwd: &Path
                     run_id: ctx.run_id.clone(),
                     params: inst.params_json(),
                 };
-                let reached = process::call(ctx, inst, "fingerprint", fp, &input).map(|_| ());
+                let state = ctx.run_dir.join("state").join(&inst.id);
+                let reached =
+                    process::call_in(ctx, inst, "fingerprint", fp, &input, &state).map(|_| ());
                 lines.push(check("fingerprint".into(), reached));
             }
             // limit: a source without a fingerprint has no cheap read, so only a run reaches it.

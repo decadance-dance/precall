@@ -4,11 +4,12 @@
 use crate::config;
 use crate::error::{self, Fail};
 use crate::plugin::{self, Manifest, Plugin, Spec};
-use crate::store;
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// Installs the plugin at `source` (an existing local directory, else a git URL) into the user
 /// plugin directory, after showing it and asking, and records where it came from.
@@ -24,23 +25,39 @@ pub fn add(source: &str, git_ref: Option<&str>) -> Result<String> {
     // Staged beside `plugins/`, not inside it, so a run in the meantime never discovers it.
     let stage = Staged(parent.join(format!(".plugin-add-{}", std::process::id())));
     let _ = std::fs::remove_dir_all(&stage.0);
-    std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    let tree = stage.0.join("tree");
+    std::fs::create_dir_all(&stage.0).with_context(|| format!("creating {}", stage.0.display()))?;
     let local = Path::new(source);
-    let (source, commit) = if local.exists() && git_ref.is_none() {
-        let abs = local
+    // A local path is recorded and cloned absolute: git runs in the staging directory.
+    let source = match local.exists() {
+        true => local
             .canonicalize()
-            .with_context(|| format!("reading {source}"))?;
-        copy_tree(&abs, &stage.0)?;
-        (abs.to_string_lossy().into_owned(), None)
+            .with_context(|| format!("reading {source}"))?
+            .to_string_lossy()
+            .into_owned(),
+        false => source.to_string(),
+    };
+    let commit = if local.exists() && git_ref.is_none() {
+        copy_tree(Path::new(&source), &tree)?;
+        None
     } else {
-        clone(source, git_ref, &stage.0)?
+        Some(fetch(&source, git_ref, &stage.0, &tree)?)
     };
     // limit: a source holds one plugin, at its root; a repository of several plugins is not
     // installable until `add` takes a subdirectory.
-    let manifest = plugin::load_manifest(&stage.0)?;
+    let manifest = plugin::load_manifest(&tree)?;
     let id = &manifest.id;
     let dest = plugins.join(id);
+    // Discovery knows a plugin by its manifest id, whatever its directory is called.
+    let installed = plugin::discover(std::slice::from_ref(&plugins))?;
     // limit: no update in place; reinstalling means removing the directory and the record.
+    if let Some(have) = installed.get(id) {
+        return Err(error::usage(format!(
+            "plugin `{id}` is already installed at {}: remove it (and its [[installed]] entry in {}) to install it again",
+            have.dir.display(),
+            config::user_config_path()?.display()
+        )));
+    }
     if dest.exists() || user.installed.iter().any(|i| &i.id == id) {
         return Err(error::usage(format!(
             "plugin `{id}` is already installed: remove {} and its [[installed]] entry in {} to install it again",
@@ -48,12 +65,12 @@ pub fn add(source: &str, git_ref: Option<&str>) -> Result<String> {
             config::user_config_path()?.display()
         )));
     }
-    print!("{}", preview(&manifest, &stage.0)?);
+    print!("{}", preview(&manifest, &tree)?);
     if !confirm(&format!("Install {id} into {}? [y/N] ", dest.display()))? {
         return Err(declined(&format!("plugin `{id}` was not installed")));
     }
     std::fs::create_dir_all(&plugins).with_context(|| format!("creating {}", plugins.display()))?;
-    std::fs::rename(&stage.0, &dest).with_context(|| format!("moving into {}", dest.display()))?;
+    std::fs::rename(&tree, &dest).with_context(|| format!("moving into {}", dest.display()))?;
     let recorded = plugin::content_hash(&dest).and_then(|hash| {
         let mut entry = format!(
             "[[installed]]\nid = {}\nsource = {}\n",
@@ -83,14 +100,25 @@ pub fn add(source: &str, git_ref: Option<&str>) -> Result<String> {
 
 /// Trusts a project's `.rrecall/plugins/` directory at its current content hash, after showing
 /// every manifest in it and asking.
-pub fn trust(dir: &Path) -> Result<String> {
+pub fn trust(project: Option<&str>, dir: &Path) -> Result<String> {
     let dir = dir
         .canonicalize()
         .map_err(|e| error::usage(format!("{}: {e}", dir.display())))?;
-    if !dir.is_dir() {
+    // The loader reads only the project's own `.rrecall/plugins/`; trusting any other
+    // directory would record a decision nothing ever consults.
+    let (name, store) = config::resolve_project(project)?;
+    let repo = config::load_store_config(&store)?.repo.ok_or_else(|| {
+        error::usage(format!(
+            "project `{name}` names no repository (`repo` in {}), so no plugin directory of its own loads",
+            store.join(config::STORE_CONFIG).display()
+        ))
+    })?;
+    let expected = repo.join(".rrecall/plugins");
+    if expected.canonicalize().ok().as_ref() != Some(&dir) {
         return Err(error::usage(format!(
-            "{} is not a directory",
-            dir.display()
+            "{} is not the plugin directory of project `{name}`: that is {}",
+            dir.display(),
+            expected.display()
         )));
     }
     // Hashed before it is shown: a change after the preview is not covered by the answer.
@@ -300,21 +328,94 @@ impl Drop for Staged {
     }
 }
 
-/// Clones `url` into `to`, checks out `git_ref` when given, and drops `.git`. Returns the
-/// source as recorded and the commit installed.
-fn clone(url: &str, git_ref: Option<&str>, to: &Path) -> Result<(String, Option<String>)> {
-    let to_text = to.to_str().context("the staging path is not UTF-8")?;
-    let parent = to.parent().context("the staging path has no parent")?;
-    store::git(parent, &["clone", "-q", "--", url, to_text])
-        .with_context(|| format!("cloning {url}"))?;
-    if let Some(r) = git_ref {
-        store::git(to, &["checkout", "-q", "--detach", r, "--"])
-            .with_context(|| format!("checking out {r} of {url}"))?;
+/// git as `add` runs it on a source nobody has vetted yet: only the https, ssh, git and file
+/// transports (whatever the user's config allows), no hooks, no fsmonitor. It never checks
+/// out, so no filter or checkout hook runs: [`fetch`] writes the tree from git's objects.
+fn installer_git(dir: &Path, hooks: &Path) -> Command {
+    let mut c = Command::new("git");
+    c.current_dir(dir)
+        // Overrides every protocol setting in git's config (git-config(1), GIT_ALLOW_PROTOCOL).
+        .env("GIT_ALLOW_PROTOCOL", "https:ssh:git:file")
+        .args(["-c", "protocol.allow=never"])
+        .arg("-c")
+        .arg(format!("core.hooksPath={}", hooks.display()))
+        .args(["-c", "core.fsmonitor=false"]);
+    c
+}
+
+fn git_out(mut c: Command, what: &str) -> Result<Vec<u8>> {
+    let o = c
+        .output()
+        .with_context(|| format!("running git to {what}"))?;
+    if !o.status.success() {
+        bail!(
+            "git failed to {what}: {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        );
     }
-    let commit = store::git(to, &["rev-parse", "HEAD"])?.trim().to_string();
-    std::fs::remove_dir_all(to.join(".git"))
-        .with_context(|| format!("removing {}", to.join(".git").display()))?;
-    Ok((url.to_string(), Some(commit)))
+    Ok(o.stdout)
+}
+
+/// Clones `url` without a checkout under `stage`, and writes the tree of `git_ref` (else
+/// `HEAD`) to `tree` from git's objects. Returns the commit.
+fn fetch(url: &str, git_ref: Option<&str>, stage: &Path, tree: &Path) -> Result<String> {
+    let hooks = stage.join("hooks");
+    let repo = stage.join("repo");
+    std::fs::create_dir_all(&hooks).with_context(|| format!("creating {}", hooks.display()))?;
+    let mut c = installer_git(stage, &hooks);
+    c.args(["clone", "-q", "--no-checkout", "--"])
+        .arg(url)
+        .arg(&repo);
+    git_out(c, &format!("clone {url}"))?;
+    let git = |args: &[&str], what: &str| {
+        let mut c = installer_git(&repo, &hooks);
+        c.args(args);
+        git_out(c, what)
+    };
+    let want = format!("{}^{{commit}}", git_ref.unwrap_or("HEAD"));
+    let commit = String::from_utf8(git(
+        &["rev-parse", "--verify", "-q", &want],
+        "find the ref",
+    )?)?
+    .trim()
+    .to_string();
+    let listing = git(
+        &["ls-tree", "-r", "-z", "--full-tree", &commit],
+        "list the tree",
+    )?;
+    std::fs::create_dir(tree).with_context(|| format!("creating {}", tree.display()))?;
+    for item in listing.split(|b| *b == 0).filter(|i| !i.is_empty()) {
+        let item = std::str::from_utf8(item).context("a path in the tree is not UTF-8")?;
+        let (meta, rel) = item.split_once('\t').context("an unreadable tree entry")?;
+        let mut meta = meta.split(' ');
+        let (mode, sha) = (meta.next().unwrap_or(""), meta.nth(1).unwrap_or(""));
+        if rel
+            .split('/')
+            .any(|p| p.is_empty() || p == "." || p == ".." || p == ".git")
+        {
+            bail!("the tree holds the path `{rel}`, which add does not write");
+        }
+        let dst = tree.join(rel);
+        if let Some(d) = dst.parent() {
+            std::fs::create_dir_all(d).with_context(|| format!("creating {}", d.display()))?;
+        }
+        let blob = || git(&["cat-file", "blob", sha], &format!("read {rel}"));
+        match mode {
+            "100644" | "100755" => {
+                std::fs::write(&dst, blob()?)
+                    .with_context(|| format!("writing {}", dst.display()))?;
+                let bits = if mode == "100755" { 0o755 } else { 0o644 };
+                std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(bits))?;
+            }
+            "120000" => {
+                let target = String::from_utf8(blob()?).context("a link target is not UTF-8")?;
+                std::os::unix::fs::symlink(target, &dst)
+                    .with_context(|| format!("creating {}", dst.display()))?;
+            }
+            _ => bail!("`{rel}` is a submodule or another entry add does not install"),
+        }
+    }
+    Ok(commit)
 }
 
 /// Copies the tree at `from` to `to` (which must not exist), symlinks as links and file modes

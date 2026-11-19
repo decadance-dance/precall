@@ -272,23 +272,54 @@ pub fn user_plugins_dir() -> Result<PathBuf> {
     Ok(xdg_dir("XDG_CONFIG_HOME", ".config")?.join("rrecall/plugins"))
 }
 
-/// Appends `entry` (whole TOML tables) to the user config, after checking that the result
-/// still parses, so a failed append leaves the file as it was.
+/// Appends `entry` (whole TOML tables, such as `[[installed]]`) to the user config.
 pub fn append_user_config(entry: &str) -> Result<()> {
-    let path = user_config_path()?;
-    let mut text = match std::fs::read_to_string(&path) {
+    append_at(&user_config_path()?, entry)
+}
+
+/// Appends `entry` to the TOML file at `path` under a lock file beside it, so concurrent
+/// appends keep each other's entries, and publishes the result by rename once it parses as a
+/// user config, so a failure leaves the file as it was.
+fn append_at(path: &Path, entry: &str) -> Result<()> {
+    let dir = path.parent().context("the user config has no directory")?;
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let _held = crate::lock::lock_file(&dir.join("config.toml.lock"), true)?;
+    let old = match std::fs::read_to_string(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         r => r.with_context(|| format!("reading {}", path.display()))?,
     };
-    if !text.is_empty() && !text.ends_with('\n') {
-        text.push('\n');
+    let sep = if old.is_empty() || old.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    let mut text = format!("{old}{sep}\n{entry}");
+    if toml::from_str::<toml::Table>(&text).is_err() {
+        // An array written inline (`installed = []`) cannot take a `[[installed]]` table after
+        // it: add the entry to that array and write the document again.
+        // limit: that rewrite drops the file's comments and layout.
+        let mut doc: toml::Table =
+            toml::from_str(&old).with_context(|| format!("{} does not parse", path.display()))?;
+        let new: toml::Table = toml::from_str(entry)?;
+        for (k, v) in new {
+            match (doc.get_mut(&k), v) {
+                (Some(toml::Value::Array(have)), toml::Value::Array(add)) => have.extend(add),
+                (None, v) => {
+                    doc.insert(k, v);
+                }
+                _ => anyhow::bail!("{}: `{k}` is not a list", path.display()),
+            }
+        }
+        text = toml::to_string(&doc)?;
     }
-    text = format!("{text}\n{entry}");
     toml::from_str::<UserConfig>(&text).with_context(|| format!("updating {}", path.display()))?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
-    std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
+    let tmp = dir.join(format!(".config.toml.{}", std::process::id()));
+    std::fs::write(&tmp, &text)
+        .and_then(|()| std::fs::rename(&tmp, path))
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 pub fn load_user_config() -> Result<UserConfig> {
@@ -395,6 +426,36 @@ pub fn toml_str(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::testutil::TempDir;
+
+    #[test]
+    fn appends_wait_for_the_lock_and_keep_both_entries() {
+        let t = TempDir::new();
+        let path = t.0.join("config.toml");
+        std::fs::write(&path, "installed = []\n").unwrap();
+        let held = crate::lock::lock_file(&t.0.join("config.toml.lock"), true).unwrap();
+        let p = path.clone();
+        let other = std::thread::spawn(move || {
+            append_at(&p, "[[trusted]]\npath = \"/a\"\nhash = \"h1\"\n").unwrap()
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "installed = []\n");
+        drop(held);
+        other.join().unwrap();
+        append_at(
+            &path,
+            "[[installed]]\nid = \"lid\"\nsource = \"/s\"\nhash = \"h2\"\n",
+        )
+        .unwrap();
+        let u: UserConfig = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(u.trusted.len(), 1);
+        assert_eq!(u.installed[0].id, "lid");
+        let left: Vec<_> = std::fs::read_dir(&t.0)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| n.starts_with(".config"))
+            .collect();
+        assert!(left.is_empty(), "no temp file left: {left:?}");
+    }
 
     #[test]
     fn installed_records_parse_and_reject_unknown_keys() {

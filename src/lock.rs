@@ -140,14 +140,19 @@ pub struct StoreLock(#[allow(dead_code)] std::fs::File);
 /// Takes the store's run lock: waits for it, or returns `None` when another process holds it
 /// and `wait` is false.
 pub fn acquire(store: &Path, wait: bool) -> Result<Option<StoreLock>> {
-    use std::os::fd::AsRawFd;
     // Inside `.git`, so the lock never shows in the store's working tree.
-    let path = store.join(".git").join("rrecall-run.lock");
+    lock_file(&store.join(".git").join("rrecall-run.lock"), wait)
+}
+
+/// An exclusive `flock` on the file at `path` (created if missing): waits for it, or returns
+/// `None` when another process holds it and `wait` is false.
+pub fn lock_file(path: &Path, wait: bool) -> Result<Option<StoreLock>> {
+    use std::os::fd::AsRawFd;
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(&path)
+        .open(path)
         .with_context(|| format!("opening {}", path.display()))?;
     let op = if wait {
         libc::LOCK_EX
