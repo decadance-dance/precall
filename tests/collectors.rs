@@ -32,6 +32,15 @@ const CHECKS: &str = "\n[[plugins]]\nid = \"no-op\"\n\n[[plugins]]\nid = \"size-
 
 impl W {
     fn new() -> W {
+        let w = W::bare();
+        let o = w.raw(&["init", "widget"], None, &[]);
+        assert_eq!(o.code, 0, "{}", o.stderr);
+        w.git(&["init", "-q", "-b", "main"]);
+        w
+    }
+
+    /// The dirs only: no store, no fixture repo.
+    fn bare() -> W {
         static N: AtomicU32 = AtomicU32::new(0);
         let root = std::env::temp_dir().join(format!(
             "rrecall-collectors-{}-{}",
@@ -42,13 +51,9 @@ impl W {
         for d in ["home", "data", "config", "work", "rec", "src/widget"] {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
-        let w = W {
+        W {
             root: root.canonicalize().unwrap(),
-        };
-        let o = w.raw(&["init", "widget"], None, &[]);
-        assert_eq!(o.code, 0, "{}", o.stderr);
-        w.git(&["init", "-q", "-b", "main"]);
-        w
+        }
     }
 
     fn repo(&self) -> PathBuf {
@@ -675,4 +680,159 @@ fn github_resolves_its_own_prs_issues_and_releases_through_gh() {
     let argv = gh_argv(&w);
     assert!(!argv.contains("--web"), "{argv}");
     assert!(argv.contains("pr view 12 -R acme/widget --json"), "{argv}");
+}
+
+// --- the built-in collectors in a run ---
+
+/// The fake `claude` answers every call with `out` (tests/fixtures/bin/claude).
+fn agent_out(w: &W, out: &Value) {
+    let d = w.root.join("home/agent");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join("scenario"), "ok").unwrap();
+    std::fs::write(d.join("out"), out.to_string()).unwrap();
+}
+
+/// The prompts the fake `claude` got, in call order.
+fn agent_stdins(w: &W) -> Vec<String> {
+    (1..)
+        .map(|n| w.root.join(format!("home/agent/claude.stdin.{n}")))
+        .take_while(|p| p.exists())
+        .map(|p| std::fs::read_to_string(p).unwrap())
+        .collect()
+}
+
+#[test]
+fn an_initd_store_runs_its_repo_and_github_collectors_through_the_default_runner() {
+    let w = W::bare();
+    // `rrecall init` from inside a repository whose origin is on GitHub (work is the repo).
+    let work = w.root.join("work");
+    git_in(&work, &["init", "-q", "-b", "main"]);
+    std::fs::write(work.join("README.md"), "Widget parses configs.\n").unwrap();
+    git_in(&work, &["add", "README.md"]);
+    git_in(&work, &["commit", "-q", "-m", "init"]);
+    git_in(
+        &work,
+        &["remote", "add", "origin", "git@github.com:acme/widget.git"],
+    );
+    let o = w.raw(&["init", "widget"], None, &[]);
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    canned(&w);
+    gh(
+        &w,
+        "api.issues",
+        &json!([{"number": 7, "updated_at": "2026-03-02T10:00:00Z"}]),
+    );
+    agent_out(&w, &json!({"proposals": []}));
+    w.run(0);
+    let calls = agent_stdins(&w);
+    assert_eq!(
+        calls.len(),
+        2,
+        "one call per collector, no proposals to judge"
+    );
+    let files = calls
+        .iter()
+        .find(|c| c.contains("# Collector: files"))
+        .unwrap();
+    let head = git_in(&work, &["rev-parse", "--short=12", "HEAD"]);
+    assert!(
+        files.contains("\"README.md\"") && files.contains(&head),
+        "{files}"
+    );
+    let github = calls
+        .iter()
+        .find(|c| c.contains("# Collector: github"))
+        .unwrap();
+    assert!(github.contains("Queue on Postgres"), "{github}");
+    let lock: Value =
+        serde_json::from_str(&std::fs::read_to_string(w.store().join("rrecall.lock")).unwrap())
+            .unwrap();
+    for id in ["repo", "github"] {
+        assert_eq!(lock["collectors"][id]["plugin"], "builtin", "{id}");
+        assert_eq!(lock["collectors"][id]["runner"], "claude", "{id}");
+    }
+    // Unchanged sources: no agent call, no commit (I1).
+    let head = w.store_head();
+    w.run(0);
+    assert_eq!(agent_stdins(&w).len(), 2);
+    assert_eq!(w.store_head(), head);
+}
+
+#[test]
+fn files_proposals_cite_references_that_resolve_and_respect_ownership() {
+    let w = W::new();
+    w.commit_file(
+        "README.md",
+        "Widget parses configs.\nIt has a CLI.\n",
+        "init",
+    );
+    let c = w.git(&["rev-parse", "--short=12", "HEAD"]);
+    // Nodes another source owns: imported ones.
+    let outline = w.root.join("outline.txt");
+    std::fs::write(
+        &outline,
+        "Layout\n  Parser | parses configs\n  CLI | the command line\n",
+    )
+    .unwrap();
+    let o = w.raw(
+        &["--project", "widget", "import", &outline.to_string_lossy()],
+        None,
+        &[],
+    );
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    // A judge that accepts everything and records what it got.
+    let judge = w.store().join("plugins/accept");
+    std::fs::create_dir_all(&judge).unwrap();
+    let rec = w.root.join("rec/accept");
+    std::fs::write(
+        judge.join("rrecall-plugin.toml"),
+        format!(
+            "id = \"accept\"\nname = \"Accepts\"\nversion = \"0.1.0\"\nmin_rrecall = \"0.1.0\"\nkind = \"judge\"\n\n[judge]\ncommand = [{}]\n\n[params]\nscenario = \"all\"\nout = \"accept\"\nrecord = {}\n",
+            q(&format!("{}/tests/fixtures/bin/fake-plugin", env!("CARGO_MANIFEST_DIR"))),
+            q(&rec.to_string_lossy())
+        ),
+    )
+    .unwrap();
+    let path = q(&w.repo().to_string_lossy());
+    w.config(&format!(
+        "\n[[plugins]]\nid = \"repo\"\nuse = \"files\"\nparams = {{ path = {path}, git = true }}\n\n[[plugins]]\nid = \"git-history\"\nparams = {{ path = {path}, repo = \"acme/widget\" }}\n\n[[plugins]]\nid = \"claude\"\n\n[[plugins]]\nid = \"accept\"\n"
+    ));
+    let cite = format!("file:README.md#L2@{c}");
+    agent_out(
+        &w,
+        &json!({"proposals": [
+            {"key": "parser", "op": "update", "id": "parser", "title": "Parser", "body": "Parses configs and flags.", "sources": [format!("file:README.md#L1@{c}")], "reason": "flags"},
+            {"key": "cli", "op": "add_source", "id": "cli", "sources": [cite], "reason": "cited"},
+            {"key": "docs", "op": "add", "parent": "layout", "title": "README", "body": "The README describes the widget.", "sources": [format!("file:README.md@{c}")], "reason": "readme"},
+        ]}),
+    );
+    let o = w.run(0);
+    let report = o
+        .stdout
+        .lines()
+        .last()
+        .unwrap()
+        .trim_start_matches("report: ");
+    let report = std::fs::read_to_string(w.store().join(report)).unwrap();
+    assert!(
+        report.contains("I8: `parser` cites none of the kinds of `repo`"),
+        "{report}"
+    );
+    let layout = w.map("layout");
+    let node = |id: &str| layout.iter().find(|n| n["id"] == id).cloned().unwrap();
+    // I8: the imported node keeps its body; it may only be cited.
+    assert_eq!(node("parser")["body"], "parses configs");
+    assert_eq!(node("cli")["sources"], json!(["import:outline.txt", cite]));
+    assert!(layout.iter().any(|n| n["title"] == "README"));
+    // The judge got each cited reference resolved through `files` at its commit.
+    let judged: Value =
+        serde_json::from_str(&std::fs::read_to_string(rec.with_extension("stdin.1")).unwrap())
+            .unwrap();
+    let srcs: Vec<&Value> = judged["proposals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| &p["sources"])
+        .collect();
+    assert!(srcs.iter().any(|s| s[&cite] == "It has a CLI."), "{judged}");
 }

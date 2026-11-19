@@ -2,7 +2,7 @@
 
 Why rrecall exists and what it must never become: [VISION.md](VISION.md). This document is what it does and the plan to build it. Sections are cited as `spec §N`. A change to behavior described here updates this file in the same PR.
 
-Status: milestones 1 (store and queries) and 2 (plugin protocol and run pipeline) built; milestone 3 in progress (the `claude` and `codex` runners, declarative plugins and the built-in judges built).
+Status: milestones 1 (store and queries) and 2 (plugin protocol and run pipeline) built; milestone 3 in progress (the `claude` and `codex` runners, declarative plugins, the built-in judges and the built-in collectors `files`, `git-history` and `github` built).
 
 ## 1. Terms
 
