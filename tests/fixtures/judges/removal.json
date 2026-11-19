@@ -29,28 +29,28 @@
         }
       },
       {
-        "key": "github/arm-open",
+        "key": "github/signing-open",
         "proposal": {
-          "key": "arm-open",
+          "key": "signing-open",
           "op": "remove",
-          "id": "arm-builds",
+          "id": "windows-signing",
           "sources": [],
-          "evidence": "gh-issue:lanternfish-dev/lanternfish#88",
+          "evidence": "gh-issue:lanternfish-dev/lanternfish#90",
           "reason": "stale"
         },
         "current": {
-          "id": "arm-builds",
+          "id": "windows-signing",
           "parent": "blocked",
-          "title": "ARM builds",
-          "body": "Release builds for ARM64 wait on a self-hosted CI runner (#88).",
+          "title": "Windows signing",
+          "body": "Windows installers ship unsigned until the code signing certificate arrives (#90).",
           "sources": [
-            "gh-issue:lanternfish-dev/lanternfish#88"
+            "gh-issue:lanternfish-dev/lanternfish#90"
           ],
-          "order": 0,
+          "order": 1,
           "state": "blocked"
         },
         "sources": {
-          "gh-issue:lanternfish-dev/lanternfish#88": "ARM64 release builds need a self-hosted runner\nstate: open\nlast comment (2026-10-30): Still waiting for the runner hardware."
+          "gh-issue:lanternfish-dev/lanternfish#90": "Sign the Windows installer\nstate: open\nlast comment (2026-10-30): Still waiting for the code signing certificate."
         }
       },
       {
@@ -103,24 +103,24 @@
         }
       },
       {
-        "key": "github/arm-unresolved",
+        "key": "github/flaky-unresolved",
         "proposal": {
-          "key": "arm-unresolved",
+          "key": "flaky-unresolved",
           "op": "remove",
-          "id": "arm-builds",
+          "id": "flaky-sync-test",
           "sources": [],
           "evidence": "gh-issue:lanternfish-dev/lanternfish#91",
-          "reason": "closed elsewhere"
+          "reason": "fixed"
         },
         "current": {
-          "id": "arm-builds",
+          "id": "flaky-sync-test",
           "parent": "blocked",
-          "title": "ARM builds",
-          "body": "Release builds for ARM64 wait on a self-hosted CI runner (#88).",
+          "title": "Flaky sync test",
+          "body": "tests/sync_cursor.rs fails about once in 20 CI runs (#91).",
           "sources": [
-            "gh-issue:lanternfish-dev/lanternfish#88"
+            "gh-issue:lanternfish-dev/lanternfish#91"
           ],
-          "order": 0,
+          "order": 2,
           "state": "blocked"
         },
         "sources": {
@@ -152,28 +152,28 @@
         }
       },
       {
-        "key": "github/sqlite-billing",
+        "key": "github/push-billing",
         "proposal": {
-          "key": "sqlite-billing",
+          "key": "push-billing",
           "op": "remove",
-          "id": "sqlite-per-user",
+          "id": "web-push",
           "sources": [],
           "evidence": "gh-pr:lanternfish-dev/lanternfish#150",
-          "reason": "storage changed"
+          "reason": "notifications changed"
         },
         "current": {
-          "id": "sqlite-per-user",
+          "id": "web-push",
           "parent": "decisions",
-          "title": "One SQLite file per user",
-          "body": "Each user gets their own SQLite file, so a user's data can be exported and deleted as one file.",
+          "title": "Web push through the sync server",
+          "body": "The sync server sends web push notifications itself instead of a third-party service, to keep reader data in one place.",
           "sources": [
-            "note:decisions/storage.md"
+            "note:decisions/push.md"
           ],
-          "order": 0,
-          "date": "2025-04-10"
+          "order": 1,
+          "date": "2025-11-03"
         },
         "sources": {
-          "gh-pr:lanternfish-dev/lanternfish#150": "Billing: store invoices in the billing service's own Postgres database\n\nThe user databases are not touched."
+          "gh-pr:lanternfish-dev/lanternfish#150": "Billing: send invoice emails through the billing service's mail queue\n\nWeb push and the sync server are not touched."
         }
       },
       {
@@ -198,11 +198,13 @@
     "map_ids": [
       "arm-builds",
       "blocked",
+      "config-loader",
       "connection-pool",
       "dead-feed-detector",
       "decisions",
       "done",
       "fetcher",
+      "flaky-sync-test",
       "how-it-works",
       "layout",
       "migrations",
@@ -213,18 +215,20 @@
       "sqlite-per-user",
       "storage-layer",
       "sync-server",
-      "web-client"
+      "web-client",
+      "web-push",
+      "windows-signing"
     ],
     "params": {}
   },
   "expected": {
     "github/arm-closed": "accept",
-    "github/arm-open": "reject",
+    "github/signing-open": "reject",
     "repo/dead-rename": "reject",
     "notes/sqlite-reversed": "accept",
-    "github/arm-unresolved": "reject",
+    "github/flaky-unresolved": "reject",
     "repo/settings-deleted": "accept",
-    "github/sqlite-billing": "reject",
+    "github/push-billing": "reject",
     "repo/add-other": "accept"
   }
 }

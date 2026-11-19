@@ -42,6 +42,19 @@ fn each_labeled_set_is_a_judge_input_with_one_label_per_proposal() {
                 rrecall::node::check_source(r).unwrap_or_else(|e| panic!("{judge}: {r}: {e}"));
             }
         }
+        // One model call per set, as a run would make it: no two proposals on one node (§4.1
+        // step 5 would reject both) and one text per reference (a resolve gives one).
+        let mut targets = std::collections::BTreeSet::new();
+        let mut texts = std::collections::BTreeMap::new();
+        for j in &input.proposals {
+            if let Some(id) = &j.proposal.id {
+                assert!(targets.insert(id.clone()), "{judge}: two proposals on `{id}`");
+            }
+            for (r, t) in j.sources.as_ref().unwrap() {
+                let first = texts.entry(r.clone()).or_insert(t.clone());
+                assert_eq!(first, t, "{judge}: `{r}` resolves twice");
+            }
+        }
         for n in &input.nodes {
             n.validate()
                 .unwrap_or_else(|e| panic!("{judge}: {}: {e}", n.id));

@@ -113,7 +113,7 @@
           "id": "scheduler",
           "body": "fetcher/schedule.go spreads polls over the hour by feed hash; busy feeds poll every 15 minutes.",
           "sources": [
-            "file:fetcher/schedule.go#L1-L40@3c1f9a2"
+            "file:fetcher/schedule.go#L41-L60@3c1f9a2"
           ],
           "reason": "busy feeds"
         },
@@ -128,7 +128,7 @@
           "order": 0
         },
         "sources": {
-          "file:fetcher/schedule.go#L1-L40@3c1f9a2": "// Busy feeds (more than 20 items a day) poll every 15 minutes."
+          "file:fetcher/schedule.go#L41-L60@3c1f9a2": "// Busy feeds (more than 20 items a day) poll every 15 minutes."
         }
       }
     ],
@@ -197,11 +197,13 @@
     "map_ids": [
       "arm-builds",
       "blocked",
+      "config-loader",
       "connection-pool",
       "dead-feed-detector",
       "decisions",
       "done",
       "fetcher",
+      "flaky-sync-test",
       "how-it-works",
       "layout",
       "migrations",
@@ -212,7 +214,9 @@
       "sqlite-per-user",
       "storage-layer",
       "sync-server",
-      "web-client"
+      "web-client",
+      "web-push",
+      "windows-signing"
     ],
     "params": {}
   },

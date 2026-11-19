@@ -1,6 +1,6 @@
 {
   "judge": "support",
-  "about": "support: an add its source backs; a wrong number; a fact the source lacks; an unresolved source; an update that only rewords; a real update; an add_source that backs its node; a move it leaves to others",
+  "about": "support: an add its source backs; a wrong number; a fact the source lacks; an unresolved source; an update that only rewords; a real update; an add_source that backs its node; a move it leaves to others; a state change its source backs; a state change whose source still shows the old state",
   "input": {
     "proposals": [
       {
@@ -149,29 +149,83 @@
         }
       },
       {
-        "key": "repo/move-pool",
+        "key": "repo/move-config",
         "proposal": {
-          "key": "move-pool",
+          "key": "move-config",
           "op": "move",
-          "id": "connection-pool",
-          "parent": "sync-server",
+          "id": "config-loader",
+          "parent": "layout",
           "sources": [
-            "file:server/src/db/pool.rs#L1-L40@3c1f9a2"
+            "file:server/src/config.rs#L1-L40@3c1f9a2"
           ],
-          "reason": "pool moved up"
+          "reason": "config is shared now"
         },
         "current": {
-          "id": "connection-pool",
-          "parent": "storage-layer",
-          "title": "Connection pool",
-          "body": "At most 4 open files per worker thread.",
+          "id": "config-loader",
+          "parent": "sync-server",
+          "title": "Config loader",
+          "body": "server/src/config.rs reads lanternfish.toml and LF_* environment variables.",
           "sources": [
-            "file:server/src/db/pool.rs#L1-L40@3c1f9a2"
+            "file:server/src/config.rs#L1-L40@3c1f9a2"
           ],
-          "order": 0
+          "order": 3
         },
         "sources": {
-          "file:server/src/db/pool.rs#L1-L40@3c1f9a2": "/// Each worker thread keeps at most 4 user databases open; the least recently used closes first.\npub const MAX_OPEN_PER_THREAD: usize = 4;"
+          "file:server/src/config.rs#L1-L40@3c1f9a2": "/// Reads lanternfish.toml, then LF_* environment variables, which win."
+        }
+      },
+      {
+        "key": "github/arm-done",
+        "proposal": {
+          "key": "arm-done",
+          "op": "update",
+          "id": "arm-builds",
+          "state": "done",
+          "sources": [
+            "gh-issue:lanternfish-dev/lanternfish#88"
+          ],
+          "reason": "issue closed"
+        },
+        "current": {
+          "id": "arm-builds",
+          "parent": "blocked",
+          "title": "ARM builds",
+          "body": "Release builds for ARM64 wait on a self-hosted CI runner (#88).",
+          "sources": [
+            "gh-issue:lanternfish-dev/lanternfish#88"
+          ],
+          "order": 0,
+          "state": "blocked"
+        },
+        "sources": {
+          "gh-issue:lanternfish-dev/lanternfish#88": "ARM64 release builds need a self-hosted runner\nstate: closed (completed) on 2026-10-02\nlast comment: The arm64 runner is live; v0.12 shipped arm64 binaries."
+        }
+      },
+      {
+        "key": "github/signing-done",
+        "proposal": {
+          "key": "signing-done",
+          "op": "update",
+          "id": "windows-signing",
+          "state": "done",
+          "sources": [
+            "gh-issue:lanternfish-dev/lanternfish#90"
+          ],
+          "reason": "signing done"
+        },
+        "current": {
+          "id": "windows-signing",
+          "parent": "blocked",
+          "title": "Windows signing",
+          "body": "Windows installers ship unsigned until the code signing certificate arrives (#90).",
+          "sources": [
+            "gh-issue:lanternfish-dev/lanternfish#90"
+          ],
+          "order": 1,
+          "state": "blocked"
+        },
+        "sources": {
+          "gh-issue:lanternfish-dev/lanternfish#90": "Sign the Windows installer\nstate: open\nlast comment (2026-10-30): Still waiting for the code signing certificate."
         }
       }
     ],
@@ -179,11 +233,13 @@
     "map_ids": [
       "arm-builds",
       "blocked",
+      "config-loader",
       "connection-pool",
       "dead-feed-detector",
       "decisions",
       "done",
       "fetcher",
+      "flaky-sync-test",
       "how-it-works",
       "layout",
       "migrations",
@@ -194,7 +250,9 @@
       "sqlite-per-user",
       "storage-layer",
       "sync-server",
-      "web-client"
+      "web-client",
+      "web-push",
+      "windows-signing"
     ],
     "params": {}
   },
@@ -206,6 +264,8 @@
     "repo/pool-reword": "reject",
     "repo/migrate-check": "accept",
     "github/retry-after": "accept",
-    "repo/move-pool": "accept"
+    "repo/move-config": "accept",
+    "github/arm-done": "accept",
+    "github/signing-done": "reject"
   }
 }
