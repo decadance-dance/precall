@@ -487,7 +487,7 @@ fn the_scratch_dir_and_its_files_are_owner_only() {
     t.inheritable_acl();
     json_of(&t.call("claude", "m", 60, None));
     // No ACL flag and no ACL entry, also under a temp dir whose ACL everything inherits.
-    assert_eq!(t.rec("claude.perms"), "drwx------ \n-rw------- \n0\n");
+    assert_eq!(t.rec("claude.perms"), "drwx------\n-rw-------\nacl=0\n");
 }
 
 #[test]
@@ -573,7 +573,7 @@ fn claude_with_connectors_runs_in_a_fresh_config_dir_without_hooks_and_allows_on
     assert!(env.lines().any(|l| l == secure), "{env}");
     // Owner-only with no ACL, and empty: Claude Code reads (and refreshes) the login in
     // CLAUDE_SECURESTORAGE_CONFIG_DIR, so nothing is copied or linked into it.
-    assert_eq!(t.rec("claude.config"), "drwx------ \n0\n");
+    assert_eq!(t.rec("claude.config"), "drwx------\nacl=0\n");
     t.no_scratch_left();
     assert_eq!(
         std::fs::read_to_string(real.join(".credentials.json")).unwrap(),
