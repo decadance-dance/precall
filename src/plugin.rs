@@ -294,7 +294,7 @@ pub fn builtin_prompt(id: &str, file: &str) -> Option<String> {
         .map(|(_, _, text)| lf(text))
 }
 
-fn lf(text: &str) -> String {
+pub(crate) fn lf(text: &str) -> String {
     text.replace("\r\n", "\n")
 }
 

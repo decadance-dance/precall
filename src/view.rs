@@ -59,7 +59,14 @@ pub fn render(store: &Store, project: &str) -> Result<String> {
         }
     }
     let data = json!({ "project": project, "last_run": hist.last_run, "nodes": nodes });
-    let (head, rest) = PAGE
+    fill(PAGE, project, &data)
+}
+
+/// The template with its markers filled, its line ends LF whatever the checkout it was built
+/// from used, so the page's bytes depend only on the map and its history.
+fn fill(template: &str, project: &str, data: &Value) -> Result<String> {
+    let template = crate::plugin::lf(template);
+    let (head, rest) = template
         .split_once("{{TITLE}}")
         .context("the page has no title marker")?;
     let (mid, tail) = rest
@@ -104,14 +111,22 @@ mod tests {
     }
 
     #[test]
-    fn the_page_has_its_markers_once_and_loads_nothing() {
+    fn the_page_has_its_markers_once_and_its_bytes_do_not_depend_on_line_ends() {
         assert_eq!(PAGE.matches("{{TITLE}}").count(), 1);
         assert_eq!(PAGE.matches("{{DATA}}").count(), 1);
         assert!(PAGE.find("{{TITLE}}") < PAGE.find("{{DATA}}"));
-        for bad in [
-            "http://", "https://", "<link", " src=", "@import", "url(", "fetch(",
-        ] {
-            assert!(!PAGE.contains(bad), "{bad}");
-        }
+        let data = json!({"nodes": []});
+        let lf_page = PAGE.replace("\r\n", "\n");
+        let lf = fill(&lf_page, "kiln", &data).unwrap();
+        let crlf = fill(&lf_page.replace('\n', "\r\n"), "kiln", &data).unwrap();
+        assert_eq!(lf, crlf);
+        assert!(!lf.contains('\r'));
+    }
+
+    #[test]
+    fn the_history_shows_in_the_order_of_the_data() {
+        // The inspector lists `n.history` as given, oldest first (spec §8), never reversed.
+        assert!(PAGE.contains("\"History, oldest first\""));
+        assert!(!PAGE.contains("reverse()"));
     }
 }

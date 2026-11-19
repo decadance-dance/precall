@@ -1324,6 +1324,54 @@ fn init_that_cannot_write_the_user_config_leaves_nothing_and_can_be_retried() {
 
 // ---- the html view and `open` (spec §8, §2) ----
 
+/// A note with markup, a script end and a URL, all of which must stay text.
+const NOTE: &str =
+    "Ask the fetcher's owner about <b>polls</b> & </script> https://example.invalid/polls";
+
+/// What in a page's own code would load something or turn data into markup.
+const LOADS: [&str; 29] = [
+    "http://",
+    "https://",
+    "<link",
+    "<img",
+    "<iframe",
+    "<object",
+    "<embed",
+    "<video",
+    "<audio",
+    "<source",
+    "<base",
+    " src=",
+    "srcset=",
+    "poster=",
+    " href=",
+    "action=",
+    "@import",
+    "url(",
+    "@font-face",
+    "fetch(",
+    "XMLHttpRequest",
+    "WebSocket",
+    "EventSource",
+    "sendBeacon",
+    "import(",
+    "Worker(",
+    "innerHTML",
+    "outerHTML",
+    "document.write",
+];
+
+/// The page without its data block: its markup, style and script.
+fn page_code(page: &str) -> String {
+    let start = r#"<script type="application/json" id="map-data">"#;
+    let from = page.find(start).expect("the data block") + start.len();
+    let to = from
+        + page[from..]
+            .find("</script>")
+            .expect("the data block's end");
+    format!("{}{}", &page[..from], &page[to..])
+}
+
 /// The map data the page embeds.
 fn page_data(page: &str) -> serde_json::Value {
     let start = r#"<script type="application/json" id="map-data">"#;
@@ -1357,14 +1405,7 @@ fn changed_ids(data: &serde_json::Value) -> Vec<String> {
 #[test]
 fn open_renders_one_self_contained_page_and_opens_it() {
     let e = fixture_env();
-    q(
-        &e,
-        &[
-            "note",
-            "fetcher",
-            "Ask the fetcher's owner about <b>polls</b> & </script>",
-        ],
-    );
+    q(&e, &["note", "fetcher", NOTE]);
     let out = q(&e, &["open"]);
     let page_path = e.store("lanternfish").join("views/index.html");
     assert!(out.contains(&page_path.display().to_string()), "{out}");
@@ -1372,18 +1413,14 @@ fn open_renders_one_self_contained_page_and_opens_it() {
     assert_eq!(log, format!("{}\n", page_path.display()));
 
     let page = std::fs::read_to_string(&page_path).unwrap();
-    // Nothing loads from the network: no URL at all, no external script, style, font or image.
-    for bad in [
-        "http://",
-        "https://",
-        "<link",
-        " src=",
-        "@import",
-        "url(",
-        "@font-face",
-    ] {
-        assert!(!page.contains(bad), "the page holds `{bad}`");
+    // Nothing loads from the network: the page's own markup, style and script hold no URL and
+    // nothing that fetches a resource or turns text into markup.
+    let code = page_code(&page);
+    for bad in LOADS {
+        assert!(!code.contains(bad), "the page's code holds `{bad}`");
     }
+    // A URL in the map stays inert text inside the data block.
+    assert!(!code.contains("example.invalid") && page.contains("https://example.invalid/polls"));
     assert!(page.starts_with("<!doctype html>"), "{}", &page[..40]);
     assert!(
         page.contains("<title>lanternfish"),
@@ -1399,10 +1436,7 @@ fn open_renders_one_self_contained_page_and_opens_it() {
     assert_eq!(nodes[0]["id"], "layout");
     assert_eq!(nodes[1]["parent"], "layout");
     let fetcher = page_node(&data, "fetcher");
-    assert_eq!(
-        fetcher["note"],
-        "Ask the fetcher's owner about <b>polls</b> & </script>"
-    );
+    assert_eq!(fetcher["note"], NOTE);
     assert_eq!(
         fetcher["sources"],
         serde_json::json!(["import:lanternfish-outline.txt"])
@@ -1475,8 +1509,68 @@ fn open_reports_a_browser_that_fails_and_keeps_the_page() {
         "{}",
         o.stderr
     );
+    // The path is printed before the opener starts, so it is there when the opener fails.
+    assert_eq!(o.stdout, format!("{}\n", page_path.display()));
     assert!(page_path.is_file());
     // A store that does not exist: exit 3, nothing opened.
     let o = e.run(&["--project", "nowhere", "open"]);
     assert_eq!(o.code, 3, "{}", o.stderr);
+}
+
+#[test]
+fn the_page_does_not_depend_on_the_users_git_color_or_abbrev_settings() {
+    let e = fixture_env();
+    let store = e.store("lanternfish");
+    q(&e, &["note", "fetcher", "A note."]);
+    q(&e, &["open"]);
+    let page_path = store.join("views/index.html");
+    let before = std::fs::read_to_string(&page_path).unwrap();
+    let why_before = q(&e, &["why", "fetcher"]);
+    for (key, value) in [
+        ("color.ui", "always"),
+        ("color.diff", "always"),
+        ("core.abbrev", "20"),
+    ] {
+        git(&store, &["config", key, value]);
+    }
+    q(&e, &["open"]);
+    let after = std::fs::read_to_string(&page_path).unwrap();
+    assert!(before == after, "the settings changed the page");
+    assert_eq!(q(&e, &["why", "fetcher"]), why_before);
+    let fetcher = page_node(&page_data(&after), "fetcher").clone();
+    let history = fetcher["history"].as_array().unwrap();
+    assert_eq!(history.len(), 2, "{fetcher}");
+    assert!(
+        history
+            .iter()
+            .all(|c| c["commit"].as_str().unwrap().len() == 12)
+    );
+}
+
+#[test]
+fn a_render_reads_the_config_history_once_for_all_branches() {
+    let e = Env::new();
+    e.ok(&["init", "kiln"]);
+    let outline: String = (1..=30)
+        .map(|i| format!("Extra branch {i} | Question {i}?\n  Entry {i}\n"))
+        .collect();
+    let file = e.write("outline.txt", &outline);
+    e.ok(&["--project", "kiln", "import", file.to_str().unwrap()]);
+    let trace = e.root.join("trace.json");
+    let o = e.run_env(
+        &e.work(),
+        &["--project", "kiln", "open"],
+        &[("GIT_TRACE2_EVENT", trace.to_str().unwrap())],
+    );
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    let text = std::fs::read_to_string(&trace).unwrap();
+    let count = |cmd: &str| {
+        text.lines()
+            .filter(|l| l.contains(r#""event":"cmd_name""#))
+            .filter(|l| l.contains(&format!(r#""name":"{cmd}""#)))
+            .count()
+    };
+    // Two revisions of the config (init and import), whatever the number of branches.
+    assert_eq!(count("show"), 2, "{text}");
+    assert!(count("log") <= 4, "{} git log calls", count("log"));
 }

@@ -10,6 +10,7 @@ use crate::plugin;
 use crate::query;
 use crate::store::{self, Store};
 use anyhow::{Context, Result};
+use std::io::Write;
 use std::path::Path;
 
 /// The resolved project's store, loaded.
@@ -306,6 +307,12 @@ fn stored_node<'a>(s: &'a Store, id: &str) -> Result<&'a Node> {
 pub fn open_page(project: Option<&str>) -> Result<String> {
     let (name, root) = config::resolve_project(project)?;
     let page = crate::view::write(&root, &name)?;
+    // The path first, so it is on stdout whatever the opener does.
+    let mut out = std::io::stdout().lock();
+    writeln!(out, "{}", page.display())
+        .and_then(|()| out.flush())
+        .context("printing the page's path")?;
+    drop(out);
     let browser = std::env::var_os("RRECALL_BROWSER")
         .filter(|b| !b.is_empty())
         .unwrap_or_else(|| {
@@ -325,7 +332,7 @@ pub fn open_page(project: Option<&str>) -> Result<String> {
     if !status.success() {
         anyhow::bail!("`{shown}` {status} opening {}", page.display());
     }
-    Ok(format!("{}\n", page.display()))
+    Ok(String::new())
 }
 
 /// Sets or clears the user's note (spec §5 I7); the only field this command writes.
