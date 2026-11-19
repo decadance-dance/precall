@@ -43,6 +43,10 @@ impl Env {
     }
 
     fn run_in(&self, cwd: &Path, args: &[&str]) -> Out {
+        self.run_env(cwd, args, &[])
+    }
+
+    fn run_env(&self, cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Out {
         let o = Command::new(env!("CARGO_BIN_EXE_rrecall"))
             .args(args)
             .current_dir(cwd)
@@ -51,6 +55,10 @@ impl Env {
             .env("XDG_CONFIG_HOME", self.root.join("config"))
             .env_remove("RRECALL_PROJECT")
             .env_remove("GIT_DIR")
+            // `open` never starts a real browser in a test.
+            .env("RRECALL_BROWSER", FAKE_BROWSER)
+            .env("FAKE_BROWSER_LOG", self.root.join("browser.log"))
+            .envs(env.iter().copied())
             .output()
             .unwrap();
         Out {
@@ -114,6 +122,11 @@ fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8(o.stdout).unwrap()
 }
 
+const FAKE_BROWSER: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/bin/fake-browser"
+);
+
 const ORIGIN: &str = "git@github.com:lanternfish-dev/lanternfish.git";
 
 // ---- init and project resolution (spec §2) ----
@@ -146,12 +159,14 @@ fn init_creates_store_with_default_skeleton_and_found_sources() {
     let checks = "[[plugins]]\nid = \"no-op\"\n\n[[plugins]]\nid = \"size-limits\"\n\n[[plugins]]\nid = \"secrets\"\n";
     let judges = "[[plugins]]\nid = \"support\"\n\n[[plugins]]\nid = \"removal\"\n\n[[plugins]]\nid = \"duplicate\"\n";
     let runner = "[[plugins]]\nid = \"claude\"\n";
+    let view = "[[plugins]]\nid = \"html\"\n";
     let (c, j, r) = (
         cfg.find(checks).expect(&cfg),
         cfg.find(judges).expect(&cfg),
         cfg.find(runner).expect(&cfg),
     );
-    assert!(c < j && j < r && cfg.ends_with(runner), "{cfg}");
+    assert!(c < j && j < r && r < cfg.find(view).expect(&cfg), "{cfg}");
+    assert!(cfg.ends_with(view), "{cfg}");
     assert_eq!(
         std::fs::read_to_string(store.join(".gitignore")).unwrap(),
         "cache/\nruns/\nviews/\nstate/\n"
@@ -318,13 +333,14 @@ fn help_lists_the_built_commands_only() {
         "rm",
         "agent-instructions",
         "run",
+        "open",
     ] {
         assert!(
             help.contains(&format!("  {c} ")) || help.contains(&format!("  {c}\n")),
             "{c} missing:\n{help}"
         );
     }
-    for later in ["  open", "  doctor", "  plugin"] {
+    for later in ["  doctor", "  plugin"] {
         assert!(!help.contains(later), "{later} listed:\n{help}");
     }
 }
@@ -1220,7 +1236,7 @@ fn init_keeps_the_users_default_runner_and_enables_it() {
     );
     let cfg = std::fs::read_to_string(e.store("kiln").join("rrecall.toml")).unwrap();
     assert!(
-        cfg.ends_with("[[plugins]]\nid = \"codex\"\n") && !cfg.contains("\"claude\""),
+        cfg.contains("[[plugins]]\nid = \"codex\"\n") && !cfg.contains("\"claude\""),
         "{cfg}"
     );
 }
@@ -1265,7 +1281,7 @@ fn init_refuses_a_default_runner_it_cannot_find_and_enables_one_it_finds() {
     .unwrap();
     e.ok(&["init", "kiln"]);
     let cfg = std::fs::read_to_string(e.store("kiln").join("rrecall.toml")).unwrap();
-    assert!(cfg.ends_with("[[plugins]]\nid = \"fast\"\n"), "{cfg}");
+    assert!(cfg.contains("[[plugins]]\nid = \"fast\"\n"), "{cfg}");
 }
 
 #[test]
@@ -1304,4 +1320,327 @@ fn init_that_cannot_write_the_user_config_leaves_nothing_and_can_be_retried() {
             .unwrap()
             .contains("runner = \"claude\"")
     );
+}
+
+// ---- the html view and `open` (spec §8, §2) ----
+
+/// A note with markup, a script end and a URL, all of which must stay text.
+const NOTE: &str =
+    "Ask the fetcher's owner about <b>polls</b> & </script> https://example.invalid/polls";
+
+/// What in a page's own code would load something or turn data into markup, lowercase: HTML
+/// and CSS take these tokens in any case (`URL(`, `<IMG`).
+const LOADS: [&str; 29] = [
+    "http://",
+    "https://",
+    "<link",
+    "<img",
+    "<iframe",
+    "<object",
+    "<embed",
+    "<video",
+    "<audio",
+    "<source",
+    "<base",
+    " src=",
+    "srcset=",
+    "poster=",
+    " href=",
+    "action=",
+    "@import",
+    "url(",
+    "@font-face",
+    "fetch(",
+    "xmlhttprequest",
+    "websocket",
+    "eventsource",
+    "sendbeacon",
+    "import(",
+    "worker(",
+    "innerhtml",
+    "outerhtml",
+    "document.write",
+];
+
+/// The page without its data block: its markup, style and script.
+fn page_code(page: &str) -> String {
+    let start = r#"<script type="application/json" id="map-data">"#;
+    let from = page.find(start).expect("the data block") + start.len();
+    let to = from
+        + page[from..]
+            .find("</script>")
+            .expect("the data block's end");
+    format!("{}{}", &page[..from], &page[to..])
+}
+
+/// The map data the page embeds.
+fn page_data(page: &str) -> serde_json::Value {
+    let start = r#"<script type="application/json" id="map-data">"#;
+    let from = page.find(start).expect("the data block") + start.len();
+    let to = from
+        + page[from..]
+            .find("</script>")
+            .expect("the data block's end");
+    serde_json::from_str(&page[from..to]).unwrap()
+}
+
+fn page_node<'a>(data: &'a serde_json::Value, id: &str) -> &'a serde_json::Value {
+    data["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == id)
+        .unwrap_or_else(|| panic!("no node {id}"))
+}
+
+fn changed_ids(data: &serde_json::Value) -> Vec<String> {
+    data["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|n| n["changed"] == true)
+        .map(|n| n["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn open_renders_one_self_contained_page_and_opens_it() {
+    let e = fixture_env();
+    q(&e, &["note", "fetcher", NOTE]);
+    let out = q(&e, &["open"]);
+    let page_path = e.store("lanternfish").join("views/index.html");
+    assert!(out.contains(&page_path.display().to_string()), "{out}");
+    let log = std::fs::read_to_string(e.root.join("browser.log")).unwrap();
+    assert_eq!(log, format!("{}\n", page_path.display()));
+
+    let page = std::fs::read_to_string(&page_path).unwrap();
+    // Nothing loads from the network: the page's own markup, style and script hold no URL and
+    // nothing that fetches a resource or turns text into markup.
+    let code = page_code(&page).to_lowercase();
+    for bad in LOADS {
+        assert!(!code.contains(bad), "the page's code holds `{bad}`");
+    }
+    // A URL in the map stays inert text inside the data block.
+    assert!(!code.contains("example.invalid") && page.contains("https://example.invalid/polls"));
+    assert!(page.starts_with("<!doctype html>"), "{}", &page[..40]);
+    assert!(
+        page.contains("<title>lanternfish"),
+        "the project names the page"
+    );
+    // The note's markup stays data: it never closes the data block or becomes an element.
+    assert!(!page.contains("<b>polls</b>"));
+    let data = page_data(&page);
+    assert_eq!(data["project"], "lanternfish");
+    let nodes = data["nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 300 + 7, "every node and the seven branches");
+    // Branches in skeleton order, each followed by its subtree.
+    assert_eq!(nodes[0]["id"], "layout");
+    assert_eq!(nodes[1]["parent"], "layout");
+    let fetcher = page_node(&data, "fetcher");
+    assert_eq!(fetcher["note"], NOTE);
+    assert_eq!(
+        fetcher["sources"],
+        serde_json::json!(["import:lanternfish-outline.txt"])
+    );
+    // The inspector's history is what `why` reports, branches included.
+    for id in ["fetcher", "layout", "scheduler"] {
+        let why: serde_json::Value = serde_json::from_str(&q(&e, &["why", id, "--json"])).unwrap();
+        assert_eq!(page_node(&data, id)["history"], why["history"], "{id}");
+    }
+    assert_eq!(
+        page_node(&data, "fetcher")["history"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    // No run yet: nothing is "changed since the last run".
+    assert_eq!(data["last_run"], serde_json::Value::Null);
+    assert!(changed_ids(&data).is_empty());
+
+    // The same map and history render the same bytes.
+    q(&e, &["open"]);
+    assert_eq!(std::fs::read_to_string(&page_path).unwrap(), page);
+}
+
+#[test]
+fn the_changed_filter_holds_the_last_run_and_what_came_after_it() {
+    let e = fixture_env();
+    let store = e.store("lanternfish");
+    q(&e, &["note", "scheduler", "Before the run."]);
+    q(&e, &["note", "parser", "Changed by the run."]);
+    // Make the last note commit a run commit: its node changed in the last run.
+    git(
+        &store,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.invalid",
+            "commit",
+            "-q",
+            "--amend",
+            "-m",
+            "run 2026-11-19T090000Z: +0 ~1 -0",
+        ],
+    );
+    q(&e, &["note", "fetcher", "After the run."]);
+    q(&e, &["open"]);
+    let page = std::fs::read_to_string(store.join("views/index.html")).unwrap();
+    let data = page_data(&page);
+    assert_eq!(
+        data["last_run"]["subject"],
+        "run 2026-11-19T090000Z: +0 ~1 -0"
+    );
+    assert_eq!(changed_ids(&data), ["fetcher", "parser"]);
+}
+
+#[test]
+fn open_reports_a_browser_that_fails_and_keeps_the_page() {
+    let e = fixture_env();
+    let o = e.run_env(
+        &e.work(),
+        &["--project", "lanternfish", "open"],
+        &[("FAKE_BROWSER_EXIT", "3")],
+    );
+    assert_eq!(o.code, 1, "{}", o.stderr);
+    let page_path = e.store("lanternfish").join("views/index.html");
+    assert!(
+        o.stderr.contains(&page_path.display().to_string()),
+        "{}",
+        o.stderr
+    );
+    // The path is printed before the opener starts, so it is there when the opener fails.
+    assert_eq!(o.stdout, format!("{}\n", page_path.display()));
+    assert!(page_path.is_file());
+    // A store that does not exist: exit 3, nothing opened.
+    let o = e.run(&["--project", "nowhere", "open"]);
+    assert_eq!(o.code, 3, "{}", o.stderr);
+}
+
+#[test]
+fn the_page_and_why_do_not_depend_on_the_users_git_settings() {
+    let e = fixture_env();
+    let store = e.store("lanternfish");
+    q(&e, &["note", "fetcher", "A note."]);
+    // A non-ASCII subject, read back as UTF-8 whatever the log encoding is.
+    git(
+        &store,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.invalid",
+            "commit",
+            "-q",
+            "--amend",
+            "-m",
+            "note café",
+        ],
+    );
+    q(&e, &["open"]);
+    let page_path = store.join("views/index.html");
+    let before = std::fs::read_to_string(&page_path).unwrap();
+    let why_before = q(&e, &["why", "fetcher"]);
+    for (key, value) in [
+        ("color.ui", "always"),
+        ("color.diff", "always"),
+        ("core.abbrev", "20"),
+        ("i18n.logOutputEncoding", "ISO-8859-1"),
+        ("diff.maptext.textconv", "wc -l"),
+    ] {
+        git(&store, &["config", key, value]);
+    }
+    // A text converter on the map files: `why` and the page still read the raw lines.
+    let attrs = store.join(".gitattributes");
+    let text = std::fs::read_to_string(&attrs).unwrap();
+    std::fs::write(&attrs, format!("{text}map/*.jsonl diff=maptext\n")).unwrap();
+    q(&e, &["open"]);
+    let after = std::fs::read_to_string(&page_path).unwrap();
+    assert!(before == after, "the settings changed the page");
+    assert_eq!(q(&e, &["why", "fetcher"]), why_before);
+    let fetcher = page_node(&page_data(&after), "fetcher").clone();
+    let history = fetcher["history"].as_array().unwrap();
+    assert_eq!(history.len(), 2, "{fetcher}");
+    assert_eq!(history[1]["subject"], "note café");
+    assert!(
+        history
+            .iter()
+            .all(|c| c["commit"].as_str().unwrap().len() == 12)
+    );
+}
+
+#[test]
+fn a_render_reads_the_config_history_once_for_all_branches() {
+    let e = Env::new();
+    e.ok(&["init", "kiln"]);
+    let outline: String = (1..=30)
+        .map(|i| format!("Extra branch {i} | Question {i}?\n  Entry {i}\n"))
+        .collect();
+    let file = e.write("outline.txt", &outline);
+    e.ok(&["--project", "kiln", "import", file.to_str().unwrap()]);
+    let trace = e.root.join("trace.json");
+    let o = e.run_env(
+        &e.work(),
+        &["--project", "kiln", "open"],
+        &[("GIT_TRACE2_EVENT", trace.to_str().unwrap())],
+    );
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    let text = std::fs::read_to_string(&trace).unwrap();
+    let count = |cmd: &str| {
+        text.lines()
+            .filter(|l| l.contains(r#""event":"cmd_name""#))
+            .filter(|l| l.contains(&format!(r#""name":"{cmd}""#)))
+            .count()
+    };
+    // Two revisions of the config (init and import), whatever the number of branches.
+    assert_eq!(count("show"), 2, "{text}");
+    assert!(count("log") <= 4, "{} git log calls", count("log"));
+}
+
+#[test]
+fn a_node_whose_line_moves_to_another_branch_file_is_touched_whatever_diff_renames_says() {
+    let e = Env::new();
+    e.ok(&["init", "kiln"]);
+    let outline: String = std::iter::once("Layout\n  Queue | The job queue.\n".to_string())
+        .chain((1..=20).map(|i| format!("    Entry {i} | Entry number {i}.\n")))
+        .collect();
+    let file = e.write("outline.txt", &outline);
+    e.ok(&["--project", "kiln", "import", file.to_str().unwrap()]);
+    // A run moves the whole subtree: map/layout.jsonl becomes map/how-it-works.jsonl, which
+    // git can take for a rename.
+    let store = e.store("kiln");
+    let text = std::fs::read_to_string(store.join("map/layout.jsonl")).unwrap();
+    let moved = text.replace(r#""parent":"layout""#, r#""parent":"how-it-works""#);
+    assert_ne!(moved, text);
+    std::fs::remove_file(store.join("map/layout.jsonl")).unwrap();
+    std::fs::write(store.join("map/how-it-works.jsonl"), moved).unwrap();
+    git(&store, &["add", "-A", "map"]);
+    git(
+        &store,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "run move queue",
+        ],
+    );
+    let mut seen = Vec::new();
+    for setting in ["true", "false"] {
+        git(&store, &["config", "diff.renames", setting]);
+        e.ok(&["--project", "kiln", "open"]);
+        let page = std::fs::read_to_string(store.join("views/index.html")).unwrap();
+        let why = e.ok(&["--project", "kiln", "why", "entry-1"]);
+        seen.push((page, why));
+    }
+    assert!(seen[0] == seen[1], "diff.renames changed the page or why");
+    let data = page_data(&seen[0].0);
+    let entry = page_node(&data, "entry-1");
+    assert_eq!(entry["changed"], true, "{entry}");
+    assert_eq!(entry["history"][1]["subject"], "run move queue", "{entry}");
+    assert!(seen[0].1.contains(" run move queue\n"), "{}", seen[0].1);
 }

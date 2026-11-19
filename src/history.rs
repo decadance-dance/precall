@@ -7,7 +7,9 @@ use crate::query;
 use crate::store::{Store, git};
 use anyhow::Result;
 use serde_json::{Value, json};
+use std::collections::{BTreeMap, BTreeSet};
 
+#[derive(Clone)]
 struct Commit {
     hash: String,
     date: String,
@@ -15,10 +17,35 @@ struct Commit {
     body: Vec<String>,
 }
 
-const FORMAT: &str = "--format=%h%x1f%ad%x1f%s%x1f%b%x1e";
+impl Commit {
+    /// The hash as shown: a fixed 12 hex digits, like a source reference's commit (spec §3.3),
+    /// whatever `core.abbrev` says, so the same history always prints the same.
+    fn short(&self) -> &str {
+        self.hash.get(..12).unwrap_or(&self.hash)
+    }
+}
+
+const FORMAT: &str = "--format=%H%x1f%ad%x1f%s%x1f%b%x1e";
+
+/// How `why` and the html view diff the map, whatever the user's git config says, so both see
+/// the same raw JSONL lines: no color, no external diff or text converter, and a node whose
+/// line moves to another branch file counts as touched (no rename detection).
+const RAW_DIFF: [&str; 4] = [
+    "--no-color",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--no-renames",
+];
 
 fn log(store: &Store, args: &[&str]) -> Result<Vec<Commit>> {
-    let mut all = vec!["log", FORMAT, "--date=short"];
+    // Messages come back as UTF-8 whatever `i18n.logOutputEncoding` says.
+    let mut all = vec![
+        "log",
+        "--no-color",
+        "--encoding=UTF-8",
+        FORMAT,
+        "--date=short",
+    ];
     all.extend_from_slice(args);
     let out = git(&store.root, &all)?;
     Ok(out
@@ -43,51 +70,37 @@ fn log(store: &Store, args: &[&str]) -> Result<Vec<Commit>> {
 }
 
 fn commit_json(c: &Commit) -> Value {
-    json!({ "commit": c.hash, "date": c.date, "subject": c.subject, "body": c.body })
+    json!({ "commit": c.short(), "date": c.date, "subject": c.subject, "body": c.body })
 }
 
 /// When a node appeared and changed: the commits that touched its line, oldest first.
 pub fn why(store: &Store, id: &str, as_json: bool) -> Result<String> {
     let node = store.get(id)?;
-    let mut commits = if store.is_branch(id) {
-        // The commits where this branch's entry in the config differs from the revision before.
-        let mut changed = Vec::new();
-        let mut prev = None;
-        for c in log(store, &["--reverse", "--", STORE_CONFIG])? {
-            let text = git(
-                &store.root,
-                &["show", &format!("{}:{STORE_CONFIG}", c.hash)],
-            )
-            .unwrap_or_default();
-            let entry = config::branch_entry(&text, id);
-            if entry != prev {
-                changed.push(c);
-            }
-            prev = entry;
+    let commits = if store.is_branch(id) {
+        let changed = branch_commits(&config_revisions(store)?, id);
+        if changed.is_empty() {
+            log(store, &["--max-parents=0"])?
+        } else {
+            changed
         }
-        changed
     } else {
         // Ids are slugs, so they need no regex escaping; the pattern matches only this node's own line.
         log(
             store,
             &[
-                "--reverse",
-                "-G",
-                &format!("^[{{]\"id\":\"{id}\","),
-                "--",
-                "map",
-            ],
+                &RAW_DIFF[..],
+                &[
+                    "--reverse",
+                    "-G",
+                    &format!("^[{{]\"id\":\"{id}\","),
+                    "--",
+                    "map",
+                ],
+            ]
+            .concat(),
         )?
     };
-    if commits.is_empty() && store.is_branch(id) {
-        // A default branch exists since init, the root commit.
-        commits = log(store, &["--max-parents=0"])?;
-    }
-    let mention = format!("/{id}");
-    for c in &mut commits {
-        c.body
-            .retain(|l| l.split_whitespace().any(|w| w.ends_with(&mention)));
-    }
+    let commits: Vec<Commit> = commits.into_iter().map(|c| mentioning(c, id)).collect();
     let kids = store.child_map();
     if as_json {
         let history: Vec<Value> = commits.iter().map(commit_json).collect();
@@ -102,12 +115,133 @@ pub fn why(store: &Store, id: &str, as_json: bool) -> Result<String> {
         node.sources.join(", ")
     );
     for c in &commits {
-        out += &format!("- {} {} {}\n", c.date, c.hash, c.subject);
+        out += &format!("- {} {} {}\n", c.date, c.short(), c.subject);
         for l in &c.body {
             out += &format!("  {l}\n");
         }
     }
     Ok(out)
+}
+
+/// Each revision of the store config, oldest first, with its text.
+fn config_revisions(store: &Store) -> Result<Vec<(Commit, String)>> {
+    Ok(log(store, &["--reverse", "--", STORE_CONFIG])?
+        .into_iter()
+        .map(|c| {
+            let text = git(
+                &store.root,
+                &["show", &format!("{}:{STORE_CONFIG}", c.hash)],
+            )
+            .unwrap_or_default();
+            (c, text)
+        })
+        .collect())
+}
+
+/// The commits where a branch's entry in the config differs from the revision before. Empty
+/// for a default branch, which exists since init, the root commit.
+fn branch_commits(revisions: &[(Commit, String)], id: &str) -> Vec<Commit> {
+    let mut changed = Vec::new();
+    let mut prev = None;
+    for (c, text) in revisions {
+        let entry = config::branch_entry(text, id);
+        if entry != prev {
+            changed.push(c.clone());
+        }
+        prev = entry;
+    }
+    changed
+}
+
+/// The commit with only the body lines that name the node.
+fn mentioning(mut c: Commit, id: &str) -> Commit {
+    let mention = format!("/{id}");
+    c.body
+        .retain(|l| l.split_whitespace().any(|w| w.ends_with(&mention)));
+    c
+}
+
+/// Every node's history for the html view (spec §8): what `why` reports, read with one
+/// `git log -p` over the map instead of one log per node.
+pub struct MapHistory {
+    /// Commits per node id, oldest first, as `why --json` lists them.
+    pub nodes: BTreeMap<String, Vec<Value>>,
+    /// The newest commit whose subject starts with `run `.
+    pub last_run: Option<Value>,
+    /// The nodes whose history holds the last run's commit or a later one.
+    pub changed: BTreeSet<String>,
+}
+
+pub fn map_history(store: &Store) -> Result<MapHistory> {
+    let all = log(store, &[])?; // newest first
+    let last_run = all.iter().position(|c| c.subject.starts_with("run "));
+    let since: BTreeSet<&str> = last_run
+        .map(|i| all[..=i].iter().map(|c| c.hash.as_str()).collect())
+        .unwrap_or_default();
+    let by_hash: BTreeMap<&str, &Commit> = all.iter().map(|c| (c.hash.as_str(), c)).collect();
+
+    // The ids whose line a commit adds or removes: the lines `why`'s `-G` pattern matches.
+    let mut touched: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let patches = git(
+        &store.root,
+        &[
+            &["log", "--reverse", "-p"][..],
+            &RAW_DIFF,
+            &["--unified=0", "--format=%x1e%H", "--", "map"],
+        ]
+        .concat(),
+    )?;
+    for rec in patches.split('\x1e').skip(1) {
+        let mut lines = rec.lines();
+        let hash = lines.next().unwrap_or_default();
+        for l in lines {
+            let Some(rest) = l
+                .strip_prefix("+{\"id\":\"")
+                .or_else(|| l.strip_prefix("-{\"id\":\""))
+            else {
+                continue;
+            };
+            let Some((id, _)) = rest.split_once("\",") else {
+                continue;
+            };
+            let hashes = touched.entry(id.to_string()).or_default();
+            if hashes.last().is_none_or(|h| h != hash) {
+                hashes.push(hash.to_string());
+            }
+        }
+    }
+
+    // Read once for every branch: a branch's history comes from the config's revisions.
+    let revisions = config_revisions(store)?;
+    let root = log(store, &["--max-parents=0"])?;
+    let mut nodes = BTreeMap::new();
+    let mut changed = BTreeSet::new();
+    for id in store.nodes.keys() {
+        let commits = if store.is_branch(id) {
+            let c = branch_commits(&revisions, id);
+            if c.is_empty() { root.clone() } else { c }
+        } else {
+            touched
+                .get(id)
+                .into_iter()
+                .flatten()
+                .filter_map(|h| by_hash.get(h.as_str()).map(|c| (*c).clone()))
+                .collect()
+        };
+        if commits.iter().any(|c| since.contains(c.hash.as_str())) {
+            changed.insert(id.clone());
+        }
+        let history = commits
+            .into_iter()
+            .map(|c| commit_json(&mentioning(c, id)))
+            .collect();
+        nodes.insert(id.clone(), history);
+    }
+    Ok(MapHistory {
+        nodes,
+        last_run: last_run.map(|i| commit_json(&all[i])),
+        changed,
+    })
 }
 
 /// Days in a `--since` window: `<N>d` or `<N>w`.
@@ -179,7 +313,7 @@ pub fn recent(store: &Store, since: &str, as_json: bool) -> Result<String> {
         out += "none\n";
     }
     for c in &commits {
-        out += &format!("- {} {} {}\n", c.date, c.hash, c.subject);
+        out += &format!("- {} {} {}\n", c.date, c.short(), c.subject);
         for l in &c.body {
             out += &format!("  {l}\n");
         }
