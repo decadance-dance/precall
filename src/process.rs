@@ -27,6 +27,10 @@ pub struct Ctx {
 /// More stdout than this is not a plugin answer; the call fails instead of filling memory.
 const MAX_STDOUT: u64 = 64 << 20;
 
+/// The variable that gives a built-in runner the run-dir path of its call's agent log, where it
+/// keeps what the agent streamed, redacted (spec §6.8).
+pub const AGENT_LOG: &str = "RRECALL_AGENT_LOG";
+
 /// Runs `template` (an argv of `inst`'s manifest) as a child process (spec §6.3): in the plugin
 /// directory, never through a shell, `input` as JSON on stdin, the `RRECALL_*` environment, and
 /// killed with everything it started at the instance's timeout. stdout and stderr are kept,
@@ -86,8 +90,20 @@ fn run(
     let log = |ext| ctx.run_dir.join(format!("{}.{entry}.{ext}", inst.id));
     let (out_path, err_path) = (log("stdout"), log("stderr"));
     let (mut out, mut err) = (unnamed(&out_path)?, unnamed(&err_path)?);
-    let status = command(ctx, inst, &argv, &path, &out, &err, state)
-        .and_then(|mut cmd| wait(&mut cmd, program, stdin, inst.timeout));
+    // Only the built-in runners get it: they redact what they write there, as `keep` does.
+    let agent_log = (inst.plugin.builtin && matches!(inst.plugin.manifest.spec, Spec::Runner(_)))
+        .then(|| log("agent"));
+    if let Some(p) = &agent_log {
+        // A call that fails before its agent starts leaves no stale log of an earlier one.
+        let _ = std::fs::remove_file(p);
+    }
+    let status = command(ctx, inst, &argv, &path, &out, &err, state).and_then(|mut cmd| {
+        match &agent_log {
+            Some(p) => cmd.env(AGENT_LOG, p),
+            None => cmd.env_remove(AGENT_LOG),
+        };
+        wait(&mut cmd, program, stdin, inst.timeout)
+    });
     let stdout = keep(&mut out, &out_path, MAX_STDOUT)?;
     keep(&mut err, &err_path, MAX_STDOUT)?;
     let status = status.map_err(|e| anyhow!("{e:#}; stderr in {}", err_path.display()))?;
@@ -202,11 +218,19 @@ fn keep(f: &mut File, path: &Path, cap: u64) -> Result<Vec<u8>> {
     f.seek(SeekFrom::Start(0))?;
     let mut bytes = Vec::new();
     f.take(cap + OVERLAP).read_to_end(&mut bytes)?;
+    write_log(&bytes, path, cap)?;
+    bytes.truncate(cap as usize);
+    Ok(bytes)
+}
+
+/// Writes `bytes` (read up to `cap` + [`OVERLAP`]) to `path` as a log: every credential
+/// redacted, and past `cap` bytes cut with a line saying so.
+pub fn write_log(bytes: &[u8], path: &Path, cap: u64) -> Result<()> {
     let cut = bytes.len() as u64 > cap;
     // limit: a log that is not UTF-8 is kept with replacement characters, so the scanner can
     // read it, and then the cut lands near `cap`, not on it; the plugin's answer itself is
     // never changed.
-    let text = String::from_utf8_lossy(&bytes);
+    let text = String::from_utf8_lossy(bytes);
     let mut limit = text.len().min(cap as usize);
     while !text.is_char_boundary(limit) {
         limit -= 1;
@@ -215,16 +239,14 @@ fn keep(f: &mut File, path: &Path, cap: u64) -> Result<Vec<u8>> {
     if cut {
         kept += &format!("\n[log cut at {cap} bytes]\n");
     }
-    std::fs::write(path, &kept).with_context(|| format!("writing {}", path.display()))?;
-    bytes.truncate(cap as usize);
-    Ok(bytes)
+    std::fs::write(path, &kept).with_context(|| format!("writing {}", path.display()))
 }
 
 /// How far past a cut [`keep`] reads, so a credential the cut splits is still found and
 /// redacted whole.
 // limit: a match that needs more than this past the cut to be recognized (a key block whose
 // end line lies further) is redacted as far as its own rule goes without it (the header).
-const OVERLAP: u64 = 64 << 10;
+pub const OVERLAP: u64 = 64 << 10;
 
 /// How much of the end of stderr the error message's line is taken from.
 const TAIL: u64 = 64 << 10;

@@ -482,7 +482,7 @@ A judge gets the same, plus `sources` per item: the resolved text of each refere
 }
 ```
 
-Checks and judges answer in the same format: exactly one verdict per key, `accept`, `reject` or `revise`. Every verdict needs a `reason`, an `accept` too; a `revise` also needs an `instruction`. A rejected or revised proposal goes back to its collector with the verdict for the next round. A verdict for a key you were not given or a key twice fails your whole output, and a check or judge that fails accepts nothing: those proposals are dropped and their collectors are collected again next run. A check that leaves a key out fails the same way; a judge that leaves keys out is asked once more with only those proposals, and what it leaves out again is dropped alone.
+Checks and judges answer in the same format: exactly one verdict per key, `accept`, `reject` or `revise`. Every verdict needs a `reason`, an `accept` too; a `revise` also needs an `instruction`. A rejected or revised proposal goes back to its collector with the verdict for the next round. A verdict for a key you were not given or a key twice fails your whole output (a judge's key without its `<collector>/` prefix counts for the one key given that ends in it, when exactly one does), and a check or judge that fails accepts nothing: those proposals are dropped and their collectors are collected again next run. A check that leaves a key out fails the same way; a judge that leaves keys out is asked once more with only those proposals, and what it leaves out again is dropped alone.
 
 <!-- wire: verdict-output -->
 ```json

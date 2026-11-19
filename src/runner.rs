@@ -12,6 +12,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
+use std::io::Read;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -118,10 +119,56 @@ pub fn run(id: &str, stdin: &str) -> Result<String> {
         Agent::Codex => Access::default(),
     };
     let scratch = Scratch::create()?;
-    let dir = &scratch.0;
+    let out = answer(agent, &input, &scratch.0, &access, &prices);
+    if let Some(log) = std::env::var_os(process::AGENT_LOG) {
+        let log = Path::new(&log);
+        if let Err(e) = keep_agent_log(&scratch.0, log) {
+            eprintln!(
+                "rrecall: the agent's output was not kept in {}: {e:#}",
+                log.display()
+            );
+        }
+    }
+    out
+}
+
+// limit: the agent log keeps the first 16 MiB of what the agent streamed, cut with a line
+// saying so; a stream that ends past it loses its end there, the `.stdout` keeps the answer.
+const AGENT_LOG_CAP: u64 = 16 << 20;
+
+/// Writes what the agent streamed in the call's directory `dir` to `log`, redacted (spec §6.8):
+/// each turn's stdout, then Codex's session logs and final message, each under its name.
+fn keep_agent_log(dir: &Path, log: &Path) -> Result<()> {
+    let mut files = vec![dir.join("turn1.stdout"), dir.join("turn2.stdout")];
+    files.extend(session_logs(&dir.join("codex-home/sessions")));
+    files.push(dir.join("reply.txt"));
+    let mut bytes = Vec::new();
+    for f in files {
+        let Ok(file) = fs::File::open(&f) else {
+            continue;
+        };
+        let name = f.strip_prefix(dir).unwrap_or(&f);
+        bytes.extend(format!("== {} ==\n", name.display()).into_bytes());
+        let room = (AGENT_LOG_CAP + process::OVERLAP).saturating_sub(bytes.len() as u64);
+        file.take(room).read_to_end(&mut bytes)?;
+        if !bytes.ends_with(b"\n") {
+            bytes.push(b'\n');
+        }
+    }
+    process::write_log(&bytes, log, AGENT_LOG_CAP)
+}
+
+/// The call itself, in its directory `dir`: the turns and the runner output document.
+fn answer(
+    agent: Agent,
+    input: &RunnerInput,
+    dir: &Path,
+    access: &Access,
+    prices: &Prices,
+) -> Result<String> {
     let launch = match agent {
-        Agent::Claude => claude_launch(&input, dir, &access)?,
-        Agent::Codex => codex_launch(&input, dir)?,
+        Agent::Claude => claude_launch(input, dir, access)?,
+        Agent::Codex => codex_launch(input, dir)?,
     };
     let session = uuid_v4();
     let (main, wrap) = split(Duration::from_secs(input.timeout));
@@ -158,7 +205,7 @@ pub fn run(id: &str, stdin: &str) -> Result<String> {
                 .iter()
                 .map(fs::read_to_string)
                 .collect::<Result<Vec<_>, _>>()?;
-            claude_reply(status, &stdouts, &input.model, &prices)?
+            claude_reply(status, &stdouts, &input.model, prices)?
         }
         Agent::Codex => {
             if !status.success() {
@@ -173,7 +220,7 @@ pub fn run(id: &str, stdin: &str) -> Result<String> {
             let (tokens, model) = codex_usage(&dir.join("codex-home"), &events, &input.model)?;
             (
                 parse_reply(&reply)?,
-                estimate(&prices, &model, tokens)?,
+                estimate(prices, &model, tokens)?,
                 model,
                 Some(tokens),
             )

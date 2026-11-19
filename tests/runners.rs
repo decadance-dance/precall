@@ -808,3 +808,63 @@ fn a_relative_claude_config_dir_reaches_the_agent_as_an_absolute_path() {
     );
     assert!(t.rec("claude.env.1").lines().any(|l| l == want));
 }
+
+/// A credential the fake agents echo in their output, which the agent log must not keep.
+fn token() -> String {
+    format!("ghp_{}", "aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3z5A")
+}
+
+/// A call with `RRECALL_AGENT_LOG` set (spec §6.8), and the log it left.
+fn logged(t: &T, id: &str) -> (Out, String) {
+    let log = t.root.join("run/claude.support.judge.agent");
+    std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+    let o = t.call_with(
+        id,
+        "m",
+        60,
+        None,
+        &[("RRECALL_AGENT_LOG", log.to_string_lossy().into_owned())],
+    );
+    let text = std::fs::read_to_string(&log).unwrap_or_else(|e| panic!("{e}: {}", o.stderr));
+    (o, text)
+}
+
+#[test]
+fn claude_keeps_what_the_agent_streamed_redacted_in_the_agent_log() {
+    let out = json!({"texts": {"note:a": token()}}).to_string();
+    let t = T::new("ok", &out);
+    let (o, log) = logged(&t, "claude");
+    assert!(o.ok, "{}", o.stderr);
+    assert!(log.contains("\"type\":\"result\""), "{log}");
+    assert!(
+        log.contains("[redacted:github-token]") && !log.contains(&token()),
+        "{log}"
+    );
+    // A call that fails keeps it too.
+    std::fs::write(t.root.join("home/agent/scenario"), "malformed").unwrap();
+    let (o, log) = logged(&t, "claude");
+    assert!(!o.ok && !log.is_empty(), "{}", o.stderr);
+    t.no_scratch_left();
+}
+
+#[test]
+fn codex_keeps_its_events_session_log_and_final_message_in_the_agent_log() {
+    let t = T::new("ok", &format!("not JSON {}", token()));
+    let (o, log) = logged(&t, "codex");
+    assert!(!o.ok, "the reply does not decode: {}", o.stderr);
+    assert!(log.contains("turn.completed"), "events: {log}");
+    assert!(log.contains("token_count"), "session log: {log}");
+    assert!(
+        log.contains("not JSON [redacted:github-token]"),
+        "reply: {log}"
+    );
+    assert!(!log.contains(&token()), "{log}");
+    t.no_scratch_left();
+}
+
+#[test]
+fn without_an_agent_log_path_the_runner_writes_none() {
+    let t = T::new("ok", r#"{"texts":{"note:a":null}}"#);
+    assert!(t.call("claude", "m", 60, None).ok);
+    assert!(!t.root.join("run").exists());
+}

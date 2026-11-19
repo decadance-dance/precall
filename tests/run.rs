@@ -951,6 +951,12 @@ fn a_judge_key_without_its_collector_counts_in_the_first_call_and_the_reask() {
     ]);
     w.run_code(&[], 0);
     assert_eq!(w.calls("runner"), 2);
+    let env = std::fs::read_to_string(w.rec("runner")).unwrap();
+    assert!(
+        !env.contains("RRECALL_AGENT_LOG"),
+        "a plugin runner gets none: {env}"
+    );
+    assert!(!logs(&w).iter().any(|l| l.ends_with(".agent")));
     let map = w.map("layout");
     assert!(map.contains("Queue") && map.contains("Cache"), "{map}");
     let report = w.report();
@@ -1988,6 +1994,12 @@ fn the_builtin_claude_runner_runs_a_declarative_collector() {
     assert!(argv.contains("\n--model\nopus-test\n"), "{argv}");
     let stdin = std::fs::read_to_string(w.root.join("home/agent/claude.stdin.1")).unwrap();
     assert!(stdin.starts_with(rrecall::wire::PREAMBLE) && stdin.contains("Propose changes."));
+    // What the agent streamed, next to the call's stdout and stderr (spec §6.3, §6.8).
+    let logs = logs(&w);
+    for ext in ["stdout", "stderr", "agent"] {
+        let log = format!("claude.writer.collect.{ext}");
+        assert!(logs.contains(&log), "{log}: {logs:?}");
+    }
 }
 
 #[test]
