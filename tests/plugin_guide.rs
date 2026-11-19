@@ -3,7 +3,6 @@
 //! matches the file, and its steps install and run the example plugin with a fake runner.
 
 use rrecall::config::BranchDef;
-use rrecall::merge::Effect;
 use rrecall::node::Node;
 use rrecall::wire::{self, Proposal, VerdictKind};
 use serde_json::{Value, json};
@@ -98,8 +97,9 @@ fn every_json_example_in_the_guide_is_what_the_wire_types_read_or_write() {
         "collect-output",
         "resolve-input",
         "resolve-output",
+        "check-input",
         "judge-input",
-        "judge-output",
+        "verdict-output",
         "runner-input",
         "runner-output",
         "hook-input",
@@ -191,43 +191,15 @@ fn every_json_example_in_the_guide_is_what_the_wire_types_read_or_write() {
     );
     let judge: wire::JudgeInput = de("judge-input", e("judge-input"));
     same("judge-input", e("judge-input"), &judge);
+    assert!(judge.proposals.iter().all(|p| p.sources.is_some()));
+    let check: wire::JudgeInput = de("check-input", e("check-input"));
+    same("check-input", e("check-input"), &check);
+    assert!(
+        check.proposals.iter().all(|p| p.sources.is_none()),
+        "a check gets no resolved sources"
+    );
     let runner: wire::RunnerInput = de("runner-input", e("runner-input"));
     same("runner-input", e("runner-input"), &runner);
-    let v = e("hook-input");
-    let diff = v["data"]["diff"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|d| {
-            let leak = |x: &Value| -> &'static str { Box::leak(s(x).into_boxed_str()) };
-            Effect {
-                change: leak(&d["change"]),
-                id: s(&d["id"]),
-                parent: s(&d["parent"]),
-                fields: d
-                    .get("fields")
-                    .map(|f| f.as_array().unwrap().iter().map(leak).collect())
-                    .unwrap_or_default(),
-                by: s(&d["by"]),
-                key: s(&d["key"]),
-                branch: String::new(),
-                from: None,
-                reason: String::new(),
-                refs: Vec::new(),
-            }
-        })
-        .collect::<Vec<_>>();
-    same(
-        "hook-input",
-        v,
-        wire::HookInput {
-            event: de("hook-input", &v["event"]),
-            project: s(&v["project"]),
-            run_id: s(&v["run_id"]),
-            data: json!({ "diff": diff, "message": v["data"]["message"] }),
-        },
-    );
-
     // Outputs: through the decoders the core runs on plugin output.
     let text = |t: &str| e(t).to_string();
     let fetched = e("fetch-output");
@@ -239,7 +211,7 @@ fn every_json_example_in_the_guide_is_what_the_wire_types_read_or_write() {
     let texts = wire::decode_texts("guide", &text("resolve-output"), &refs).unwrap();
     assert!(texts.values().any(Option::is_some) && texts.values().any(Option::is_none));
     let keys: Vec<String> = judge.proposals.iter().map(|p| p.key.clone()).collect();
-    let verdicts = wire::decode_verdicts("guide", &text("judge-output"), &keys).unwrap();
+    let verdicts = wire::decode_verdicts("guide", &text("verdict-output"), &keys).unwrap();
     assert!(verdicts.iter().any(|v| v.verdict == VerdictKind::Revise));
     let out = wire::decode_runner("guide", &text("runner-output")).unwrap();
     let props: Vec<Proposal> = wire::decode_proposals("guide", &out.output.to_string()).unwrap();
@@ -296,7 +268,7 @@ fn every_manifest_sketch_in_the_guide_loads() {
     }
 }
 
-// The guide's steps, run as written.
+// The guide's steps, run as written, and the payloads the pipeline really sends.
 
 struct Out {
     code: i32,
@@ -304,6 +276,9 @@ struct Out {
     stderr: String,
 }
 
+/// An isolated world: only `HOME` (so the XDG directories default under it) and `PATH` (the
+/// rrecall under test and the fake agents first) are set; the work dir is outside any git
+/// repository and holds a copy of `examples/`.
 struct W {
     root: PathBuf,
 }
@@ -315,36 +290,53 @@ impl Drop for W {
 }
 
 impl W {
-    fn new() -> W {
-        let root = std::env::temp_dir().join(format!("rrecall-guide-{}", std::process::id()));
+    fn new(name: &str) -> W {
+        let root = std::env::temp_dir().join(format!("rrecall-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        for d in ["home/agent", "data", "config", "work"] {
+        for d in ["home/agent", "work"] {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
-        W {
-            root: root.canonicalize().unwrap(),
-        }
+        let root = root.canonicalize().unwrap();
+        let o = Command::new("cp")
+            .arg("-R")
+            .arg(super_root().join("examples"))
+            .arg(root.join("work"))
+            .output()
+            .unwrap();
+        assert!(o.status.success());
+        W { root }
     }
 
     fn agent(&self) -> PathBuf {
         self.root.join("home/agent")
     }
 
-    fn rr(&self, args: &[&str], stdin: &str) -> Out {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_rrecall"));
+    fn store(&self) -> PathBuf {
+        self.root.join("home/.local/share/rrecall/lantern")
+    }
+
+    fn notes(&self) -> PathBuf {
+        self.root.join("work/examples/meeting-notes-data")
+    }
+
+    /// Runs `program args` in the work dir with `y` on stdin.
+    fn exec(&self, program: &str, args: &[&str]) -> Out {
+        let bin = PathBuf::from(env!("CARGO_BIN_EXE_rrecall"));
+        let mut c = Command::new(program);
         c.args(args)
             .current_dir(self.root.join("work"))
             .env("HOME", self.root.join("home"))
-            .env("XDG_DATA_HOME", self.root.join("data"))
-            .env("XDG_CONFIG_HOME", self.root.join("config"))
             .env(
                 "PATH",
                 format!(
-                    "{}/tests/fixtures/bin:{}",
+                    "{}:{}/tests/fixtures/bin:{}",
+                    bin.parent().unwrap().display(),
                     env!("CARGO_MANIFEST_DIR"),
                     std::env::var("PATH").unwrap_or_default()
                 ),
             )
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("XDG_DATA_HOME")
             .env_remove("RRECALL_PROJECT")
             .env_remove("GIT_DIR")
             .stdin(Stdio::piped())
@@ -354,7 +346,7 @@ impl W {
         {
             use std::io::Write;
             let mut si = child.stdin.take().unwrap();
-            si.write_all(stdin.as_bytes()).unwrap();
+            let _ = si.write_all(b"y\n");
         }
         let o = child.wait_with_output().unwrap();
         Out {
@@ -363,6 +355,33 @@ impl W {
             stderr: String::from_utf8(o.stderr).unwrap(),
         }
     }
+
+    /// One of the guide's shell blocks, as a script that stops at the first failure.
+    fn step(&self, script: &str) -> Out {
+        let o = self.exec("sh", &["-ec", script]);
+        assert_eq!(o.code, 0, "{script}\n{}{}", o.stdout, o.stderr);
+        o
+    }
+
+    fn rr(&self, args: &[&str]) -> Out {
+        let o = self.exec(env!("CARGO_BIN_EXE_rrecall"), args);
+        assert_eq!(o.code, 0, "rrecall {args:?}\n{}{}", o.stdout, o.stderr);
+        o
+    }
+
+    /// Appends the guide's `enable` block, with the example's notes as the folder.
+    fn enable(&self) {
+        let enable = blocks("toml", "step")["enable"].clone();
+        assert!(enable.contains("/home/me/meetings"), "{enable}");
+        let enable = enable.replace("/home/me/meetings", self.notes().to_str().unwrap());
+        let cfg = self.store().join("rrecall.toml");
+        let text = std::fs::read_to_string(&cfg).unwrap() + "\n" + &enable;
+        std::fs::write(&cfg, text).unwrap();
+    }
+}
+
+fn super_root() -> PathBuf {
+    root()
 }
 
 fn calls(agent: &Path) -> usize {
@@ -374,19 +393,10 @@ fn calls(agent: &Path) -> usize {
 
 #[test]
 fn the_guides_steps_install_enable_and_run_the_example_plugin() {
-    let w = W::new();
-    let example = root().join("examples/meeting-notes");
-    let notes = root().join("examples/meeting-notes-data");
+    let w = W::new("guide-steps");
     let steps = blocks("sh", "step");
-    assert!(
-        steps["install"].contains("rrecall plugin add examples/meeting-notes"),
-        "{}",
-        steps["install"]
-    );
 
-    // Install: the preview, the question, `y`.
-    let o = w.rr(&["plugin", "add", example.to_str().unwrap()], "y\n");
-    assert_eq!(o.code, 0, "{}{}", o.stdout, o.stderr);
+    let o = w.step(&steps["install"]);
     assert!(
         o.stderr.contains("Install meeting-notes into"),
         "{}",
@@ -397,26 +407,15 @@ fn the_guides_steps_install_enable_and_run_the_example_plugin() {
         "the preview shows the prompts: {}",
         o.stdout
     );
-
-    // A store, and the guide's instance appended to its config.
-    let o = w.rr(&["init", "lantern"], "");
-    assert_eq!(o.code, 0, "{}", o.stderr);
-    let store = w.root.join("data/rrecall/lantern");
-    let enable = blocks("toml", "step")["enable"].clone();
-    assert!(enable.contains("/home/me/meetings"), "{enable}");
-    let enable = enable.replace("/home/me/meetings", notes.to_str().unwrap());
-    let cfg = store.join("rrecall.toml");
-    let text = std::fs::read_to_string(&cfg).unwrap() + "\n" + &enable;
-    std::fs::write(&cfg, text).unwrap();
-
-    let o = w.rr(&["doctor", "--project", "lantern"], "");
-    assert_eq!(o.code, 0, "{}{}", o.stdout, o.stderr);
-    assert!(o.stdout.contains("meeting-notes"), "{}", o.stdout);
+    assert!(w.store().join("rrecall.toml").is_file());
+    w.enable();
 
     // The fake `claude` answers each call in turn: the collector, its resolve_prompt, then
     // the three judges `init` enabled.
-    let src = format!("meeting:{}/2026-10-06-weekly-sync.md#L6", notes.display());
-    let src = src.as_str();
+    let src = format!(
+        "meeting:{}/2026-10-06-weekly-sync.md#L6",
+        w.notes().display()
+    );
     let write = |n: usize, v: Value| {
         std::fs::write(w.agent().join(format!("out.{n}")), v.to_string()).unwrap();
     };
@@ -426,13 +425,13 @@ fn the_guides_steps_install_enable_and_run_the_example_plugin() {
         json!({"proposals": [{
             "key": "exporter", "op": "add", "parent": "decisions",
             "title": "Lantern exporter ships as its own binary",
-            "body": "The weekly sync decided to ship the exporter as a separate binary so the core stays small.",
+            "body": "The weekly sync decided to ship the exporter as a separate binary.",
             "sources": [src], "date": "2026-10-06", "reason": "decided in the weekly sync"
         }]}),
     );
     write(
         2,
-        json!({"texts": {src: "- Ship the lantern exporter as a separate binary."}}),
+        json!({"texts": {&src: "- Ship the lantern exporter as a separate binary."}}),
     );
     for n in 3..=5 {
         write(
@@ -440,22 +439,187 @@ fn the_guides_steps_install_enable_and_run_the_example_plugin() {
             json!({"verdicts": [{"key": "meeting-notes/exporter", "verdict": "accept", "reason": "backed"}]}),
         );
     }
-    let o = w.rr(&["run", "--project", "lantern"], "");
-    assert_eq!(o.code, 0, "{}{}", o.stdout, o.stderr);
+    let o = w.step(&steps["run"]);
+    assert!(o.stdout.contains("meeting-notes"), "doctor: {}", o.stdout);
     assert_eq!(calls(&w.agent()), 5);
     let prompt = std::fs::read_to_string(w.agent().join("claude.stdin.1")).unwrap();
     assert!(
-        prompt.contains("# Collector: meeting-notes") && prompt.contains(notes.to_str().unwrap()),
+        prompt.contains("# Collector: meeting-notes")
+            && prompt.contains(w.notes().to_str().unwrap()),
         "the collector's prompt and its params reach the runner"
     );
-    let map = std::fs::read_to_string(store.join("map/decisions.jsonl")).unwrap();
     assert!(
-        map.contains("Lantern exporter ships as its own binary") && map.contains(src),
-        "{map}"
+        o.stdout
+            .contains("Lantern exporter ships as its own binary")
+            && o.stdout.contains(&src),
+        "`show` prints the decision with its source: {}",
+        o.stdout
     );
 
-    // `min_interval = "1d"`: the next run the same day finds nothing due and calls no runner.
-    let o = w.rr(&["run", "--project", "lantern"], "");
-    assert_eq!(o.code, 0, "{}{}", o.stdout, o.stderr);
+    // `min_interval = "1d"`: the same steps again the same day find nothing due.
+    w.step(&steps["run"]);
     assert_eq!(calls(&w.agent()), 5);
+}
+
+/// A plugin directory under the store's `plugins/` with `manifest` and one script.
+fn store_plugin(w: &W, id: &str, manifest: &str, script: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = w.store().join("plugins").join(id);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("rrecall-plugin.toml"), manifest).unwrap();
+    let f = dir.join("run.sh");
+    std::fs::write(&f, script).unwrap();
+    std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn keys(v: &Value) -> Vec<String> {
+    v.as_object()
+        .unwrap_or_else(|| panic!("not an object: {v}"))
+        .keys()
+        .cloned()
+        .collect()
+}
+
+fn kind(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+/// `+<n> ~<n> -<n>` of a commit subject `run <time>: +1 ~0 -0`.
+fn counts(message: &str) -> Vec<char> {
+    let subject = message.lines().next().unwrap_or_default();
+    let (_, c) = subject.split_once(": ").expect(subject);
+    c.split(' ')
+        .take(3)
+        .map(|t| {
+            assert!(t[1..].parse::<u32>().is_ok(), "{subject}");
+            t.chars().next().unwrap()
+        })
+        .collect()
+}
+
+#[test]
+fn the_guides_runner_and_hook_examples_have_the_keys_the_pipeline_sends() {
+    let ex = examples();
+    let w = W::new("guide-pipeline");
+    let rec = w.root.join("rec");
+    std::fs::create_dir_all(&rec).unwrap();
+    w.rr(&["plugin", "add", "examples/meeting-notes"]);
+    w.rr(&["init", "lantern"]);
+    // A runner and a `commit.before` hook that record their stdin and answer from files.
+    let record = |what: &str, answer: &str| {
+        format!(
+            "#!/bin/sh\nn=1\nwhile [ -e \"$RRECALL_PARAM_REC/{what}.in.$n\" ]; do n=$((n + 1)); done\ncat > \"$RRECALL_PARAM_REC/{what}.in.$n\"\n{answer}\n"
+        )
+    };
+    let head = |id: &str, kind: &str| {
+        format!(
+            "id = \"{id}\"\nname = \"Recorder\"\nversion = \"0.1.0\"\nmin_rrecall = \"0.1.0\"\nkind = \"{kind}\"\n\n"
+        )
+    };
+    store_plugin(
+        &w,
+        "recorder",
+        &(head("recorder", "runner")
+            + "[runner]\ncommand = [\"./run.sh\"]\n\n[params]\nrec = \"\"\n"),
+        &record("runner", "cat \"$RRECALL_PARAM_REC/runner.out.$n\""),
+    );
+    store_plugin(
+        &w,
+        "recorder-hook",
+        &(head("recorder-hook", "hook")
+            + "[hook]\nevents = [\"commit.before\"]\ncommand = [\"./run.sh\"]\n\n[params]\nrec = \"\"\n"),
+        &record("hook", "echo '{}'"),
+    );
+    let rec_s = rec.to_str().unwrap();
+    std::fs::write(
+        w.store().join("rrecall.toml"),
+        format!(
+            "[[plugins]]\nid = \"no-op\"\n\n[[plugins]]\nid = \"recorder\"\nparams = {{ rec = {rec_s:?} }}\n\n[[plugins]]\nid = \"meeting-notes\"\nrunner = \"recorder\"\nparams = {{ path = {:?} }}\n\n[[plugins]]\nid = \"recorder-hook\"\nparams = {{ rec = {rec_s:?} }}\n",
+            w.notes().to_str().unwrap()
+        ),
+    )
+    .unwrap();
+
+    // Run 1 adds a node, a forced run 2 updates it: the hook sees an `added` and an `updated`.
+    let src = format!(
+        "meeting:{}/2026-10-06-weekly-sync.md#L6",
+        w.notes().display()
+    );
+    let answer = |n: usize, p: Value| {
+        let out = json!({"output": {"proposals": [p]}, "cost_usd": 0, "model": "fake-1"});
+        std::fs::write(rec.join(format!("runner.out.{n}")), out.to_string()).unwrap();
+    };
+    answer(
+        1,
+        json!({"key": "exporter", "op": "add", "parent": "decisions", "title": "Exporter ships alone", "date": "2026-10-06",
+               "body": "The exporter ships as a separate binary.", "sources": [&src], "reason": "sync"}),
+    );
+    w.rr(&["run", "--project", "lantern"]);
+    let map = std::fs::read_to_string(w.store().join("map/decisions.jsonl")).unwrap();
+    let node: Value = serde_json::from_str(map.lines().next().unwrap()).unwrap();
+    answer(
+        2,
+        json!({"key": "exporter", "op": "update", "id": node["id"], "body": "The exporter ships as its own binary.",
+               "sources": [&src], "reason": "sync"}),
+    );
+    w.rr(&["run", "--project", "lantern", "--force"]);
+
+    let read = |f: &str| -> Value {
+        let text = std::fs::read_to_string(rec.join(f)).unwrap_or_else(|e| panic!("{f}: {e}"));
+        serde_json::from_str(&text).unwrap()
+    };
+
+    // The runner envelope: the guide's keys and value types; its `input` is the collect input.
+    let real = read("runner.in.2");
+    let guide = &ex["runner-input"];
+    assert_eq!(keys(guide), keys(&real), "runner-input");
+    for k in keys(guide) {
+        assert_eq!(kind(&guide[&k]), kind(&real[&k]), "runner-input `{k}`");
+    }
+    let collect = &ex["collect-input"];
+    assert_eq!(
+        keys(collect),
+        keys(&real["input"]),
+        "collect-input, as the runner gets it"
+    );
+    assert_eq!(keys(&collect["scope"][0]), keys(&real["input"]["scope"][0]));
+    assert_eq!(keys(&collect["nodes"][0]), keys(&real["input"]["nodes"][0]));
+
+    // The hook input: the guide's keys at every level, diff entry by kind of change.
+    let guide = &ex["hook-input"];
+    let runs = [read("hook.in.1"), read("hook.in.2")];
+    for real in &runs {
+        assert_eq!(keys(guide), keys(real), "hook-input");
+        assert_eq!(real["event"], guide["event"]);
+        assert_eq!(
+            keys(&guide["data"]),
+            keys(&real["data"]),
+            "hook-input `data`"
+        );
+        assert_eq!(
+            counts(guide["data"]["message"].as_str().unwrap()),
+            counts(real["data"]["message"].as_str().unwrap()),
+            "the commit subject's counts"
+        );
+    }
+    for g in guide["data"]["diff"].as_array().unwrap() {
+        let real = runs
+            .iter()
+            .flat_map(|r| r["data"]["diff"].as_array().unwrap())
+            .find(|d| d["change"] == g["change"])
+            .unwrap_or_else(|| panic!("no `{}` entry captured", g["change"]));
+        assert_eq!(
+            keys(g),
+            keys(real),
+            "hook-input diff entry `{}`",
+            g["change"]
+        );
+    }
 }
