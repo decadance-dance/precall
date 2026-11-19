@@ -33,6 +33,6 @@ allowed_runners = ["claude-slack", "claude"]
 params = { channels = ["eng-platform"], dms = [], lookback_days = 14 }
 ```
 
-It runs at most once a day (`min_interval = "1d"`) and proposes decisions, people and blockers, each citing `slack:<channel-id>/<ts>`. `allowed_runners` keeps Slack text on these two runner instances; judges can stay on the plain `claude` one.
+It runs at most once a day (`min_interval = "1d"`) and proposes decisions, people and blockers, each citing `slack:<channel-id>/<ts>`. `allowed_runners` keeps Slack text on these two runner instances; judges can stay on the plain `claude` one. `connectors = true` also loads the permission rules of your Claude Code user settings: keep any rule that allows a Slack write tool (or `mcp__claude_ai_Slack` as a whole) out of them, or the collector's agent may use it.
 
 License: [Apache-2.0](LICENSE).
