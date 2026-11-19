@@ -161,6 +161,8 @@ fn fetch(repo: &str, input: &str) -> Result<String> {
     if let Some(p) = &published {
         releases.retain(|r| r["published_at"].as_str().is_some_and(|t| t > p.as_str()));
     }
+    // limit: when more than `limit` items changed since the cursor, only the newest `limit` come
+    // and the cursor moves past the rest, as a full read never lists more than `limit` either.
     let search = match &updated {
         // Inclusive: the newest item of the last run comes once more rather than a same-second
         // update being missed.
