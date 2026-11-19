@@ -51,11 +51,18 @@ path = ""
 - `path` is a param: every instance sets its own folder.
 - After its first run it reads only the notes dated on or after its last settled run (`since`, [spec §4.5](SPEC.md#45-incremental-collection)); a note written up late under an older date waits for `rrecall run --force`.
 
-Try it on a trial project. In a checkout of rrecall, install the plugin: `plugin add` shows the manifest, the prompts and the runner they use, and asks before it copies anything into your user plugin directory. Then create a map store for the trial project `lantern`; run `init` outside any git repository, so the store gets no collectors for the directory you are in. `init` prints where the store is (`~/.local/share/rrecall/lantern` by default):
+Try it on a trial project. In a checkout of rrecall, install the plugin: `plugin add` shows the manifest, the prompts and the runner they use, and asks before it copies anything into your user plugin directory:
 
 <!-- step: install -->
 ```sh
-rrecall plugin add examples/meeting-notes    # shows the plugin; answer y
+rrecall plugin add examples/meeting-notes    # in the checkout; shows the plugin, answer y
+```
+
+Then leave the checkout and create a map store for the trial project `lantern`. Run `init` outside any git repository: inside one, `init` also enables collectors for that repository and its GitHub `origin`, and the run would read them too. `init` prints where the store is (`~/.local/share/rrecall/lantern` by default):
+
+<!-- step: init -->
+```sh
+cd ~                    # out of the checkout, outside any git repository
 rrecall init lantern
 ```
 
@@ -193,7 +200,7 @@ Plugins run with your permissions. rrecall is not a sandbox; the preview before 
 Full rules: [spec §6.3](SPEC.md#63-process-contract).
 
 - The argv runs in the plugin's directory, as its own process group, without a shell. A script needs a `#!` line naming an interpreter by absolute path (`#!/bin/sh`, `#!/usr/bin/env python3`). At the timeout the whole group is killed.
-- stdin: one JSON document. stdout: one JSON document (a fingerprint prints raw text). stderr: your logs. A non-zero exit, a timeout or more than 64 MiB of stdout is a failure. After a non-zero exit the error quotes your last stderr line; after a timeout or an oversized stdout it names the stderr log instead.
+- stdin: one JSON document. stdout: one JSON document (a fingerprint prints raw text). stderr: your logs. A non-zero exit, a timeout or more than 64 MiB of stdout is a failure. After a non-zero exit the error quotes your last stderr line; after a timeout it names the stderr log; after an oversized stdout it gives the byte count and the cap (`printed 67108865 bytes, more than 67108864`), and the stderr log is in its usual place.
 - Both streams are kept, with credentials redacted, in the store's `runs/<run-id>/<instance>.<entrypoint>.stdout` and `.stderr` (`.<round>` appended from round 2).
 - Environment: rrecall's own, plus `RRECALL_BIN`, `RRECALL_PROJECT`, `RRECALL_STORE`, `RRECALL_PLUGIN_DIR`, `RRECALL_STATE_DIR` (a persistent directory of the instance's own, for caches), `RRECALL_RUN_ID`, and each param of the instance as `RRECALL_PARAM_<NAME>` (upper case, `-` as `_`; a string as it is, any other value as JSON). `RRECALL_PARAM_*` variables in rrecall's own environment are not passed on, so a plugin sees only its instance's params.
 - To read the map, call the CLI: `"$RRECALL_BIN" show <id> --json`, `find`, `ls`. There is no other API, and no way to write the map but proposals.

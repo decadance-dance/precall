@@ -277,8 +277,8 @@ struct Out {
 }
 
 /// An isolated world: only `HOME` (so the XDG directories default under it) and `PATH` (the
-/// rrecall under test and the fake agents first) are set; the work dir is outside any git
-/// repository and holds a copy of `examples/`.
+/// rrecall under test and the fake agents first) are set. The work dir is outside any git
+/// repository; the examples are read from this checkout.
 struct W {
     root: PathBuf,
 }
@@ -296,15 +296,9 @@ impl W {
         for d in ["home/agent", "work"] {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
-        let root = root.canonicalize().unwrap();
-        let o = Command::new("cp")
-            .arg("-R")
-            .arg(super_root().join("examples"))
-            .arg(root.join("work"))
-            .output()
-            .unwrap();
-        assert!(o.status.success());
-        W { root }
+        W {
+            root: root.canonicalize().unwrap(),
+        }
     }
 
     fn agent(&self) -> PathBuf {
@@ -316,15 +310,16 @@ impl W {
     }
 
     fn notes(&self) -> PathBuf {
-        self.root.join("work/examples/meeting-notes-data")
+        root().join("examples/meeting-notes-data")
     }
 
-    /// Runs `program args` in the work dir with `y` on stdin.
-    fn exec(&self, program: &str, args: &[&str]) -> Out {
+    /// Runs `program args` in `dir` with `y` on stdin and nothing but `HOME` and `PATH` set.
+    fn exec(&self, dir: &Path, program: &str, args: &[&str]) -> Out {
         let bin = PathBuf::from(env!("CARGO_BIN_EXE_rrecall"));
         let mut c = Command::new(program);
         c.args(args)
-            .current_dir(self.root.join("work"))
+            .current_dir(dir)
+            .env_clear()
             .env("HOME", self.root.join("home"))
             .env(
                 "PATH",
@@ -335,10 +330,6 @@ impl W {
                     std::env::var("PATH").unwrap_or_default()
                 ),
             )
-            .env_remove("XDG_CONFIG_HOME")
-            .env_remove("XDG_DATA_HOME")
-            .env_remove("RRECALL_PROJECT")
-            .env_remove("GIT_DIR")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -356,15 +347,15 @@ impl W {
         }
     }
 
-    /// One of the guide's shell blocks, as a script that stops at the first failure.
-    fn step(&self, script: &str) -> Out {
-        let o = self.exec("sh", &["-ec", script]);
+    /// One of the guide's shell blocks, run in `dir` as a script that stops at the first failure.
+    fn step(&self, dir: &Path, script: &str) -> Out {
+        let o = self.exec(dir, "sh", &["-ec", script]);
         assert_eq!(o.code, 0, "{script}\n{}{}", o.stdout, o.stderr);
         o
     }
 
     fn rr(&self, args: &[&str]) -> Out {
-        let o = self.exec(env!("CARGO_BIN_EXE_rrecall"), args);
+        let o = self.exec(&self.root.join("work"), env!("CARGO_BIN_EXE_rrecall"), args);
         assert_eq!(o.code, 0, "rrecall {args:?}\n{}{}", o.stdout, o.stderr);
         o
     }
@@ -380,10 +371,6 @@ impl W {
     }
 }
 
-fn super_root() -> PathBuf {
-    root()
-}
-
 fn calls(agent: &Path) -> usize {
     std::fs::read_to_string(agent.join("claude.calls"))
         .unwrap_or_default()
@@ -396,7 +383,8 @@ fn the_guides_steps_install_enable_and_run_the_example_plugin() {
     let w = W::new("guide-steps");
     let steps = blocks("sh", "step");
 
-    let o = w.step(&steps["install"]);
+    // `install` in this checkout; `init` from there too, since its block leaves the checkout.
+    let o = w.step(&root(), &steps["install"]);
     assert!(
         o.stderr.contains("Install meeting-notes into"),
         "{}",
@@ -407,7 +395,12 @@ fn the_guides_steps_install_enable_and_run_the_example_plugin() {
         "the preview shows the prompts: {}",
         o.stdout
     );
-    assert!(w.store().join("rrecall.toml").is_file());
+    w.step(&root(), &steps["init"]);
+    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    assert!(
+        !cfg.contains("id = \"repo\"") && !cfg.contains("id = \"github\""),
+        "`init` ran outside the checkout: {cfg}"
+    );
     w.enable();
 
     // The fake `claude` answers each call in turn: the collector, its resolve_prompt, then
@@ -439,8 +432,13 @@ fn the_guides_steps_install_enable_and_run_the_example_plugin() {
             json!({"verdicts": [{"key": "meeting-notes/exporter", "verdict": "accept", "reason": "backed"}]}),
         );
     }
-    let o = w.step(&steps["run"]);
-    assert!(o.stdout.contains("meeting-notes"), "doctor: {}", o.stdout);
+    let home = w.root.join("home");
+    let o = w.step(&home, &steps["run"]);
+    assert!(
+        o.stdout.contains("Every enabled plugin can run."),
+        "doctor: {}",
+        o.stdout
+    );
     assert_eq!(calls(&w.agent()), 5);
     let prompt = std::fs::read_to_string(w.agent().join("claude.stdin.1")).unwrap();
     assert!(
@@ -457,7 +455,7 @@ fn the_guides_steps_install_enable_and_run_the_example_plugin() {
     );
 
     // `min_interval = "1d"`: the same steps again the same day find nothing due.
-    w.step(&steps["run"]);
+    w.step(&home, &steps["run"]);
     assert_eq!(calls(&w.agent()), 5);
 }
 
@@ -510,7 +508,11 @@ fn the_guides_runner_and_hook_examples_have_the_keys_the_pipeline_sends() {
     let w = W::new("guide-pipeline");
     let rec = w.root.join("rec");
     std::fs::create_dir_all(&rec).unwrap();
-    w.rr(&["plugin", "add", "examples/meeting-notes"]);
+    w.rr(&[
+        "plugin",
+        "add",
+        root().join("examples/meeting-notes").to_str().unwrap(),
+    ]);
     w.rr(&["init", "lantern"]);
     // A runner and a `commit.before` hook that record their stdin and answer from files.
     let record = |what: &str, answer: &str| {
