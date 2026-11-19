@@ -138,6 +138,12 @@ pub fn find(text: &str) -> Option<&'static str> {
 /// marker. What the core keeps of a plugin's output goes through this (spec §6.3). One pass:
 /// it merges the patterns' matches in text order and holds only the next one of each.
 pub fn redact(text: &str) -> String {
+    redact_until(text, text.len())
+}
+
+/// [`redact`] for the first `limit` bytes of `text` (a char boundary): a match that starts
+/// before `limit` is redacted whole even when it goes on past it, since the scan reads on.
+pub fn redact_until(text: &str, limit: usize) -> String {
     let lower = text.to_ascii_lowercase();
     let mut heads: Vec<(&'static str, Spans, Option<Range<usize>>)> = detectors(text, &lower)
         .into_iter()
@@ -160,13 +166,18 @@ pub fn redact(text: &str) -> String {
         let Some(r) = std::mem::replace(head, spans.next()) else {
             break;
         };
+        if r.start >= limit {
+            break;
+        }
         if r.start >= at {
             out += &text[at..r.start];
             out += &format!("[redacted:{name}]");
         }
         at = at.max(r.end);
     }
-    out += &text[at..];
+    if at < limit {
+        out += &text[at..limit];
+    }
     out
 }
 
@@ -303,79 +314,86 @@ fn jwt(text: &str) -> impl Iterator<Item = Range<usize>> + '_ {
     })
 }
 
-/// A PEM or PGP armor line that opens a private key, and its armor: through the
+/// A PEM or PGP armor line that opens a private key, and its armor through the
 /// `-----END <same label>-----` line when only armor lines (`Name: value` headers, blank lines,
-/// base64 lines) come between; else the header and the base64 lines of at least 16 characters
-/// right after it. Text that is not armor (the next log line, another block's end) stays.
+/// base64 lines) come between; without that end line only the header, since the lines after it
+/// may be ordinary text. Text that is not armor (the next log line, another block's end) stays.
 fn private_key(text: &str) -> impl Iterator<Item = Range<usize>> + '_ {
     let mut done = 0;
+    // The last armor scan: where it stopped and the label of the end line it stopped at. A
+    // header inside that stretch (in a `Name: value` line) would scan the same lines, so it
+    // reuses the answer and every byte is scanned once.
+    let mut last: Option<(usize, Option<&str>)> = None;
     text.match_indices("-----BEGIN ").filter_map(move |(i, m)| {
         if i < done {
             return None;
         }
-        let from = i + m.len();
-        let b = &text.as_bytes()[from..];
-        let close = (0..b.len().min(64)).find(|&k| b[k..].starts_with(b"-----"))?;
-        let label = &text[from..from + close];
-        if !label.contains("PRIVATE KEY") || label.contains(['\n', '\r', '\\']) {
+        let label = armor_label(text, i + m.len())?;
+        if !label.contains("PRIVATE KEY") {
             return None;
         }
-        let end = armor_end(text, from + close + 5, label);
+        let header_end = i + m.len() + label.len() + 5;
+        let (stop, end_label) = match last {
+            Some((stop, l)) if header_end < stop => (
+                stop,
+                l.filter(|_| line_break(text.as_bytes(), header_end).is_some()),
+            ),
+            _ => *last.insert(armor_scan(text, header_end)),
+        };
+        let end = if end_label == Some(label) {
+            stop + "-----END ".len() + label.len() + 5
+        } else {
+            header_end
+        };
         done = end;
         Some(i..end)
     })
 }
 
-/// Where the armor that starts at `at`, right after a `-----BEGIN <label>-----` line, ends
-/// (see [`private_key`]). Line breaks are real or escaped as in a JSON log (`\n`, `\r\n`).
-/// Every byte is read once: an armor ends at the first byte that is not armor.
-fn armor_end(text: &str, mut at: usize, label: &str) -> usize {
+/// The label of an armor line whose label starts at `from`: up to the closing `-----`, at most
+/// 64 bytes, on one line.
+fn armor_label(text: &str, from: usize) -> Option<&str> {
+    let b = &text.as_bytes()[from..];
+    let close = (0..b.len().min(64)).find(|&k| b[k..].starts_with(b"-----"))?;
+    let label = &text[from..from + close];
+    (!label.contains(['\n', '\r', '\\'])).then_some(label)
+}
+
+/// Reads the armor lines (`Name: value` headers, blank lines, base64 lines) after a header
+/// that ends at `header_end`, and returns where they stop and, when an end line stops them,
+/// its label (the start of `-----END <label>-----`). Line breaks are real or escaped as in a
+/// JSON log (`\n`, `\r\n`).
+fn armor_scan(text: &str, header_end: usize) -> (usize, Option<&str>) {
     let b = text.as_bytes();
     let base64 = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'=');
     let name = |c: u8| c.is_ascii_alphanumeric() || c == b'-';
-    let mut taken = at;
-    let mut plain = true;
+    let mut at = header_end;
     while let Some(n) = line_break(b, at) {
-        at += n;
-        let rest = &text[at..];
-        if let Some(tail) = rest.strip_prefix("-----END ") {
-            if tail
-                .strip_prefix(label)
-                .is_some_and(|t| t.starts_with("-----"))
-            {
-                return at + "-----END ".len() + label.len() + 5;
-            }
-            break;
+        let line = at + n;
+        let rest = &text[line..];
+        if rest.starts_with("-----END ") {
+            return (line, armor_label(text, line + "-----END ".len()));
         }
-        let len = run(b, at, base64, usize::MAX);
-        if line_break(b, at + len).is_some() {
-            if len > 0 && len < 16 {
-                plain = false;
-            }
-            if plain && len > 0 {
-                taken = at + len;
-            }
-            at += len;
+        let len = run(b, line, base64, usize::MAX);
+        if line_break(b, line + len).is_some() {
+            at = line + len;
             continue;
         }
-        // A `Name: value` header line, before the base64 lines.
-        let k = run(b, at, name, 64);
+        let k = run(b, line, name, 64);
         if k > 0 && rest[k..].starts_with(": ") {
-            let value = at + k + 2;
+            let value = line + k + 2;
             let mut j = value;
             while j < b.len() && j - value < WINDOW && line_break(b, j).is_none() {
                 j += 1;
             }
-            if line_break(b, j).is_none() {
-                break;
+            if line_break(b, j).is_some() {
+                at = j;
+                continue;
             }
-            plain = false;
-            at = j;
-            continue;
         }
-        break;
+        return (line, None);
     }
-    taken
+    (at, None)
 }
 
 /// The length of the line break at `at`: `\n`, `\r\n`, or one escaped as in JSON.
@@ -686,7 +704,14 @@ mod tests {
             (
                 "key body without an end line, then the next log line",
                 j(&["-----BEGIN RSA ", "PRIVATE KEY-----\nMIIEowIBAAKCAQEAx1mZ\nAAKCAQEAx1mZMIIEow==\nnext: done\n"]),
-                "[redacted:private-key]\nnext: done\n".to_string(),
+                // Review round 2: without an end line only the header is certain to be a key.
+                "[redacted:private-key]\nMIIEowIBAAKCAQEAx1mZ\nAAKCAQEAx1mZMIIEow==\nnext: done\n"
+                    .to_string(),
+            ),
+            (
+                "key header, then a status line of base64 letters",
+                j(&["Documentation: -----BEGIN RSA ", "PRIVATE KEY-----\nMigrationCompleted\n"]),
+                "Documentation: [redacted:private-key]\nMigrationCompleted\n".to_string(),
             ),
             (
                 "an end line of another label",
@@ -785,6 +810,11 @@ mod tests {
                 j(&["DB_PASSWORD=", "Zq3vK9mW2xR7tY5pL8nB "]).as_str(),
             ),
             ("dense key headers", "-----BEGIN RSA PRIVATE KEY-----\n"),
+            // Review round 2: headers inside armor header lines, with no end line.
+            (
+                "key headers in armor lines",
+                "X: -----BEGIN RSA PRIVATE KEY-----\n",
+            ),
         ] {
             let text = unit.repeat(mib / unit.len());
             let started = std::time::Instant::now();

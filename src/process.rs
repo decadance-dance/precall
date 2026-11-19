@@ -169,19 +169,30 @@ fn unnamed(path: &Path) -> Result<File> {
 fn keep(f: &mut File, path: &Path, cap: u64) -> Result<Vec<u8>> {
     f.seek(SeekFrom::Start(0))?;
     let mut bytes = Vec::new();
-    f.take(cap + 1).read_to_end(&mut bytes)?;
+    f.take(cap + OVERLAP).read_to_end(&mut bytes)?;
     let cut = bytes.len() as u64 > cap;
-    bytes.truncate(cap as usize);
     // limit: a log that is not UTF-8 is kept with replacement characters, so the scanner can
-    // read it, and a credential that the cut splits keeps the fragment before the cut; the
-    // plugin's answer itself is never changed.
-    let mut text = secrets::redact(&String::from_utf8_lossy(&bytes));
-    if cut {
-        text += &format!("\n[log cut at {cap} bytes]\n");
+    // read it, and then the cut lands near `cap`, not on it; the plugin's answer itself is
+    // never changed.
+    let text = String::from_utf8_lossy(&bytes);
+    let mut limit = text.len().min(cap as usize);
+    while !text.is_char_boundary(limit) {
+        limit -= 1;
     }
-    std::fs::write(path, &text).with_context(|| format!("writing {}", path.display()))?;
+    let mut kept = secrets::redact_until(&text, limit);
+    if cut {
+        kept += &format!("\n[log cut at {cap} bytes]\n");
+    }
+    std::fs::write(path, &kept).with_context(|| format!("writing {}", path.display()))?;
+    bytes.truncate(cap as usize);
     Ok(bytes)
 }
+
+/// How far past a cut [`keep`] reads, so a credential the cut splits is still found and
+/// redacted whole.
+// limit: a match that needs more than this past the cut to be recognized (a key block whose
+// end line lies further) is redacted as far as its own rule goes without it (the header).
+const OVERLAP: u64 = 64 << 10;
 
 /// How much of the end of stderr the error message's line is taken from.
 const TAIL: u64 = 64 << 10;
@@ -189,6 +200,8 @@ const TAIL: u64 = 64 << 10;
 /// The last non-blank line the child wrote to `f`, redacted, for the error message: read from
 /// the last [`TAIL`] bytes on their own, so a log cut by [`keep`] still names the plugin's own
 /// last line. A line that starts before the tail is not quoted, so no cut credential is.
+// limit: the first line of the tail is dropped even when it starts exactly at the tail's first
+// byte, so a stderr that ends with nearly [`TAIL`] bytes of blank lines quotes no line.
 fn last_line(f: &mut File) -> Result<String> {
     let from = f.metadata()?.len().saturating_sub(TAIL);
     f.seek(SeekFrom::Start(from))?;
@@ -702,6 +715,15 @@ mod tests {
         // A last line longer than the tail is not quoted, cut or whole.
         write!(f, "{long}{tok}").unwrap();
         assert_eq!(last_line(&mut f).unwrap(), "");
+        // Review round 2: a credential the cut splits is still redacted whole.
+        let path = w.run_dir().join("prs.collect.stdout");
+        let mut f = unnamed(&path).unwrap();
+        write!(f, "01234 {tok} tail").unwrap();
+        keep(&mut f, &path, 16).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "01234 [redacted:github-token]\n[log cut at 16 bytes]\n"
+        );
     }
 
     /// While the plugin runs, its logs have no name in the run dir; after it ends, a timeout

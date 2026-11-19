@@ -1392,3 +1392,21 @@ fn a_reason_is_redacted_before_the_report_shortens_it() {
         "{report}"
     );
 }
+
+/// Review round 2: a proposal is validated on its own values before any redaction, so one
+/// that breaks a limit is rejected, not stored with a marker in place of what broke it.
+#[test]
+fn a_proposal_is_validated_before_its_fields_are_redacted() {
+    let mut a = add("a", "layout", "Queue");
+    a["title"] = json!(
+        [
+            "-----BEGIN RSA ",
+            "PRIVATE KEY-----\n-----END RSA PRIVATE KEY-----"
+        ]
+        .concat()
+    );
+    let w = world(&props(&[a]));
+    w.run(&[]);
+    assert!(!w.map("layout").contains("redacted"), "{}", w.map("layout"));
+    assert!(w.report().contains("rejected"), "{}", w.report());
+}

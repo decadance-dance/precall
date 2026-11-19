@@ -560,16 +560,32 @@ fn scrub(p: &Proposal) -> Proposal {
     p
 }
 
-/// Applies one non-removal; `None` when the node did not change.
+/// Applies one non-removal; `None` when the node did not change. A map file is tracked: what a
+/// plugin wrote reaches it only through the scanner (spec §6.3); the `secrets` check rejects
+/// such a proposal before, this is the net without it. The proposal is validated on its own
+/// values first, so redaction cannot turn one that breaks a rule into one that passes; the
+/// node it stores is validated as well.
 fn apply_one(
     s: &mut Store,
     rules: &Rules,
     it: &Item,
     parent: Option<String>,
 ) -> Result<Option<Effect>, String> {
-    // A map file is tracked: what a plugin wrote reaches it only through the scanner (spec
-    // §6.3). The `secrets` check rejects such a proposal before; this is the net without it.
-    let p = &scrub(&it.p);
+    let scrubbed = scrub(&it.p);
+    if scrubbed != it.p {
+        apply_as(&mut s.clone(), rules, it, &it.p, parent.clone())?;
+    }
+    apply_as(s, rules, it, &scrubbed, parent)
+}
+
+/// [`apply_one`] with `p` in place of the item's proposal.
+fn apply_as(
+    s: &mut Store,
+    rules: &Rules,
+    it: &Item,
+    p: &Proposal,
+    parent: Option<String>,
+) -> Result<Option<Effect>, String> {
     let effect = |change, id: &str, parent: &str, fields, s: &Store| Effect {
         change,
         id: id.to_string(),
