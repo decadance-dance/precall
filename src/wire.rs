@@ -122,10 +122,25 @@ pub struct FetchInput {
 /// The most a cursor may take, serialized (spec §4.2).
 pub const CURSOR_MAX: usize = 4096;
 
-/// A collector's cursor (spec §4.2): any JSON value but `null`, at most [`CURSOR_MAX`] bytes.
+/// A collector's cursor (spec §4.5): any JSON value but `null`, at most [`CURSOR_MAX`] bytes,
+/// whose numbers are 64-bit integers, so it comes back exactly as given.
 pub fn check_cursor(plugin: &str, cursor: &serde_json::Value) -> Result<()> {
     if cursor.is_null() {
         bail!("plugin `{plugin}`: `cursor` is null; leave it out");
+    }
+    fn exact(v: &serde_json::Value) -> bool {
+        match v {
+            serde_json::Value::Number(n) => n.is_i64() || n.is_u64(),
+            serde_json::Value::Array(a) => a.iter().all(exact),
+            serde_json::Value::Object(o) => o.values().all(exact),
+            _ => true,
+        }
+    }
+    if !exact(cursor) {
+        bail!(
+            "plugin `{plugin}`: `cursor` holds a number that is not a 64-bit integer; \
+             put an exact position in a string"
+        );
     }
     let n = cursor.to_string().len();
     if n > CURSOR_MAX {

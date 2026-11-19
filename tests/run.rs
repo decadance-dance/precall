@@ -2392,12 +2392,42 @@ fn a_cursor_that_looks_like_a_credential_is_not_kept() {
 
 #[test]
 fn an_oversized_or_null_cursor_fails_the_output() {
-    for cursor in [json!("x".repeat(5000)), Value::Null] {
-        let w = seq_world(&[with_cursor(&[], cursor.clone())]);
+    let raw = |c: &str| format!(r#"{{"proposals":[],"cursor":{c}}}"#);
+    // Review round 1, finding 6: a number that is no 64-bit integer would not come back as
+    // given, so it fails the output instead.
+    for cursor in [
+        with_cursor(&[], json!("x".repeat(5000))),
+        with_cursor(&[], Value::Null),
+        raw("18446744073709551617"),
+        raw(r#"{"seq": [1.5]}"#),
+        raw("-9223372036854775809"),
+    ] {
+        let w = seq_world(std::slice::from_ref(&cursor));
         let o = w.run_code(&[], 5);
-        assert!(o.stderr.contains("cursor"), "{}", o.stderr);
-        assert!(w.lock()["collectors"].get("repo").is_none());
+        assert!(
+            o.stderr.contains("cursor") && o.stderr.contains("`repo`"),
+            "{cursor}: {}",
+            o.stderr
+        );
+        assert!(w.lock()["collectors"].get("repo").is_none(), "{cursor}");
     }
+}
+
+#[test]
+fn a_cursor_of_64_bit_integers_comes_back_exactly() {
+    let w = seq_world(&[
+        r#"{"proposals":[],"cursor":[18446744073709551615,-9223372036854775808]}"#.to_string(),
+        props(&[]),
+    ]);
+    w.run_code(&[], 0);
+    std::fs::write(w.fp(), "v2").unwrap();
+    w.run_code(&[], 0);
+    let p = w.rec("repo").with_extension("stdin.2");
+    let stdin = std::fs::read_to_string(&p).unwrap();
+    assert!(
+        stdin.contains(r#""cursor":[18446744073709551615,-9223372036854775808]"#),
+        "{stdin}"
+    );
 }
 
 #[test]
@@ -2433,4 +2463,104 @@ fn a_fetch_returns_the_cursor_and_gets_since() {
     w.run_code(&[], 0);
     assert_eq!(w.input("writer", 3)["since"], Value::Null, "prompt changed");
     assert_eq!(w.input("runner", 3)["input"]["since"], Value::Null);
+}
+
+#[test]
+fn a_fetch_cursor_of_an_unsettled_run_is_not_kept() {
+    // Review round 1, finding 8: a judge that fails, and a runner call the budget refuses.
+    for failing in ["judge", "budget"] {
+        let w = W::new();
+        fetching(&w);
+        let writer = w.inst(
+            "writer",
+            "fetching",
+            &format!(
+                "scenario = \"seq\", out = {}",
+                q("{\"cursor\": {\"n\": 1}}\n{\"cursor\": {\"n\": 2}}")
+            ),
+        );
+        let quiet = json!({"output": {"proposals": []}, "cost_usd": 0.0, "model": "fake-1"});
+        let quiet = w.inst(
+            "runner",
+            "runner",
+            &format!("out = {}", q(&quiet.to_string())),
+        );
+        w.config(&format!("{writer}{quiet}"));
+        w.run_code(&[], 0);
+        let settled = w.lock()["collectors"]["writer"].clone();
+        assert_eq!(settled["cursor"], json!({"n": 1}));
+        std::fs::write(w.fp(), "v2").unwrap();
+        let busy =
+            json!({"output": {"proposals": [note_add()]}, "cost_usd": 0.6, "model": "fake-1"});
+        let busy = w.inst(
+            "runner",
+            "runner",
+            &format!("out = {}", q(&busy.to_string())),
+        );
+        w.config(&match failing {
+            "judge" => format!(
+                "{writer}{busy}{}",
+                w.inst("judge", "judge", "scenario = \"crash\"")
+            ),
+            _ => format!(
+                "max_cost_usd = 0.5\n{writer}{busy}{}",
+                w.inst("pjudge", "pjudge", "")
+            ),
+        });
+        w.run_code(&[], 5);
+        assert_eq!(w.input("writer", 2)["since"]["cursor"], json!({"n": 1}));
+        let entry = &w.lock()["collectors"]["writer"];
+        assert_eq!(entry["unsettled"], true, "{failing}");
+        assert_eq!(
+            entry["cursor"],
+            json!({"n": 1}),
+            "{failing}: the fetch's newer cursor"
+        );
+        assert_eq!(entry["settled_at"], settled["settled_at"], "{failing}");
+        w.config(&format!("{writer}{quiet}"));
+        w.run_code(&[], 0);
+        let since = json!({"at": settled["settled_at"], "cursor": {"n": 1}});
+        assert_eq!(w.input("writer", 3)["since"], since, "{failing}: the retry");
+    }
+}
+
+#[test]
+fn round_two_gets_the_same_since_and_round_ones_cursor_is_kept() {
+    let w = world(&props(&[]));
+    let outs = [
+        with_cursor(&[], json!("c0")),
+        with_cursor(&[add("a", "layout", "Queue")], json!("c1")),
+        with_cursor(&[add("a", "layout", "Queue")], json!("c2")),
+    ];
+    let repo = w.inst(
+        "repo",
+        "col",
+        &format!("scenario = \"seq\", out = {}", q(&outs.join("\n"))),
+    );
+    w.config(&format!(
+        "max_rounds = 2\n{repo}{}",
+        w.inst("check", "check", "scenario = \"all\", out = \"accept\"")
+    ));
+    w.run_code(&[], 0);
+    let at = w.lock()["collectors"]["repo"]["settled_at"].clone();
+    std::fs::write(w.fp(), "v2").unwrap();
+    w.config(&format!(
+        "max_rounds = 2\n{repo}{}",
+        w.inst("check", "check", "scenario = \"all\", out = \"revise\"")
+    ));
+    w.run(&[]);
+    assert_eq!(w.calls("repo"), 3, "round 2 ran");
+    assert_eq!(w.input("repo", 3)["round"], 2);
+    let since = json!({"at": at, "cursor": "c0"});
+    assert_eq!(w.input("repo", 2)["since"], since);
+    assert_eq!(
+        w.input("repo", 3)["since"],
+        since,
+        "round 2: the same since"
+    );
+    assert_eq!(
+        w.lock()["collectors"]["repo"]["cursor"],
+        "c1",
+        "round 2's cursor is ignored"
+    );
 }
