@@ -235,9 +235,9 @@ fn keep(f: &mut File, path: &Path, cap: u64) -> Result<Vec<u8>> {
 }
 
 /// `bytes` (read up to `cap` + [`OVERLAP`]) up to `cap` with every credential redacted, and
-/// whether they went on past `cap`.
+/// whether anything was left out: bytes past `cap`, or text that the replacement characters
+/// pushed past it.
 fn redacted(bytes: &[u8], cap: u64) -> (String, bool) {
-    let cut = bytes.len() as u64 > cap;
     // limit: a log that is not UTF-8 is kept with replacement characters, so the scanner can
     // read it, and then the cut lands near `cap`, not on it; the plugin's answer itself is
     // never changed.
@@ -246,6 +246,7 @@ fn redacted(bytes: &[u8], cap: u64) -> (String, bool) {
     while !text.is_char_boundary(limit) {
         limit -= 1;
     }
+    let cut = bytes.len() as u64 > cap || limit < text.len();
     (secrets::redact_until(&text, limit), cut)
 }
 
@@ -862,6 +863,13 @@ mod tests {
                 "{kept}"
             );
         }
+        // Bytes that are not UTF-8 grow threefold as replacement characters: a log under the
+        // cap in bytes can still be clipped, and then it says so.
+        let mut bad = vec![0xFF_u8; 150];
+        bad.extend(b"SENTINEL");
+        let kept = fit_log(&bad, 300);
+        assert!(kept.len() <= 300, "{} bytes", kept.len());
+        assert!(kept.ends_with("\n[log cut at 300 bytes]\n"), "{kept}");
         // A credential the cut splits is still redacted whole, and what fits stays as it is.
         let kept = fit_log(format!("ok {tok}").as_bytes(), 300);
         assert_eq!(kept, format!("ok {marker}"));
