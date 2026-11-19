@@ -1,0 +1,29 @@
+#!/bin/sh
+# A fake `claude -p` for tests. The runner passes it only a whitelisted environment, so its
+# scenario comes from files under $HOME/agent/: `scenario` (ok, nocost, malformed, error,
+# sleep: never answers the first turn, answers a `--resume` turn; sleep-always: never answers)
+# and `out` (the structured output to print). Each call N records its argv to claude.argv.N,
+# its stdin to claude.stdin.N, its environment to claude.env.N and its cwd to claude.cwd.N.
+d="$HOME/agent"
+echo call >> "$d/claude.calls"
+n=$(wc -l < "$d/claude.calls" | tr -d ' ')
+printf '%s\n' "$@" > "$d/claude.argv.$n"
+cat > "$d/claude.stdin.$n"
+env | sort > "$d/claude.env.$n"
+pwd -P > "$d/claude.cwd.$n"
+out=$(cat "$d/out" 2>/dev/null || echo '{}')
+resume=no
+for a in "$@"; do [ "$a" = --resume ] && resume=yes; done
+answer() {
+    printf '{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"s","structured_output":%s,"total_cost_usd":%s,"usage":{"input_tokens":1,"output_tokens":2},"modelUsage":{"claude-fake-small":{"outputTokens":1},"claude-fake-1":{"outputTokens":2}}}\n' "$out" "$1"
+}
+case "$(cat "$d/scenario")" in
+    ok) answer 0.25 ;;
+    nocost) printf '{"is_error":false,"result":"x","structured_output":%s,"usage":{"input_tokens":1000000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0},"modelUsage":{"claude-fake-1":{"outputTokens":0}}}\n' "$out" ;;
+    malformed) echo 'this is not json' ;;
+    error) printf '{"is_error":true,"result":"Not logged in"}\n'; exit 1 ;;
+    sleep)
+        if [ $resume = yes ]; then answer 0.1; else sleep 30 & echo $! > "$d/claude.pid"; wait; fi ;;
+    sleep-always) sleep 30 & echo $! > "$d/claude.pid.$n"; wait ;;
+    *) echo "fake claude: unknown scenario" >&2; exit 64 ;;
+esac

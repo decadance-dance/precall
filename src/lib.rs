@@ -11,6 +11,7 @@ pub mod plugin;
 pub mod process;
 pub mod query;
 pub mod run;
+pub mod runner;
 pub mod secrets;
 pub mod store;
 pub mod wire;

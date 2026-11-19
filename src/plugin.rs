@@ -225,10 +225,14 @@ pub fn builtin() -> Result<BTreeMap<String, Plugin>> {
         .context("the rrecall binary has no directory")?
         .to_path_buf();
     let mut found = BTreeMap::new();
-    for text in crate::checks::MANIFESTS {
+    for text in crate::checks::MANIFESTS
+        .iter()
+        .chain(crate::runner::MANIFESTS.iter())
+    {
         let mut manifest = parse_manifest(text, &dir, "built in")?;
-        if let Spec::Check(c) = &mut manifest.spec {
-            c.command[0] = exe_text.to_string();
+        match &mut manifest.spec {
+            Spec::Check(c) | Spec::Runner(c) => c.command[0] = exe_text.to_string(),
+            _ => {}
         }
         found.insert(
             manifest.id.clone(),
