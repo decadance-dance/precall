@@ -655,6 +655,50 @@ fn i10_a_crashing_collector_is_unreachable_and_collected_again() {
 }
 
 #[test]
+fn i10_a_failing_fingerprint_marks_the_collector_unsettled_until_it_collects_again() {
+    let w = world(&props(&[]));
+    let own = w.root.join("src/fp-repo");
+    std::fs::write(&own, "v1").unwrap();
+    w.config(&format!(
+        "{}{}",
+        w.inst(
+            "repo",
+            "col",
+            &format!(
+                "fp = {}, out = {}",
+                q(&own.to_string_lossy()),
+                q(&props(&[]))
+            )
+        ),
+        w.inst(
+            "github",
+            "col",
+            &format!("kind = \"gh-pr\", out = {}", q(&props(&[])))
+        ),
+    ));
+    w.run_code(&[], 0);
+    // The other collector is due, so the run commits; the failing one gets the mark.
+    std::fs::remove_file(&own).unwrap();
+    std::fs::write(w.fp(), "v2").unwrap();
+    w.run_code(&[], 5);
+    assert_eq!(w.lock()["collectors"]["repo"]["unsettled"], true);
+    std::fs::write(&own, "v1").unwrap();
+    w.run_code(&[], 0);
+    assert_eq!(w.calls("repo"), 2, "collected again at the old fingerprint");
+    assert!(w.lock()["collectors"]["repo"].get("unsettled").is_none());
+    // Nothing else is due: the mark is still committed, and a repeat failure changes nothing.
+    std::fs::remove_file(&own).unwrap();
+    w.run_code(&[], 5);
+    assert_eq!(w.lock()["collectors"]["repo"]["unsettled"], true);
+    let before = w.snapshot();
+    w.run_code(&[], 5);
+    assert_eq!(w.snapshot(), before);
+    std::fs::write(&own, "v1").unwrap();
+    w.run_code(&[], 0);
+    assert_eq!((w.calls("repo"), w.calls("github")), (3, 2));
+}
+
+#[test]
 fn i10_a_judge_that_times_out_drops_its_proposals_and_leaves_the_collector_unsettled() {
     let w = world(&props(&[add("a", "layout", "Queue")]));
     let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
@@ -938,6 +982,53 @@ fn the_commit_shows_the_net_diff_so_changes_that_cancel_out_do_not_appear() {
     assert!(!msg.contains("queue"), "{msg}");
     // The report still shows each round's effects.
     assert!(w.report().contains("queue"), "{}", w.report());
+}
+
+#[test]
+fn a_node_moved_away_and_back_shows_its_new_order_as_an_update() {
+    let w = W::new();
+    w.seed("layout", &[API, NOTED, THEIRS]);
+    let mv = |key: &str, to: &str| json!({"key": key, "op": "move", "id": "api", "parent": to, "sources": ["file:api.md"], "reason": "moved"});
+    let col = format!(
+        "{}\n{}",
+        props(&[mv("a", "decisions"), add("b", "layout", "Maybe")]),
+        props(&[mv("b", "layout")])
+    );
+    let verdicts = format!(
+        "{}\n{}",
+        json!({"verdicts": [
+            {"key": "repo/a", "verdict": "accept", "reason": "fine"},
+            {"key": "repo/b", "verdict": "reject", "reason": "not a fact"}]}),
+        json!({"verdicts": [{"key": "repo/b", "verdict": "accept", "reason": "fine"}]})
+    );
+    w.config(&format!(
+        "{}{}{}",
+        w.inst(
+            "repo",
+            "col",
+            &format!("scenario = \"seq\", out = {}", q(&col))
+        ),
+        w.inst(
+            "check",
+            "check",
+            &format!("scenario = \"seq\", out = {}", q(&verdicts))
+        ),
+        w.inst("cgate", "cgate", &format!("out = {}", q("{}"))),
+    ));
+    w.run_code(&[], 0);
+    let shown = w.git(&["show", "--format=", "HEAD", "--", "map/layout.jsonl"]);
+    assert!(
+        shown.contains(r#"-{"id":"api""#),
+        "the order changed: {shown}"
+    );
+    let diff = &w.input("cgate", 1)["data"]["diff"];
+    assert_eq!(
+        diff,
+        &json!([{"change": "updated", "id": "api", "parent": "layout", "fields": ["order"], "by": "repo", "key": "b"}])
+    );
+    let msg = w.message();
+    assert!(msg.lines().next().unwrap().ends_with("+0 ~1 -0"), "{msg}");
+    assert!(msg.contains("updated layout/api (order)"), "{msg}");
 }
 
 #[test]

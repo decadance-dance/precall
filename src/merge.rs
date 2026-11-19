@@ -517,6 +517,8 @@ pub fn net(before: &Store, after: &Store, effects: &[Effect]) -> Vec<Effect> {
                     ("sources", a.sources != b.sources),
                     ("date", a.date != b.date),
                     ("state", a.state != b.state),
+                    // A node moved away and back in one run lands last among its siblings.
+                    ("order", a.parent == b.parent && a.order != b.order),
                 ]
                 .into_iter()
                 .filter_map(|(f, changed)| changed.then_some(f))
