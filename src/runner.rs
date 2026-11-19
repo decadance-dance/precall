@@ -134,6 +134,7 @@ pub fn run(id: &str, stdin: &str) -> Result<String> {
 
 // limit: the agent log keeps the first 16 MiB of what the agent streamed, cut with a line
 // saying so; a stream that ends past it loses its end there, the `.stdout` keeps the answer.
+// A runner the core kills at the caller's timeout writes none (its own deadlines end first).
 const AGENT_LOG_CAP: u64 = 16 << 20;
 
 /// Writes what the agent streamed in the call's directory `dir` to `log`, redacted (spec §6.8):
