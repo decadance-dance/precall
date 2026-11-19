@@ -2,6 +2,7 @@ pub mod checks;
 pub mod commands;
 pub mod config;
 pub mod error;
+pub mod files;
 pub mod git_history;
 pub mod glob;
 pub mod history;

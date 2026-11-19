@@ -45,12 +45,17 @@ pub fn path_param() -> Result<std::path::PathBuf> {
 /// Runs `program args` in `dir` and returns its stdout; a non-zero exit is an error quoting
 /// the last line of its stderr.
 pub fn output(program: &str, dir: &Path, args: &[&str]) -> Result<String> {
+    output_codes(program, dir, args, &[0])
+}
+
+/// [`output`] that takes each exit code in `ok` as success.
+pub fn output_codes(program: &str, dir: &Path, args: &[&str], ok: &[i32]) -> Result<String> {
     let o = Command::new(program)
         .args(args)
         .current_dir(dir)
         .output()
         .with_context(|| format!("running {program}"))?;
-    if !o.status.success() {
+    if !o.status.code().is_some_and(|c| ok.contains(&c)) {
         let err = String::from_utf8_lossy(&o.stderr);
         let last = err
             .lines()

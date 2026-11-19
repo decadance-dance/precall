@@ -307,3 +307,190 @@ fn git_history_resolves_its_own_commits_and_nothing_else() {
         assert_eq!(t[&r], Value::Null, "{r}");
     }
 }
+
+// --- files ---
+
+fn files_params(
+    w: &W,
+    git: bool,
+    extra: &[(&'static str, &'static str)],
+) -> Vec<(&'static str, String)> {
+    // Every param, as the core passes them: the manifest's defaults unless `extra` sets one.
+    let mut p = vec![
+        ("path", w.repo().to_string_lossy().into_owned()),
+        ("git", git.to_string()),
+    ];
+    for (k, v) in [
+        ("preset", "codebase"),
+        ("ref_kind", "file"),
+        ("include", r#"["**"]"#),
+        ("exclude", "[]"),
+    ] {
+        let v = extra.iter().find(|(e, _)| *e == k).map_or(v, |(_, v)| *v);
+        p.push((k, v.to_string()));
+    }
+    p
+}
+
+fn files(w: &W, entry: &str, params: &[(&'static str, String)], stdin: &str) -> Out {
+    let p: Vec<(&str, &str)> = params.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    w.builtin("files", entry, &p, stdin)
+}
+
+fn fp(w: &W, params: &[(&'static str, String)]) -> String {
+    let o = files(w, "fingerprint", params, "{}");
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    o.stdout
+}
+
+#[test]
+fn files_with_git_fingerprints_the_matched_blobs_at_head_only() {
+    let w = W::new();
+    w.commit_file("docs/design.md", "# Design\nqueue\n", "docs");
+    w.commit_file("src/main.rs", "fn main() {}\n", "code");
+    w.commit_file("logo.png", "\u{0}\u{1}png", "binary");
+    let p = files_params(
+        &w,
+        true,
+        &[("include", r#"["docs/**", "src/**", "*.png"]"#)],
+    );
+    let first = fp(&w, &p);
+    assert!(
+        first.contains("docs/design.md") && first.contains("src/main.rs"),
+        "{first}"
+    );
+    assert!(
+        !first.contains("logo.png"),
+        "binary files are not text: {first}"
+    );
+    // A commit that touches no matched file, and an uncommitted change, leave it alone.
+    w.commit_file("other/x.txt", "x", "unmatched");
+    std::fs::write(w.repo().join("docs/design.md"), "dirty").unwrap();
+    assert_eq!(fp(&w, &p), first);
+    w.git(&["checkout", "-q", "--", "docs/design.md"]);
+    // A commit to a matched file changes it; an exclude takes the file out.
+    w.commit_file("docs/design.md", "# Design\nqueue v2\n", "docs v2");
+    assert_ne!(fp(&w, &p), first);
+    let ex = files_params(
+        &w,
+        true,
+        &[
+            ("include", r#"["docs/**", "src/**"]"#),
+            ("exclude", r#"["src/**"]"#),
+        ],
+    );
+    assert!(!fp(&w, &ex).contains("src/main.rs"));
+}
+
+#[test]
+fn files_with_git_ignores_untracked_and_ignored_files() {
+    let w = W::new();
+    w.commit_file(".gitignore", "build/\n", "ignore");
+    w.commit_file("a.md", "a\n", "a");
+    std::fs::create_dir_all(w.repo().join("build")).unwrap();
+    std::fs::write(w.repo().join("build/out.md"), "x").unwrap();
+    std::fs::write(w.repo().join("new.md"), "x").unwrap();
+    let o = files(&w, "fetch", &files_params(&w, true, &[]), "{}");
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    let f: Value = serde_json::from_str(&o.stdout).unwrap();
+    assert_eq!(f["files"], json!([".gitignore", "a.md"]));
+    let head = w.git(&["rev-parse", "--short=12", "HEAD"]);
+    assert_eq!(f["commit"], head);
+    assert_eq!(f["root"], w.repo().to_string_lossy().as_ref());
+    assert_eq!(f["preset"], "codebase");
+    assert_eq!(
+        f["branches"],
+        json!(["layout", "how-it-works", "decisions"])
+    );
+    assert_eq!(f["cite"], format!("file:<path>#L<first>-L<last>@{head}"));
+}
+
+#[test]
+fn files_without_git_hashes_contents_and_cites_its_ref_kind() {
+    let w = W::new();
+    let notes = w.repo();
+    std::fs::create_dir_all(notes.join("research")).unwrap();
+    std::fs::create_dir_all(notes.join(".obsidian")).unwrap();
+    std::fs::write(notes.join("research/search.md"), "Pick the queue.\n").unwrap();
+    std::fs::write(notes.join(".obsidian/app.json"), "{}").unwrap();
+    std::fs::write(notes.join("photo.jpg"), b"\x00\xff").unwrap();
+    let p = files_params(&w, false, &[("preset", "notes"), ("ref_kind", "note")]);
+    let o = files(&w, "fetch", &p, "{}");
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    let f: Value = serde_json::from_str(&o.stdout).unwrap();
+    assert_eq!(
+        f["files"],
+        json!(["research/search.md"]),
+        "no hidden or binary files"
+    );
+    assert!(f.get("commit").is_none());
+    assert_eq!(f["branches"], json!(["decisions", "blocked", "people"]));
+    assert_eq!(f["cite"], "note:<path>#L<first>-L<last>");
+    let first = fp(&w, &p);
+    std::fs::write(notes.join("research/search.md"), "Pick the other queue.\n").unwrap();
+    assert_ne!(fp(&w, &p), first, "contents, not names");
+    let o = files(
+        &w,
+        "fetch",
+        &files_params(&w, false, &[("preset", "slides")]),
+        "{}",
+    );
+    assert_ne!(o.code, 0);
+    assert!(o.stderr.contains("preset"), "{}", o.stderr);
+}
+
+#[test]
+fn files_resolves_a_file_at_its_commit_and_only_inside_its_scope() {
+    let w = W::new();
+    w.commit_file("docs/design.md", "one\ntwo\nthree\nfour\n", "docs");
+    let c1 = w.git(&["rev-parse", "--short=12", "HEAD"]);
+    w.commit_file("docs/design.md", "ONE\n", "rewrite");
+    w.commit_file("secret.txt", "hidden\n", "out of scope");
+    let p = files_params(&w, true, &[("include", r#"["docs/**"]"#)]);
+    let refs = [
+        format!("file:docs/design.md#L2-L3@{c1}"),
+        format!("file:docs/design.md@{c1}"),
+        format!("file:docs/design.md#L4@{c1}"),
+        format!("file:secret.txt@{c1}"),
+        format!("file:../x/docs/design.md@{c1}"),
+        format!("file:docs/../secret.txt@{c1}"),
+        "file:docs/design.md".into(),
+        format!("note:docs/design.md@{c1}"),
+        "file:docs/design.md@--output=x".into(),
+    ];
+    let t = texts(&files(
+        &w,
+        "resolve",
+        &p,
+        &json!({ "refs": refs }).to_string(),
+    ));
+    assert_eq!(t[&refs[0]], "two\nthree");
+    assert_eq!(
+        t[&refs[1]], "one\ntwo\nthree\nfour\n",
+        "the file at that commit, not now"
+    );
+    assert_eq!(t[&refs[2]], "four");
+    for r in &refs[3..] {
+        assert_eq!(t[r], Value::Null, "{r}");
+    }
+    // Without git the current file, by its ref kind.
+    let p = files_params(
+        &w,
+        false,
+        &[("ref_kind", "note"), ("include", r#"["docs/**"]"#)],
+    );
+    let refs = [
+        "note:docs/design.md",
+        "note:secret.txt",
+        "note:docs/missing.md",
+    ];
+    let t = texts(&files(
+        &w,
+        "resolve",
+        &p,
+        &json!({ "refs": refs }).to_string(),
+    ));
+    assert_eq!(t["note:docs/design.md"], "ONE\n");
+    assert_eq!(t["note:secret.txt"], Value::Null);
+    assert_eq!(t["note:docs/missing.md"], Value::Null);
+}
