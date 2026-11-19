@@ -905,9 +905,14 @@ impl Run {
         let Spec::Runner(spec) = &runner.plugin.manifest.spec else {
             return Err(CallFail::Error(format!("`{}` is not a runner", runner.id)));
         };
-        let path = caller.plugin.dir.join(prompt);
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("plugin `{}`: reading {}", caller.id, path.display()))?;
+        let text = if caller.plugin.builtin {
+            crate::plugin::builtin_prompt(&caller.plugin.manifest.id, prompt)
+                .with_context(|| format!("plugin `{}`: no built-in prompt `{prompt}`", caller.id))?
+        } else {
+            let path = caller.plugin.dir.join(prompt);
+            std::fs::read_to_string(&path)
+                .with_context(|| format!("plugin `{}`: reading {}", caller.id, path.display()))?
+        };
         self.budget.reserve()?;
         let mut r = runner.clone();
         r.timeout = caller.timeout;
@@ -1003,11 +1008,15 @@ impl Run {
         )?;
         // Step 7: checks over the diff, then judges over what every check accepted.
         let map_ids: Vec<String> = work.nodes.keys().cloned().collect();
+        // The branches each judge was shown an add or move under, by proposal key.
+        // `None` when the judge's batch gave it no destination (it left its collector's scope).
+        let mut judged_in: BTreeMap<String, BTreeSet<Option<String>>> = BTreeMap::new();
         for check in self.of_kind(Kind::Check) {
             let live: Vec<&Item> = valid
                 .iter()
                 .filter(|it| !dropped.contains_key(&it.key()))
                 .collect();
+            let lands = lands(work, rules, earlier, &live);
             self.judge_with(
                 &check,
                 round,
@@ -1015,6 +1024,7 @@ impl Run {
                 &live,
                 None,
                 &map_ids,
+                &lands,
                 &mut verdicts,
                 &mut dropped,
             );
@@ -1032,6 +1042,16 @@ impl Run {
                     .copied()
                     .filter(|it| !dropped.contains_key(&it.key()))
                     .collect();
+                let lands = lands(work, rules, earlier, &live);
+                for it in live
+                    .iter()
+                    .filter(|it| matches!(it.p.op, wire::Op::Add | wire::Op::Move))
+                {
+                    judged_in
+                        .entry(it.key())
+                        .or_default()
+                        .insert(lands.get(&it.key()).cloned());
+                }
                 self.judge_with(
                     &judge,
                     round,
@@ -1039,18 +1059,48 @@ impl Run {
                     &live,
                     Some(&texts),
                     &map_ids,
+                    &lands,
                     &mut verdicts,
                     &mut dropped,
                 );
             }
         }
-        let accepted: Vec<Item> = valid
+        let mut accepted: Vec<Item> = valid
             .iter()
             .filter(|it| !dropped.contains_key(&it.key()) && !verdicts.contains_key(&it.key()))
             .cloned()
             .collect();
-        // A parent or a child that was not accepted takes its dependants with it.
-        let post = merge::apply(work, rules, &accepted, earlier);
+        // A parent or a child that was not accepted takes its dependants with it, and an add or
+        // move must land in the branch every judge compared it with.
+        let post = loop {
+            let post = merge::apply(work, rules, &accepted, earlier);
+            let elsewhere: Vec<(String, String)> = accepted
+                .iter()
+                .filter_map(|it| {
+                    let shown = judged_in.get(&it.key())?;
+                    let now = landed(&post, it)?;
+                    let away = shown.iter().find(|b| b.as_deref() != Some(now.as_str()))?;
+                    let away = match away {
+                        Some(b) => format!("judged under `{b}`"),
+                        None => "judged with no place to land".to_string(),
+                    };
+                    Some((
+                        it.key(),
+                        format!(
+                            "{away} but lands under `{now}`, since a move it depended on was \
+                             not accepted: propose it again"
+                        ),
+                    ))
+                })
+                .collect();
+            if elsewhere.is_empty() {
+                break post;
+            }
+            accepted.retain(|it| !elsewhere.iter().any(|(k, _)| *k == it.key()));
+            for (key, reason) in elsewhere {
+                verdicts.entry(key).or_default().push(core(reason, None));
+            }
+        };
         for (key, reason) in &post.failed {
             verdicts
                 .entry(key.clone())
@@ -1078,6 +1128,7 @@ impl Run {
         live: &[&Item],
         texts: Option<&BTreeMap<String, Option<String>>>,
         map_ids: &[String],
+        lands: &BTreeMap<String, String>,
         verdicts: &mut BTreeMap<String, Vec<RoundVerdict>>,
         dropped: &mut BTreeMap<String, String>,
     ) {
@@ -1085,6 +1136,10 @@ impl Run {
             return;
         }
         let keys: Vec<String> = live.iter().map(|it| it.key()).collect();
+        let branches: BTreeSet<&str> = live
+            .iter()
+            .filter_map(|it| lands.get(&it.key()).map(String::as_str))
+            .collect();
         let input = JudgeInput {
             proposals: live
                 .iter()
@@ -1103,6 +1158,12 @@ impl Run {
                     }),
                 })
                 .collect(),
+            nodes: work
+                .nodes
+                .values()
+                .filter(|n| n.parent.is_some() && branches.contains(work.branch_of(&n.id)))
+                .cloned()
+                .collect(),
             map_ids: map_ids.to_vec(),
             params: inst.params_json(),
         };
@@ -1113,11 +1174,29 @@ impl Run {
                 let current = j.current.iter().flat_map(|n| n.sources.iter().cloned());
                 refs_of(&j.proposal).into_iter().chain(current)
             })
+            .chain(input.nodes.iter().flat_map(|n| n.sources.iter().cloned()))
+            .collect();
+        // A judge may not accept a claim whose only sources are unresolved (spec §6.4).
+        let unbacked: BTreeSet<&str> = input
+            .proposals
+            .iter()
+            .filter(|j| {
+                j.sources
+                    .as_ref()
+                    .is_some_and(|s| !s.is_empty() && s.values().all(Option::is_none))
+            })
+            .map(|j| j.key.as_str())
             .collect();
         let kind = if texts.is_some() { "judge" } else { "check" };
         match self.verdicts_of(inst, round, &input, &keys) {
             Ok(vs) => {
-                for v in vs {
+                for mut v in vs {
+                    if v.verdict == VerdictKind::Accept && unbacked.contains(v.key.as_str()) {
+                        v.verdict = VerdictKind::Reject;
+                        v.reason = "accepted with only unresolved sources, which no judge may \
+                                    accept (spec §6.4): cite a source that can be read"
+                            .into();
+                    }
                     let to = if v.verdict == VerdictKind::Accept {
                         &mut self.accepts
                     } else {
@@ -1457,6 +1536,31 @@ fn refs_of(p: &Proposal) -> Vec<String> {
         refs.push(e.clone());
     }
     refs
+}
+
+/// The branch an add or move of `live` lands in when exactly `live` is applied to `work`, by
+/// proposal key: what a check or judge given `live` sees the nodes of (spec §6.5 `nodes`).
+fn lands(
+    work: &Store,
+    rules: &Rules,
+    earlier: &BTreeMap<String, String>,
+    live: &[&Item],
+) -> BTreeMap<String, String> {
+    let batch: Vec<Item> = live.iter().map(|it| (*it).clone()).collect();
+    let applied = merge::apply(work, rules, &batch, earlier);
+    live.iter()
+        .filter_map(|it| Some((it.key(), landed(&applied, it)?)))
+        .collect()
+}
+
+/// The branch add or move `it` ended under in `applied`; `None` for other ops or one that failed.
+fn landed(applied: &merge::Applied, it: &Item) -> Option<String> {
+    let id = match it.p.op {
+        wire::Op::Add => applied.assigned.get(&it.key())?,
+        wire::Op::Move if !applied.failed.contains_key(&it.key()) => it.p.id.as_ref()?,
+        _ => return None,
+    };
+    Some(applied.store.branch_of(id).to_string())
 }
 
 /// A proposal in a few words for the report.

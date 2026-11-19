@@ -64,13 +64,19 @@ impl W {
         assert_eq!(o.code, 0, "{}", o.stderr);
         std::fs::write(w.fp(), "v1").unwrap();
         let fake = q(&fake());
+        // The fake collectors resolve every reference: a judge may not accept a claim whose
+        // only sources are unresolved (spec §6.4).
+        let resolve = q(&format!(
+            "{}/tests/fixtures/bin/fake-resolve",
+            env!("CARGO_MANIFEST_DIR")
+        ));
         let fp = q(&w.fp().to_string_lossy());
         for (id, kind, table, extra) in [
             (
                 "col",
                 "collector",
                 format!(
-                    "[collector]\nscope = {SCOPE}\nsource_kinds = [\"{{kind}}\"]\nfingerprint = [\"/bin/cat\", \"{{fp}}\"]\ncommand = [{fake}]\n"
+                    "[collector]\nscope = {SCOPE}\nsource_kinds = [\"{{kind}}\"]\nfingerprint = [\"/bin/cat\", \"{{fp}}\"]\ncommand = [{fake}]\nresolve = [{resolve}]\n"
                 ),
                 format!("fp = {fp}\nkind = \"file\"\n"),
             ),
@@ -86,7 +92,7 @@ impl W {
                 "prompted",
                 "collector",
                 format!(
-                    "[collector]\nscope = {SCOPE}\nsource_kinds = [\"{{kind}}\"]\nfingerprint = [\"/bin/cat\", \"{{fp}}\"]\nprompt = \"p.md\"\nrunner = \"runner\"\nmodel = \"fake-model\"\n"
+                    "[collector]\nscope = {SCOPE}\nsource_kinds = [\"{{kind}}\"]\nfingerprint = [\"/bin/cat\", \"{{fp}}\"]\nprompt = \"p.md\"\nresolve = [{resolve}]\nrunner = \"runner\"\nmodel = \"fake-model\"\n"
                 ),
                 format!("fp = {fp}\nkind = \"note\"\n"),
             ),
@@ -1165,6 +1171,13 @@ fn judge_feedback_from_a_call_that_saw_a_withheld_node_does_not_reach_a_disallow
         (theirs["reason"].as_str(), theirs["instruction"].as_str()),
         (Some("fake revise"), Some("fake instruction"))
     );
+    // An add under `layout` shows the judge the nodes there (§6.5 `nodes`), `api` among them;
+    // under `how-it-works`, where `repo` has no node, it shows none of `repo`'s.
+    let adding = |parent: &str| json!({"key": "n", "op": "add", "parent": parent, "title": "Notes", "body": "", "sources": ["note:n.md"], "reason": "noted"});
+    let v = &back(&[&adding("layout")])["n"];
+    assert!(v["reason"].as_str().unwrap().starts_with("withheld"), "{v}");
+    let v = &back(&[&adding("how-it-works")])["n"];
+    assert_eq!(v["reason"], "fake revise", "{v}");
 }
 
 /// The fake `claude` answers with `out` (see tests/fixtures/bin/claude).
@@ -1705,4 +1718,284 @@ fn a_proposal_is_validated_before_its_fields_are_redacted() {
     w.run(&[]);
     assert!(!w.map("layout").contains("redacted"), "{}", w.map("layout"));
     assert!(w.report().contains("rejected"), "{}", w.report());
+}
+
+// ---- Built-in judges (spec §10, §6.5) ----
+
+/// `world` with `repo` adding `a`, the built-in `claude` runner and built-in judge `judge`,
+/// whose fake agent answers `verdicts`.
+fn judged(judge: &str, verdicts: Value) -> W {
+    let w = world(&props(&[add("a", "layout", "Queue")]));
+    agent(&w, "ok", &verdicts);
+    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    w.config(&format!(
+        "{cfg}\n[[plugins]]\nid = \"claude\"\n\n[[plugins]]\nid = \"{judge}\"\nrunner = \"claude\"\n"
+    ));
+    w
+}
+
+fn verdict(key: &str, v: &str, reason: &str) -> Value {
+    let mut j = json!({"key": key, "verdict": v, "reason": reason});
+    if v == "revise" {
+        j["instruction"] = json!("cite the queue's design doc");
+    }
+    json!({"verdicts": [j]})
+}
+
+#[test]
+fn a_builtin_judge_runs_its_embedded_prompt_through_the_runner_and_its_reject_holds() {
+    for judge in ["support", "removal", "duplicate"] {
+        let w = judged(judge, verdict("repo/a", "reject", "no source backs it"));
+        w.run_code(&[], 0);
+        assert!(!w.map("layout").contains("Queue"), "{judge}");
+        assert!(w.report().contains("no source backs it"), "{judge}");
+        let stdin = std::fs::read_to_string(w.root.join("home/agent/claude.stdin.1")).unwrap();
+        let prompt = rrecall::plugin::builtin_prompt(judge, &format!("{judge}.md")).unwrap();
+        assert!(
+            stdin.starts_with(rrecall::wire::PREAMBLE) && stdin.contains(prompt.trim_end()),
+            "{judge}: {stdin}"
+        );
+        assert!(stdin.contains("\"repo/a\""), "{judge}");
+        let lock = w.lock();
+        assert_eq!(lock["plugins"][judge]["plugin"], "builtin", "{judge}");
+    }
+}
+
+#[test]
+fn a_builtin_judge_revise_goes_back_to_the_collector_with_its_instruction() {
+    let w = judged("support", verdict("repo/a", "revise", "vague"));
+    w.run_code(&[], 0);
+    let back = &w.input("repo", 2)["rejections"][0]["verdicts"][0];
+    assert_eq!(back["by"], "support");
+    assert_eq!(back["instruction"], "cite the queue's design doc");
+}
+
+#[test]
+fn a_builtin_judge_that_omits_a_verdict_accepts_nothing() {
+    let w = judged("duplicate", json!({"verdicts": []}));
+    let o = w.run_code(&[], 5);
+    assert!(!w.map("layout").contains("Queue"));
+    assert!(o.stderr.contains("duplicate"), "{}", o.stderr);
+    assert!(w.lock()["collectors"].get("repo").is_none(), "unsettled");
+}
+
+const SYNC: &str = r#"{"id":"sync","parent":"how-it-works","title":"Sync","body":"Nightly.","sources":["file:sync.md"],"order":0}"#;
+
+#[test]
+fn checks_and_judges_get_the_nodes_of_the_branches_their_batch_adds_to() {
+    let w = world(&props(&[add("a", "layout", "Queue")]));
+    w.seed("how-it-works", &[SYNC]);
+    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    w.config(&format!(
+        "{cfg}{}",
+        w.inst("judge", "judge", "scenario = \"all\", out = \"accept\"")
+    ));
+    w.run_code(&[], 0);
+    for inst in ["check", "judge"] {
+        let input = w.input(inst, 1);
+        let ids: Vec<&str> = input["nodes"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{inst}: {input}"))
+            .iter()
+            .map(|n| n["id"].as_str().unwrap())
+            .collect();
+        // Not `sync` (another branch), not the branch `layout` itself, not the new node.
+        assert_eq!(ids, ["api", "auth", "noted", "theirs"], "{inst}");
+        assert_eq!(input["nodes"][0]["title"], "API", "{inst}");
+    }
+}
+
+/// `world` whose `repo` also resolves: it answers `out` to collect and `texts` to resolve.
+fn resolving(out: &str, texts: Value) -> W {
+    let w = world("");
+    let fake = q(&fake());
+    w.plugin(
+        "rcol",
+        "collector",
+        &format!(
+            "[collector]\nscope = {SCOPE}\nsource_kinds = [\"file\"]\nfingerprint = [\"/bin/cat\", \"{{fp}}\"]\ncommand = [{fake}]\nresolve = [{fake}]\n"
+        ),
+        &format!("fp = {}\n", q(&w.fp().to_string_lossy())),
+    );
+    let lines = format!("{out}\n{}", json!({ "texts": texts }));
+    w.config(&format!(
+        "{}{}",
+        w.inst(
+            "repo",
+            "rcol",
+            &format!("scenario = \"seq\", out = {}", q(&lines))
+        ),
+        w.inst("check", "check", "scenario = \"all\", out = \"accept\""),
+    ));
+    w
+}
+
+#[test]
+fn a_judge_may_not_accept_a_claim_whose_only_sources_are_unresolved() {
+    for (texts, accepted) in [
+        (json!({"file:a.md": null}), false),
+        (json!({}), false),
+        (json!({"file:a.md": "The queue."}), true),
+    ] {
+        let w = resolving(&props(&[add("a", "layout", "Queue")]), texts.clone());
+        let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+        // One round: the fake's collect and resolve answers would run out in a second.
+        w.config(&format!(
+            "max_rounds = 1\n{cfg}{}",
+            w.inst("judge", "judge", "scenario = \"all\", out = \"accept\"")
+        ));
+        w.run_code(&[], 0);
+        assert_eq!(w.map("layout").contains("Queue"), accepted, "{texts}");
+        assert_eq!(
+            w.report().contains("only unresolved sources"),
+            !accepted,
+            "{texts}: {}",
+            w.report()
+        );
+    }
+}
+
+#[test]
+fn a_builtin_judge_accept_with_resolved_sources_enters_the_map() {
+    let w = resolving(
+        &props(&[add("a", "layout", "Queue")]),
+        json!({"file:a.md": "The queue."}),
+    );
+    agent(&w, "ok", &verdict("repo/a", "accept", "the source says so"));
+    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    w.config(&format!(
+        "{cfg}\n[[plugins]]\nid = \"claude\"\n\n[[plugins]]\nid = \"support\"\nrunner = \"claude\"\n"
+    ));
+    w.run_code(&[], 0);
+    assert!(w.map("layout").contains("Queue"));
+    let stdin = std::fs::read_to_string(w.root.join("home/agent/claude.stdin.1")).unwrap();
+    assert!(
+        stdin.contains("The queue."),
+        "the resolved text reaches the agent"
+    );
+}
+
+const PARENT: &str = r#"{"id":"parent","parent":"layout","title":"Parent","body":"","sources":["file:p.md"],"order":0}"#;
+const QUEUE: &str = r#"{"id":"queue","parent":"layout","title":"Queue","body":"","sources":["file:q.md"],"order":1}"#;
+
+/// `repo` moves `parent` to `how-it-works` and adds a second Queue under it; `check` answers
+/// `check_out` (verdicts for `repo/m` and `repo/q`), `judge` runs with `judge_params`.
+fn moving(check_out: &str, judge_params: &str) -> W {
+    let w = W::new();
+    w.seed("layout", &[PARENT, QUEUE]);
+    let m = json!({"key": "m", "op": "move", "id": "parent", "parent": "how-it-works", "sources": ["file:p.md"], "reason": "moved"});
+    let a = json!({"key": "q", "op": "add", "parent": "parent", "title": "Queue", "body": "", "sources": ["file:q2.md"], "reason": "found"});
+    w.config(&format!(
+        "max_rounds = 1\n{}{}{}{}",
+        w.inst("repo", "col", &format!("out = {}", q(&props(&[m, a])))),
+        w.inst("check", "check", &format!("out = {}", q(check_out))),
+        w.inst("judge", "judge", judge_params),
+        w.inst("dup", "judge", "scenario = \"all\", out = \"accept\""),
+    ));
+    w
+}
+
+fn verdicts(m: &str, q: &str) -> String {
+    json!({"verdicts": [
+        {"key": "repo/m", "verdict": m, "reason": format!("move {m}")},
+        {"key": "repo/q", "verdict": q, "reason": format!("add {q}")},
+    ]})
+    .to_string()
+}
+
+fn node_ids(input: &Value) -> Vec<String> {
+    input["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn a_judge_sees_the_branch_an_add_lands_in_without_a_move_a_check_rejected() {
+    let w = moving(
+        &verdicts("reject", "accept"),
+        "scenario = \"all\", out = \"accept\"",
+    );
+    w.run_code(&[], 0);
+    // The judges get only the add; it lands in `layout`, next to the Queue it may restate.
+    let input = w.input("dup", 1);
+    assert_eq!(input["proposals"].as_array().unwrap().len(), 1, "{input}");
+    assert_eq!(node_ids(&input), ["parent", "queue"]);
+}
+
+#[test]
+fn an_add_whose_branch_changed_after_it_was_judged_goes_back() {
+    // Both judges see the move and the add in `how-it-works`; `judge` then rejects the move,
+    // which would leave the add in `layout`, where no judge compared it with the nodes there.
+    let w = moving(
+        &verdicts("accept", "accept"),
+        &format!("out = {}", q(&verdicts("reject", "accept"))),
+    );
+    w.run_code(&[], 0);
+    assert!(node_ids(&w.input("dup", 1)).is_empty());
+    assert!(!w.map("layout").contains("queue-2"), "{}", w.map("layout"));
+    assert!(w.report().contains("judged under"), "{}", w.report());
+}
+
+#[test]
+fn an_add_a_judge_saw_without_a_destination_does_not_commit() {
+    let w = W::new();
+    let anchor = r#"{"id":"anchor","parent":"how-it-works","title":"Anchor","body":"","sources":["file:a.md"],"order":0}"#;
+    w.seed("layout", &[PARENT, QUEUE]);
+    w.seed("how-it-works", &[anchor]);
+    let fake = q(&fake());
+    w.plugin(
+        "lcol",
+        "collector",
+        &format!(
+            "[collector]\nscope = [\"layout\"]\nsource_kinds = [\"{{kind}}\"]\nfingerprint = [\"/bin/cat\", \"{{fp}}\"]\ncommand = [{fake}]\nresolve = [{}]\n",
+            q(&format!(
+                "{}/tests/fixtures/bin/fake-resolve",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+        ),
+        &format!(
+            "fp = {}\nkind = \"gh-pr\"\n",
+            q(&w.fp().to_string_lossy())
+        ),
+    );
+    let mp = json!({"key": "mp", "op": "move", "id": "parent", "parent": "anchor", "sources": ["file:p.md"], "reason": "moved"});
+    let ma = json!({"key": "ma", "op": "move", "id": "anchor", "parent": "layout", "sources": ["file:a.md"], "reason": "moved"});
+    let a = json!({"key": "q", "op": "add", "parent": "parent", "title": "Queue", "body": "", "sources": ["gh-pr:o/r#9"], "reason": "found"});
+    let say = |vs: &[(&str, &str)]| {
+        json!({"verdicts": vs.iter().map(|(k, v)| json!({"key": k, "verdict": v, "reason": v})).collect::<Vec<_>>()}).to_string()
+    };
+    w.config(&format!(
+        "max_rounds = 1\n{}{}{}{}{}",
+        w.inst("repo", "col", &format!("out = {}", q(&props(&[mp, ma])))),
+        w.inst("lay", "lcol", &format!("out = {}", q(&props(&[a])))),
+        w.inst(
+            "check",
+            "check",
+            &format!(
+                "out = {}",
+                q(&say(&[
+                    ("repo/mp", "accept"),
+                    ("repo/ma", "reject"),
+                    ("lay/q", "accept")
+                ]))
+            )
+        ),
+        w.inst(
+            "judge",
+            "judge",
+            &format!(
+                "out = {}",
+                q(&say(&[("repo/mp", "reject"), ("lay/q", "accept")]))
+            )
+        ),
+        w.inst("dup", "judge", "scenario = \"all\", out = \"accept\""),
+    ));
+    w.run_code(&[], 0);
+    // Without the anchor move, the parent move takes the add out of `lay`'s scope, so no judge
+    // compared it with `layout`, where it would land once the parent move is rejected.
+    assert_eq!(node_ids(&w.input("dup", 1)), ["anchor"]);
+    assert!(!w.map("layout").contains("queue-2"), "{}", w.map("layout"));
 }
