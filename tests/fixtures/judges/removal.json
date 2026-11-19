@@ -1,0 +1,230 @@
+{
+  "judge": "removal",
+  "about": "removal: a closed issue; an issue still open; a commit that only edits the file; a reversing decision; unresolved evidence; a deleting commit; evidence about something else; an add it leaves to others",
+  "input": {
+    "proposals": [
+      {
+        "key": "github/arm-closed",
+        "proposal": {
+          "key": "arm-closed",
+          "op": "remove",
+          "id": "arm-builds",
+          "sources": [],
+          "evidence": "gh-issue:lanternfish-dev/lanternfish#88",
+          "reason": "issue closed"
+        },
+        "current": {
+          "id": "arm-builds",
+          "parent": "blocked",
+          "title": "ARM builds",
+          "body": "Release builds for ARM64 wait on a self-hosted CI runner (#88).",
+          "sources": [
+            "gh-issue:lanternfish-dev/lanternfish#88"
+          ],
+          "order": 0,
+          "state": "blocked"
+        },
+        "sources": {
+          "gh-issue:lanternfish-dev/lanternfish#88": "ARM64 release builds need a self-hosted runner\nstate: closed (completed) on 2026-10-02\nlast comment: The arm64 runner is live; v0.12 shipped arm64 binaries."
+        }
+      },
+      {
+        "key": "github/arm-open",
+        "proposal": {
+          "key": "arm-open",
+          "op": "remove",
+          "id": "arm-builds",
+          "sources": [],
+          "evidence": "gh-issue:lanternfish-dev/lanternfish#88",
+          "reason": "stale"
+        },
+        "current": {
+          "id": "arm-builds",
+          "parent": "blocked",
+          "title": "ARM builds",
+          "body": "Release builds for ARM64 wait on a self-hosted CI runner (#88).",
+          "sources": [
+            "gh-issue:lanternfish-dev/lanternfish#88"
+          ],
+          "order": 0,
+          "state": "blocked"
+        },
+        "sources": {
+          "gh-issue:lanternfish-dev/lanternfish#88": "ARM64 release builds need a self-hosted runner\nstate: open\nlast comment (2026-10-30): Still waiting for the runner hardware."
+        }
+      },
+      {
+        "key": "repo/dead-rename",
+        "proposal": {
+          "key": "dead-rename",
+          "op": "remove",
+          "id": "dead-feed-detector",
+          "sources": [],
+          "evidence": "commit:lanternfish-dev/lanternfish@9d0e417",
+          "reason": "dead.go changed"
+        },
+        "current": {
+          "id": "dead-feed-detector",
+          "parent": "fetcher",
+          "title": "Dead feed detector",
+          "body": "fetcher/dead.go marks a feed dead after 14 days of errors.",
+          "sources": [
+            "file:fetcher/dead.go#L1-L40@3c1f9a2"
+          ],
+          "order": 3
+        },
+        "sources": {
+          "commit:lanternfish-dev/lanternfish@9d0e417": "fetcher: rename firstErr to FirstErrorAt in dead.go\n\n fetcher/dead.go | 6 +++---"
+        }
+      },
+      {
+        "key": "notes/sqlite-reversed",
+        "proposal": {
+          "key": "sqlite-reversed",
+          "op": "remove",
+          "id": "sqlite-per-user",
+          "sources": [],
+          "evidence": "note:decisions/storage-v2.md",
+          "reason": "decision replaced"
+        },
+        "current": {
+          "id": "sqlite-per-user",
+          "parent": "decisions",
+          "title": "One SQLite file per user",
+          "body": "Each user gets their own SQLite file, so a user's data can be exported and deleted as one file.",
+          "sources": [
+            "note:decisions/storage.md"
+          ],
+          "order": 0,
+          "date": "2025-04-10"
+        },
+        "sources": {
+          "note:decisions/storage-v2.md": "2026-09-14: We move all users into one Postgres database and drop the per-user SQLite files. Export becomes a query per user."
+        }
+      },
+      {
+        "key": "github/arm-unresolved",
+        "proposal": {
+          "key": "arm-unresolved",
+          "op": "remove",
+          "id": "arm-builds",
+          "sources": [],
+          "evidence": "gh-issue:lanternfish-dev/lanternfish#91",
+          "reason": "closed elsewhere"
+        },
+        "current": {
+          "id": "arm-builds",
+          "parent": "blocked",
+          "title": "ARM builds",
+          "body": "Release builds for ARM64 wait on a self-hosted CI runner (#88).",
+          "sources": [
+            "gh-issue:lanternfish-dev/lanternfish#88"
+          ],
+          "order": 0,
+          "state": "blocked"
+        },
+        "sources": {
+          "gh-issue:lanternfish-dev/lanternfish#91": null
+        }
+      },
+      {
+        "key": "repo/settings-deleted",
+        "proposal": {
+          "key": "settings-deleted",
+          "op": "remove",
+          "id": "settings-page",
+          "sources": [],
+          "evidence": "commit:lanternfish-dev/lanternfish@5a7c2b0",
+          "reason": "settings page deleted"
+        },
+        "current": {
+          "id": "settings-page",
+          "parent": "web-client",
+          "title": "Settings page",
+          "body": "web/src/settings/: theme, refresh interval, OPML import and export.",
+          "sources": [
+            "file:web/src/settings/index.svelte#L1-L40@3c1f9a2"
+          ],
+          "order": 3
+        },
+        "sources": {
+          "commit:lanternfish-dev/lanternfish@5a7c2b0": "web: delete web/src/settings/, settings move into the account menu\n\n web/src/settings/index.svelte | 212 ----------"
+        }
+      },
+      {
+        "key": "github/sqlite-billing",
+        "proposal": {
+          "key": "sqlite-billing",
+          "op": "remove",
+          "id": "sqlite-per-user",
+          "sources": [],
+          "evidence": "gh-pr:lanternfish-dev/lanternfish#150",
+          "reason": "storage changed"
+        },
+        "current": {
+          "id": "sqlite-per-user",
+          "parent": "decisions",
+          "title": "One SQLite file per user",
+          "body": "Each user gets their own SQLite file, so a user's data can be exported and deleted as one file.",
+          "sources": [
+            "note:decisions/storage.md"
+          ],
+          "order": 0,
+          "date": "2025-04-10"
+        },
+        "sources": {
+          "gh-pr:lanternfish-dev/lanternfish#150": "Billing: store invoices in the billing service's own Postgres database\n\nThe user databases are not touched."
+        }
+      },
+      {
+        "key": "repo/add-other",
+        "proposal": {
+          "key": "add-other",
+          "op": "add",
+          "parent": "fetcher",
+          "title": "Dead feed detector",
+          "body": "fetcher/dead.go marks a feed dead after 14 days of errors.",
+          "sources": [
+            "file:fetcher/dead.go#L1-L40@3c1f9a2"
+          ],
+          "reason": "found it"
+        },
+        "sources": {
+          "file:fetcher/dead.go#L1-L40@3c1f9a2": "// markDead flags a feed as dead once it has failed for 14 consecutive days.\nfunc markDead(f *Feed, now time.Time) bool {\n\treturn now.Sub(f.FirstErrorAt) >= 14*24*time.Hour\n}"
+        }
+      }
+    ],
+    "nodes": [],
+    "map_ids": [
+      "arm-builds",
+      "blocked",
+      "connection-pool",
+      "dead-feed-detector",
+      "decisions",
+      "done",
+      "fetcher",
+      "how-it-works",
+      "layout",
+      "migrations",
+      "people",
+      "politeness",
+      "scheduler",
+      "settings-page",
+      "sqlite-per-user",
+      "storage-layer",
+      "sync-server",
+      "web-client"
+    ],
+    "params": {}
+  },
+  "expected": {
+    "github/arm-closed": "accept",
+    "github/arm-open": "reject",
+    "repo/dead-rename": "reject",
+    "notes/sqlite-reversed": "accept",
+    "github/arm-unresolved": "reject",
+    "repo/settings-deleted": "accept",
+    "github/sqlite-billing": "reject",
+    "repo/add-other": "accept"
+  }
+}

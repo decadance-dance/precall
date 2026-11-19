@@ -1,0 +1,211 @@
+{
+  "judge": "support",
+  "about": "support: an add its source backs; a wrong number; a fact the source lacks; an unresolved source; an update that only rewords; a real update; an add_source that backs its node; a move it leaves to others",
+  "input": {
+    "proposals": [
+      {
+        "key": "repo/dead-feed",
+        "proposal": {
+          "key": "dead-feed",
+          "op": "add",
+          "parent": "fetcher",
+          "title": "Dead feed detector",
+          "body": "fetcher/dead.go marks a feed dead once it has failed for 14 consecutive days.",
+          "sources": [
+            "file:fetcher/dead.go#L1-L40@3c1f9a2"
+          ],
+          "reason": "found the dead feed check"
+        },
+        "sources": {
+          "file:fetcher/dead.go#L1-L40@3c1f9a2": "// markDead flags a feed as dead once it has failed for 14 consecutive days.\nfunc markDead(f *Feed, now time.Time) bool {\n\treturn now.Sub(f.FirstErrorAt) >= 14*24*time.Hour\n}"
+        }
+      },
+      {
+        "key": "repo/dead-feed-7",
+        "proposal": {
+          "key": "dead-feed-7",
+          "op": "add",
+          "parent": "fetcher",
+          "title": "Dead feeds",
+          "body": "A feed is marked dead after 7 days of errors.",
+          "sources": [
+            "file:fetcher/dead.go#L1-L40@3c1f9a2"
+          ],
+          "reason": "found the dead feed check"
+        },
+        "sources": {
+          "file:fetcher/dead.go#L1-L40@3c1f9a2": "// markDead flags a feed as dead once it has failed for 14 consecutive days.\nfunc markDead(f *Feed, now time.Time) bool {\n\treturn now.Sub(f.FirstErrorAt) >= 14*24*time.Hour\n}"
+        }
+      },
+      {
+        "key": "repo/backoff",
+        "proposal": {
+          "key": "backoff",
+          "op": "add",
+          "parent": "fetcher",
+          "title": "Retry backoff",
+          "body": "A failed poll is retried with exponential backoff, starting at 30 seconds.",
+          "sources": [
+            "file:fetcher/fetch.go#L1-L40@3c1f9a2"
+          ],
+          "reason": "found the retry logic"
+        },
+        "sources": {
+          "file:fetcher/fetch.go#L1-L40@3c1f9a2": "// fetchOnce polls one feed. A failed poll is logged and retried at the next scheduled slot.\nfunc fetchOnce(ctx context.Context, f *Feed) error {"
+        }
+      },
+      {
+        "key": "repo/unresolved",
+        "proposal": {
+          "key": "unresolved",
+          "op": "add",
+          "parent": "fetcher",
+          "title": "Proxy support",
+          "body": "The fetcher can poll through an HTTP proxy set in LF_PROXY.",
+          "sources": [
+            "file:fetcher/proxy.go#L1-L40@3c1f9a2"
+          ],
+          "reason": "found proxy support"
+        },
+        "sources": {
+          "file:fetcher/proxy.go#L1-L40@3c1f9a2": null
+        }
+      },
+      {
+        "key": "repo/pool-reword",
+        "proposal": {
+          "key": "pool-reword",
+          "op": "update",
+          "id": "connection-pool",
+          "body": "Each worker thread keeps no more than four database files open at once.",
+          "sources": [
+            "file:server/src/db/pool.rs#L1-L40@3c1f9a2"
+          ],
+          "reason": "clearer wording"
+        },
+        "current": {
+          "id": "connection-pool",
+          "parent": "storage-layer",
+          "title": "Connection pool",
+          "body": "At most 4 open files per worker thread.",
+          "sources": [
+            "file:server/src/db/pool.rs#L1-L40@3c1f9a2"
+          ],
+          "order": 0
+        },
+        "sources": {
+          "file:server/src/db/pool.rs#L1-L40@3c1f9a2": "/// Each worker thread keeps at most 4 user databases open; the least recently used closes first.\npub const MAX_OPEN_PER_THREAD: usize = 4;"
+        }
+      },
+      {
+        "key": "repo/migrate-check",
+        "proposal": {
+          "key": "migrate-check",
+          "op": "update",
+          "id": "migrations",
+          "body": "server/migrations/: numbered SQL files applied at startup; `lf migrate --check` fails CI when one is pending (since v0.9).",
+          "sources": [
+            "file:server/src/db/migrate.rs#L1-L40@3c1f9a2"
+          ],
+          "reason": "CI now checks pending migrations"
+        },
+        "current": {
+          "id": "migrations",
+          "parent": "sync-server",
+          "title": "Migrations",
+          "body": "server/migrations/: numbered SQL files applied at startup.",
+          "sources": [
+            "file:server/src/db/migrate.rs#L1-L40@3c1f9a2"
+          ],
+          "order": 2
+        },
+        "sources": {
+          "file:server/src/db/migrate.rs#L1-L40@3c1f9a2": "/// Applies numbered migrations at startup. `lf migrate --check` exits 1 when one is pending; CI runs it on every PR since v0.9.\npub fn apply_pending(db: &Db) -> Result<()> {"
+        }
+      },
+      {
+        "key": "github/retry-after",
+        "proposal": {
+          "key": "retry-after",
+          "op": "add_source",
+          "id": "politeness",
+          "sources": [
+            "gh-pr:lanternfish-dev/lanternfish#141"
+          ],
+          "reason": "the PR that added Retry-After"
+        },
+        "current": {
+          "id": "politeness",
+          "parent": "fetcher",
+          "title": "Politeness",
+          "body": "fetcher/http.go honours ETag, Last-Modified and Retry-After.",
+          "sources": [
+            "file:fetcher/http.go#L1-L40@3c1f9a2"
+          ],
+          "order": 2
+        },
+        "sources": {
+          "gh-pr:lanternfish-dev/lanternfish#141": "Politeness: honour Retry-After on 429 and 503\n\nThe fetcher now waits the number of seconds a 429 or 503 response asks for in Retry-After before polling that feed again."
+        }
+      },
+      {
+        "key": "repo/move-pool",
+        "proposal": {
+          "key": "move-pool",
+          "op": "move",
+          "id": "connection-pool",
+          "parent": "sync-server",
+          "sources": [
+            "file:server/src/db/pool.rs#L1-L40@3c1f9a2"
+          ],
+          "reason": "pool moved up"
+        },
+        "current": {
+          "id": "connection-pool",
+          "parent": "storage-layer",
+          "title": "Connection pool",
+          "body": "At most 4 open files per worker thread.",
+          "sources": [
+            "file:server/src/db/pool.rs#L1-L40@3c1f9a2"
+          ],
+          "order": 0
+        },
+        "sources": {
+          "file:server/src/db/pool.rs#L1-L40@3c1f9a2": "/// Each worker thread keeps at most 4 user databases open; the least recently used closes first.\npub const MAX_OPEN_PER_THREAD: usize = 4;"
+        }
+      }
+    ],
+    "nodes": [],
+    "map_ids": [
+      "arm-builds",
+      "blocked",
+      "connection-pool",
+      "dead-feed-detector",
+      "decisions",
+      "done",
+      "fetcher",
+      "how-it-works",
+      "layout",
+      "migrations",
+      "people",
+      "politeness",
+      "scheduler",
+      "settings-page",
+      "sqlite-per-user",
+      "storage-layer",
+      "sync-server",
+      "web-client"
+    ],
+    "params": {}
+  },
+  "expected": {
+    "repo/dead-feed": "accept",
+    "repo/dead-feed-7": "reject",
+    "repo/backoff": "reject",
+    "repo/unresolved": "reject",
+    "repo/pool-reword": "reject",
+    "repo/migrate-check": "accept",
+    "github/retry-after": "accept",
+    "repo/move-pool": "accept"
+  }
+}

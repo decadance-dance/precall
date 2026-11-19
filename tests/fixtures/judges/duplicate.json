@@ -1,0 +1,228 @@
+{
+  "judge": "duplicate",
+  "about": "duplicate: a reworded existing node; an existing node under another parent; a new component; two adds of one fact (the first key wins); a related but different fact; an update it leaves to others",
+  "input": {
+    "proposals": [
+      {
+        "key": "repo/dead-detection",
+        "proposal": {
+          "key": "dead-detection",
+          "op": "add",
+          "parent": "fetcher",
+          "title": "Dead-feed detection",
+          "body": "After two weeks of failed polls the fetcher flags a feed as dead (fetcher/dead.go).",
+          "sources": [
+            "file:fetcher/dead.go#L1-L40@3c1f9a2"
+          ],
+          "reason": "found Dead-feed detection"
+        },
+        "sources": {
+          "file:fetcher/dead.go#L1-L40@3c1f9a2": "// markDead flags a feed as dead once it has failed for 14 consecutive days.\nfunc markDead(f *Feed, now time.Time) bool {\n\treturn now.Sub(f.FirstErrorAt) >= 14*24*time.Hour\n}"
+        }
+      },
+      {
+        "key": "repo/poll-spread",
+        "proposal": {
+          "key": "poll-spread",
+          "op": "add",
+          "parent": "layout",
+          "title": "Poll scheduling",
+          "body": "Polls are spread across each hour by a hash of the feed (fetcher/schedule.go).",
+          "sources": [
+            "file:fetcher/schedule.go#L1-L40@3c1f9a2"
+          ],
+          "reason": "found Poll scheduling"
+        },
+        "sources": {
+          "file:fetcher/schedule.go#L1-L40@3c1f9a2": "// spread assigns each feed a minute of the hour from its hash."
+        }
+      },
+      {
+        "key": "repo/favicons",
+        "proposal": {
+          "key": "favicons",
+          "op": "add",
+          "parent": "fetcher",
+          "title": "Favicons",
+          "body": "fetcher/favicon.go fetches each site's icon weekly and caches it under icons/.",
+          "sources": [
+            "file:fetcher/favicon.go#L1-L40@3c1f9a2"
+          ],
+          "reason": "found Favicons"
+        },
+        "sources": {
+          "file:fetcher/favicon.go#L1-L40@3c1f9a2": "// favicon.go fetches each feed site's icon once a week and caches it under icons/."
+        }
+      },
+      {
+        "key": "notes/image-proxy",
+        "proposal": {
+          "key": "image-proxy",
+          "op": "add",
+          "parent": "web-client",
+          "title": "Image proxy",
+          "body": "The sync server proxies article images through /v1/img so readers do not leak their IP to feed hosts.",
+          "sources": [
+            "note:web/images.md"
+          ],
+          "reason": "found Image proxy"
+        },
+        "sources": {
+          "note:web/images.md": "Images go through /v1/img on the sync server, so the reader's IP never reaches the feed host."
+        }
+      },
+      {
+        "key": "repo/image-proxy",
+        "proposal": {
+          "key": "image-proxy",
+          "op": "add",
+          "parent": "web-client",
+          "title": "Images via the server",
+          "body": "Article images load through the sync server's /v1/img route, hiding the reader's IP from feed hosts.",
+          "sources": [
+            "file:server/src/routes/img.rs#L1-L40@3c1f9a2"
+          ],
+          "reason": "found Images via the server"
+        },
+        "sources": {
+          "file:server/src/routes/img.rs#L1-L40@3c1f9a2": "/// /v1/img proxies article images so feed hosts never see the reader's IP."
+        }
+      },
+      {
+        "key": "repo/dead-revival",
+        "proposal": {
+          "key": "dead-revival",
+          "op": "add",
+          "parent": "fetcher",
+          "title": "Dead feed revival",
+          "body": "fetcher/dead.go retries a dead feed once a week and revives it when a poll succeeds.",
+          "sources": [
+            "file:fetcher/dead.go#L41-L70@3c1f9a2"
+          ],
+          "reason": "found Dead feed revival"
+        },
+        "sources": {
+          "file:fetcher/dead.go#L41-L70@3c1f9a2": "// reviveWeekly polls dead feeds once a week; a success clears the dead flag."
+        }
+      },
+      {
+        "key": "repo/sched-update",
+        "proposal": {
+          "key": "sched-update",
+          "op": "update",
+          "id": "scheduler",
+          "body": "fetcher/schedule.go spreads polls over the hour by feed hash; busy feeds poll every 15 minutes.",
+          "sources": [
+            "file:fetcher/schedule.go#L1-L40@3c1f9a2"
+          ],
+          "reason": "busy feeds"
+        },
+        "current": {
+          "id": "scheduler",
+          "parent": "fetcher",
+          "title": "Scheduler",
+          "body": "fetcher/schedule.go spreads polls over the hour by feed hash.",
+          "sources": [
+            "file:fetcher/schedule.go#L1-L40@3c1f9a2"
+          ],
+          "order": 0
+        },
+        "sources": {
+          "file:fetcher/schedule.go#L1-L40@3c1f9a2": "// Busy feeds (more than 20 items a day) poll every 15 minutes."
+        }
+      }
+    ],
+    "nodes": [
+      {
+        "id": "fetcher",
+        "parent": "layout",
+        "title": "Fetcher",
+        "body": "Go worker under fetcher/ that polls feeds and writes new items to the queue.",
+        "sources": [
+          "file:fetcher/main.go#L1-L40@3c1f9a2"
+        ],
+        "order": 1
+      },
+      {
+        "id": "web-client",
+        "parent": "layout",
+        "title": "Web client",
+        "body": "Svelte app under web/ served as static files by the sync server.",
+        "sources": [
+          "file:web/package.json#L1-L40@3c1f9a2"
+        ],
+        "order": 2
+      },
+      {
+        "id": "scheduler",
+        "parent": "fetcher",
+        "title": "Scheduler",
+        "body": "fetcher/schedule.go spreads polls over the hour by feed hash.",
+        "sources": [
+          "file:fetcher/schedule.go#L1-L40@3c1f9a2"
+        ],
+        "order": 0
+      },
+      {
+        "id": "politeness",
+        "parent": "fetcher",
+        "title": "Politeness",
+        "body": "fetcher/http.go honours ETag, Last-Modified and Retry-After.",
+        "sources": [
+          "file:fetcher/http.go#L1-L40@3c1f9a2"
+        ],
+        "order": 2
+      },
+      {
+        "id": "dead-feed-detector",
+        "parent": "fetcher",
+        "title": "Dead feed detector",
+        "body": "fetcher/dead.go marks a feed dead after 14 days of errors.",
+        "sources": [
+          "file:fetcher/dead.go#L1-L40@3c1f9a2"
+        ],
+        "order": 3
+      },
+      {
+        "id": "settings-page",
+        "parent": "web-client",
+        "title": "Settings page",
+        "body": "web/src/settings/: theme, refresh interval, OPML import and export.",
+        "sources": [
+          "file:web/src/settings/index.svelte#L1-L40@3c1f9a2"
+        ],
+        "order": 3
+      }
+    ],
+    "map_ids": [
+      "arm-builds",
+      "blocked",
+      "connection-pool",
+      "dead-feed-detector",
+      "decisions",
+      "done",
+      "fetcher",
+      "how-it-works",
+      "layout",
+      "migrations",
+      "people",
+      "politeness",
+      "scheduler",
+      "settings-page",
+      "sqlite-per-user",
+      "storage-layer",
+      "sync-server",
+      "web-client"
+    ],
+    "params": {}
+  },
+  "expected": {
+    "repo/dead-detection": "reject",
+    "repo/poll-spread": "reject",
+    "repo/favicons": "accept",
+    "notes/image-proxy": "accept",
+    "repo/image-proxy": "reject",
+    "repo/dead-revival": "accept",
+    "repo/sched-update": "accept"
+  }
+}
