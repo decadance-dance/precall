@@ -199,11 +199,12 @@ pub fn load_manifest(dir: &Path) -> Result<Manifest> {
     }
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    parse_manifest(&text, dir, &path.display().to_string())
+    parse_manifest(&text, Some(dir), &path.display().to_string())
 }
 
-/// Parses and checks manifest `text`; `origin` names where it came from in errors.
-fn parse_manifest(text: &str, dir: &Path, origin: &str) -> Result<Manifest> {
+/// Parses and checks manifest `text`; `origin` names where it came from in errors. `dir` is the
+/// plugin directory, `None` for a built-in, whose prompts are inside the binary.
+fn parse_manifest(text: &str, dir: Option<&Path>, origin: &str) -> Result<Manifest> {
     let raw: RawManifest =
         toml::from_str(text).with_context(|| format!("{origin} does not parse"))?;
     let id = raw.id.clone();
@@ -225,11 +226,8 @@ pub fn builtin() -> Result<BTreeMap<String, Plugin>> {
         .context("the rrecall binary has no directory")?
         .to_path_buf();
     let mut found = BTreeMap::new();
-    for text in crate::checks::MANIFESTS
-        .iter()
-        .chain(crate::runner::MANIFESTS.iter())
-    {
-        let mut manifest = parse_manifest(text, &dir, "built in")?;
+    for text in builtin_manifests() {
+        let mut manifest = parse_manifest(text, None, "built in")?;
         match &mut manifest.spec {
             Spec::Check(c) | Spec::Runner(c) => c.command[0] = exe_text.to_string(),
             _ => {}
@@ -246,7 +244,34 @@ pub fn builtin() -> Result<BTreeMap<String, Plugin>> {
     Ok(found)
 }
 
-fn check_manifest(raw: RawManifest, dir: &Path) -> Result<Manifest, String> {
+/// The manifests of the plugins inside the binary.
+pub fn builtin_manifests() -> impl Iterator<Item = &'static str> {
+    crate::checks::MANIFESTS
+        .into_iter()
+        .chain(crate::runner::MANIFESTS)
+        .chain(crate::judges::MANIFESTS)
+}
+
+/// The prompt files of the plugins inside the binary, as (plugin id, file name, text): a
+/// built-in has no directory, so its prompts are compiled in (spec §6.1, §6.2).
+fn builtin_prompts() -> impl Iterator<Item = (&'static str, &'static str, &'static str)> {
+    crate::judges::PROMPTS.into_iter()
+}
+
+/// The text of built-in plugin `id`'s prompt file `file`.
+pub fn builtin_prompt(id: &str, file: &str) -> Option<&'static str> {
+    builtin_prompts()
+        .find(|(i, f, _)| *i == id && *f == file)
+        .map(|(_, _, text)| text)
+}
+
+fn check_manifest(raw: RawManifest, dir: Option<&Path>) -> Result<Manifest, String> {
+    let prompt_file = |file: &str| match dir {
+        Some(dir) => check_file(dir, file),
+        None => builtin_prompt(&raw.id, file)
+            .map(|_| ())
+            .ok_or(format!("`{file}` is not a prompt built into rrecall")),
+    };
     if !is_slug(&raw.id) {
         return Err(format!("id `{}` is not kebab-case", raw.id));
     }
@@ -353,7 +378,7 @@ fn check_manifest(raw: RawManifest, dir: &Path) -> Result<Manifest, String> {
             }
             for (f, file) in [("prompt", &c.prompt), ("resolve_prompt", &c.resolve_prompt)] {
                 if let Some(file) = file {
-                    check_file(dir, file).map_err(|e| format!("[{t}] {f}: {e}"))?;
+                    prompt_file(file).map_err(|e| format!("[{t}] {f}: {e}"))?;
                 }
             }
             if c.prompt.is_none() && c.resolve_prompt.is_none() {
@@ -369,7 +394,7 @@ fn check_manifest(raw: RawManifest, dir: &Path) -> Result<Manifest, String> {
                 j.prompt.is_some(),
             )?;
             match &j.prompt {
-                Some(file) => check_file(dir, file).map_err(|e| format!("[{t}] prompt: {e}"))?,
+                Some(file) => prompt_file(file).map_err(|e| format!("[{t}] prompt: {e}"))?,
                 None => only_with_prompt(t, &j.runner, &j.model)?,
             }
         }
@@ -614,22 +639,28 @@ pub fn places(
 }
 
 /// The content hash the lock records for `plugin` (spec §4.2, §6.7): a built-in has no
-/// directory of its own, so its hash covers the rrecall version and its manifest.
+/// directory of its own, so its hash covers the rrecall version, its manifest and its prompts.
 pub fn plugin_hash(plugin: &Plugin) -> Result<String> {
     use sha2::{Digest, Sha256};
     if !plugin.builtin {
         return content_hash(&plugin.dir);
     }
+    let id = &plugin.manifest.id;
     let mut text = None;
-    for t in crate::checks::MANIFESTS {
-        if parse_manifest(t, &plugin.dir, "built in")?.id == plugin.manifest.id {
+    for t in builtin_manifests() {
+        if &parse_manifest(t, None, "built in")?.id == id {
             text = Some(t);
         }
     }
-    let text = text.with_context(|| format!("no built-in plugin `{}`", plugin.manifest.id))?;
+    let text = text.with_context(|| format!("no built-in plugin `{id}`"))?;
     let mut h = Sha256::new();
     h.update(format!("rrecall {}\0", env!("CARGO_PKG_VERSION")));
     h.update(text);
+    let mut prompts: Vec<_> = builtin_prompts().filter(|(i, _, _)| i == id).collect();
+    prompts.sort();
+    for (_, file, prompt) in prompts {
+        h.update(format!("\0{file}\0{prompt}"));
+    }
     let hex: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
     Ok(format!("sha256:{hex}"))
 }
@@ -1512,6 +1543,50 @@ repo = ""
             load_with(&store, &UserConfig::default(), &user)
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn builtin_judges_are_declarative_with_embedded_prompts_their_hash_covers() {
+        let plugins = builtin().unwrap();
+        for id in ["support", "removal", "duplicate"] {
+            let p = &plugins[id];
+            assert!(p.builtin, "{id}");
+            let Spec::Judge(j) = &p.manifest.spec else {
+                panic!("{id}: not a judge")
+            };
+            // No runner: the user config's default applies (spec §6.8).
+            assert!(j.command.is_none() && j.runner.is_none(), "{id}");
+            let file = j.prompt.as_deref().unwrap();
+            assert!(
+                builtin_prompt(id, file).is_some_and(|t| !t.trim().is_empty()),
+                "{id}"
+            );
+            assert!(!p.dir.join(file).exists(), "{id}: the prompt is not a file");
+        }
+        assert_eq!(builtin_prompt("support", "removal.md"), None);
+        // The hash covers the embedded prompt, not only the version and the manifest.
+        use sha2::{Digest, Sha256};
+        let manifest = builtin_manifests()
+            .find(|t| t.starts_with("id = \"support\""))
+            .unwrap();
+        let mut h = Sha256::new();
+        h.update(format!("rrecall {}\0", env!("CARGO_PKG_VERSION")));
+        h.update(manifest);
+        let without: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        let hash = plugin_hash(&plugins["support"]).unwrap();
+        assert!(hash.starts_with("sha256:") && hash != format!("sha256:{without}"));
+        // A check has no prompt, so its hash stays version and manifest.
+        let manifest = builtin_manifests()
+            .find(|t| t.starts_with("id = \"secrets\""))
+            .unwrap();
+        let mut h = Sha256::new();
+        h.update(format!("rrecall {}\0", env!("CARGO_PKG_VERSION")));
+        h.update(manifest);
+        let hex: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            plugin_hash(&plugins["secrets"]).unwrap(),
+            format!("sha256:{hex}")
         );
     }
 

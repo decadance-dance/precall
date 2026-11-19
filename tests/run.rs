@@ -1706,3 +1706,62 @@ fn a_proposal_is_validated_before_its_fields_are_redacted() {
     assert!(!w.map("layout").contains("redacted"), "{}", w.map("layout"));
     assert!(w.report().contains("rejected"), "{}", w.report());
 }
+
+// ---- Built-in judges (spec §10, §6.5) ----
+
+/// `world` with `repo` adding `a`, the built-in `claude` runner and built-in judge `judge`,
+/// whose fake agent answers `verdicts`.
+fn judged(judge: &str, verdicts: Value) -> W {
+    let w = world(&props(&[add("a", "layout", "Queue")]));
+    agent(&w, "ok", &verdicts);
+    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    w.config(&format!(
+        "{cfg}\n[[plugins]]\nid = \"claude\"\n\n[[plugins]]\nid = \"{judge}\"\nrunner = \"claude\"\n"
+    ));
+    w
+}
+
+fn verdict(key: &str, v: &str, reason: &str) -> Value {
+    let mut j = json!({"key": key, "verdict": v, "reason": reason});
+    if v == "revise" {
+        j["instruction"] = json!("cite the queue's design doc");
+    }
+    json!({"verdicts": [j]})
+}
+
+#[test]
+fn a_builtin_judge_runs_its_embedded_prompt_through_the_runner_and_its_reject_holds() {
+    for judge in ["support", "removal", "duplicate"] {
+        let w = judged(judge, verdict("repo/a", "reject", "no source backs it"));
+        w.run_code(&[], 0);
+        assert!(!w.map("layout").contains("Queue"), "{judge}");
+        assert!(w.report().contains("no source backs it"), "{judge}");
+        let stdin = std::fs::read_to_string(w.root.join("home/agent/claude.stdin.1")).unwrap();
+        let prompt = rrecall::plugin::builtin_prompt(judge, &format!("{judge}.md")).unwrap();
+        assert!(
+            stdin.starts_with(rrecall::wire::PREAMBLE) && stdin.contains(prompt.trim_end()),
+            "{judge}: {stdin}"
+        );
+        assert!(stdin.contains("\"repo/a\""), "{judge}");
+        let lock = w.lock();
+        assert_eq!(lock["plugins"][judge]["plugin"], "builtin", "{judge}");
+    }
+}
+
+#[test]
+fn a_builtin_judge_revise_goes_back_to_the_collector_with_its_instruction() {
+    let w = judged("support", verdict("repo/a", "revise", "vague"));
+    w.run_code(&[], 0);
+    let back = &w.input("repo", 2)["rejections"][0]["verdicts"][0];
+    assert_eq!(back["by"], "support");
+    assert_eq!(back["instruction"], "cite the queue's design doc");
+}
+
+#[test]
+fn a_builtin_judge_that_omits_a_verdict_accepts_nothing() {
+    let w = judged("duplicate", json!({"verdicts": []}));
+    let o = w.run_code(&[], 5);
+    assert!(!w.map("layout").contains("Queue"));
+    assert!(o.stderr.contains("duplicate"), "{}", o.stderr);
+    assert!(w.lock()["collectors"].get("repo").is_none(), "unsettled");
+}

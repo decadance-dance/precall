@@ -905,9 +905,15 @@ impl Run {
         let Spec::Runner(spec) = &runner.plugin.manifest.spec else {
             return Err(CallFail::Error(format!("`{}` is not a runner", runner.id)));
         };
-        let path = caller.plugin.dir.join(prompt);
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("plugin `{}`: reading {}", caller.id, path.display()))?;
+        let text = if caller.plugin.builtin {
+            crate::plugin::builtin_prompt(&caller.plugin.manifest.id, prompt)
+                .with_context(|| format!("plugin `{}`: no built-in prompt `{prompt}`", caller.id))?
+                .to_string()
+        } else {
+            let path = caller.plugin.dir.join(prompt);
+            std::fs::read_to_string(&path)
+                .with_context(|| format!("plugin `{}`: reading {}", caller.id, path.display()))?
+        };
         self.budget.reserve()?;
         let mut r = runner.clone();
         r.timeout = caller.timeout;

@@ -3,6 +3,7 @@ pub mod commands;
 pub mod config;
 pub mod error;
 pub mod history;
+pub mod judges;
 pub mod lock;
 pub mod merge;
 pub mod node;
