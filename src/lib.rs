@@ -7,6 +7,7 @@ pub mod git_history;
 pub mod github;
 pub mod glob;
 pub mod history;
+pub mod judges;
 pub mod lock;
 pub mod merge;
 pub mod node;

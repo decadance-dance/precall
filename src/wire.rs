@@ -141,6 +141,9 @@ pub struct ResolveInput {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct JudgeInput {
     pub proposals: Vec<JudgeItem>,
+    /// The current nodes of the branches the batch's adds and moves land in.
+    #[serde(default)]
+    pub nodes: Vec<Node>,
     pub map_ids: Vec<String>,
     pub params: Params,
 }
@@ -961,6 +964,7 @@ mod tests {
                 current: None,
                 sources: None,
             }],
+            nodes: Vec::new(),
             map_ids: vec!["layout".into()],
             params: Params::new(),
         };

@@ -1,0 +1,12 @@
+#!/bin/sh
+# A fake `resolve` entrypoint for tests (spec §6.4): every reference it is asked for reads
+# "Text of <ref>." The references in the tests hold no comma or quote.
+refs=$(sed 's/^{"refs":\[//; s/\]}$//')
+printf '{"texts":{'
+sep=
+IFS=,
+for r in $refs; do
+    printf '%s%s:"Text of %s."' "$sep" "$r" "$(printf '%s' "$r" | tr -d '"')"
+    sep=,
+done
+printf '}}'
