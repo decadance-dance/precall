@@ -1271,3 +1271,75 @@ fn malformed_collector_output_names_the_plugin_and_the_item() {
         "{r}"
     );
 }
+
+// ---- Credentials a plugin prints (spec §6.3) ----
+
+#[test]
+fn a_credential_a_plugin_prints_stays_out_of_the_run_dir_and_the_commit_message() {
+    // Built from parts, so this file holds none whole.
+    let tok = ["gh", "p_", "Zq3vK9mW2xR7tY5pL8nB4cD6fG1hJ0kAa2Ss"].concat();
+    let pw = ["Xk9mQ2vR7t", "Y5pL8nB4cD"].concat();
+    let mut leaky = add(&tok, "layout", "Queue");
+    leaky["body"] = json!(format!("DB_PASSWORD={pw}"));
+    let w = W::new();
+    w.seed("layout", &[API]);
+    w.config(&format!(
+        "{}{}\n[[plugins]]\nid = \"secrets\"\n{}",
+        w.inst(
+            "repo",
+            "col",
+            &format!(
+                "scenario = \"leak\", out = {}",
+                q(&props(&[leaky, add("b", "layout", "Cache")]))
+            )
+        ),
+        w.inst(
+            "github",
+            "col",
+            &format!(
+                "kind = \"gh-pr\", scenario = \"leak-crash\", out = {}",
+                q(&format!("login failed with {tok}"))
+            )
+        ),
+        w.inst("check", "check", "scenario = \"all\", out = \"accept\""),
+    ));
+    w.run_code(&[], 5);
+    assert!(
+        w.map("layout").contains("Cache"),
+        "the clean proposal lands"
+    );
+    let report = w.report();
+    assert!(
+        report.contains("secrets reject") && report.contains("[redacted:github-token]"),
+        "{report}"
+    );
+    let runs = w.store().join("runs");
+    let run = std::fs::read_dir(&runs)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let mut kept = vec![("commit message".to_string(), w.message())];
+    for f in std::fs::read_dir(&run).unwrap() {
+        let f = f.unwrap().path();
+        kept.push((
+            f.display().to_string(),
+            std::fs::read_to_string(&f).unwrap(),
+        ));
+    }
+    let collected = run.join("repo.collect.stdout");
+    assert!(
+        std::fs::read_to_string(&collected)
+            .unwrap()
+            .contains("DB_PASSWORD=[redacted:high-entropy-assignment]"),
+        "the log is kept, redacted"
+    );
+    assert!(kept.len() > 8, "{kept:?}");
+    for (name, text) in kept {
+        assert!(
+            !text.contains(&tok) && !text.contains(&pw),
+            "{name} holds a credential"
+        );
+    }
+}

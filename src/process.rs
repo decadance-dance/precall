@@ -2,6 +2,7 @@
 
 use crate::error;
 use crate::plugin::{Instance, Spec};
+use crate::secrets;
 use crate::wire::{self, Event, HookInput};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
@@ -28,9 +29,9 @@ const MAX_STDOUT: u64 = 64 << 20;
 
 /// Runs `template` (an argv of `inst`'s manifest) as a child process (spec §6.3): in the plugin
 /// directory, never through a shell, `input` as JSON on stdin, the `RRECALL_*` environment, and
-/// killed with everything it started at the instance's timeout. stdout and stderr go to
-/// `<run_dir>/<instance>.<entry>.stdout|stderr` (a later call with the same `entry` replaces
-/// them). Returns stdout of a run that exited 0.
+/// killed with everything it started at the instance's timeout. stdout and stderr are kept,
+/// redacted, as `<run_dir>/<instance>.<entry>.stdout|stderr` (a later call with the same
+/// `entry` replaces them). Returns stdout of a run that exited 0, as the plugin printed it.
 pub fn call(
     ctx: &Ctx,
     inst: &Instance,
@@ -39,24 +40,22 @@ pub fn call(
     input: &impl Serialize,
 ) -> Result<String> {
     run(ctx, inst, entry, template, input)
-        .and_then(|out| {
-            let bytes =
-                std::fs::read(&out).with_context(|| format!("reading {}", out.display()))?;
-            String::from_utf8(bytes).map_err(|_| anyhow!("output is not UTF-8"))
-        })
+        .and_then(|out| String::from_utf8(out).map_err(|_| anyhow!("output is not UTF-8")))
         .with_context(|| format!("plugin `{}` ({entry})", inst.id))
 }
 
-/// Runs the process and returns the path of its stdout, without reading it.
+/// Runs the process and returns its stdout. The child writes to files that have no name
+/// while it runs, so a credential it prints never sits in the run dir as printed, not even
+/// when rrecall dies; once it ends, only the redacted copies are written under the log names.
 fn run(
     ctx: &Ctx,
     inst: &Instance,
     entry: &str,
     template: &[String],
     input: &impl Serialize,
-) -> Result<PathBuf> {
+) -> Result<Vec<u8>> {
     let argv = inst.argv(template);
-    let (program, args) = argv.split_first().context("empty argv")?;
+    let program = argv.first().context("empty argv")?;
     let cwd = std::env::current_dir().context("reading the working directory")?;
     let path_var = std::env::var_os("PATH").unwrap_or_default();
     let path = resolve_program(program, &inst.plugin.dir, &path_var, &cwd)?;
@@ -67,17 +66,44 @@ fn run(
         .with_context(|| format!("creating {}", ctx.run_dir.display()))?;
     let log = |ext| ctx.run_dir.join(format!("{}.{entry}.{ext}", inst.id));
     let (out_path, err_path) = (log("stdout"), log("stderr"));
-    let mut cmd = Command::new(&path);
-    cmd.arg0(program)
-        .args(args)
+    let (mut out, mut err) = (unnamed(&out_path)?, unnamed(&err_path)?);
+    let status = command(ctx, inst, &argv, &path, &out, &err)
+        .and_then(|mut cmd| wait(&mut cmd, program, stdin, inst.timeout));
+    let (stdout, _) = keep(&mut out, &out_path)?;
+    let (_, stderr) = keep(&mut err, &err_path)?;
+    let status = status.map_err(|e| anyhow!("{e:#}; stderr in {}", err_path.display()))?;
+    if !status.success() {
+        let last = stderr
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("");
+        bail!("{status}: {last} (stderr in {})", err_path.display());
+    }
+    let size = out.metadata()?.len();
+    if size > MAX_STDOUT {
+        bail!("printed {size} bytes, more than {MAX_STDOUT}");
+    }
+    Ok(stdout)
+}
+
+/// The child's command: in the plugin directory, its own process group, `out` and `err` as
+/// its stdout and stderr, and the `RRECALL_*` environment.
+fn command(
+    ctx: &Ctx,
+    inst: &Instance,
+    argv: &[String],
+    path: &Path,
+    out: &File,
+    err: &File,
+) -> Result<Command> {
+    let mut cmd = Command::new(path);
+    cmd.arg0(&argv[0])
+        .args(&argv[1..])
         .current_dir(&inst.plugin.dir)
         .stdin(Stdio::piped())
-        .stdout(
-            File::create(&out_path).with_context(|| format!("creating {}", out_path.display()))?,
-        )
-        .stderr(
-            File::create(&err_path).with_context(|| format!("creating {}", err_path.display()))?,
-        )
+        .stdout(out.try_clone()?)
+        .stderr(err.try_clone()?)
         .process_group(0);
     // A param the instance does not set must not leak in from rrecall's own environment.
     for (k, _) in std::env::vars_os() {
@@ -92,9 +118,20 @@ fn run(
     .env("RRECALL_PROJECT", &ctx.project)
     .env("RRECALL_STORE", &ctx.store)
     .env("RRECALL_PLUGIN_DIR", &inst.plugin.dir)
-    .env("RRECALL_STATE_DIR", &state)
+    .env("RRECALL_STATE_DIR", ctx.store.join("state").join(&inst.id))
     .env("RRECALL_RUN_ID", &ctx.run_id)
     .envs(inst.env_params());
+    Ok(cmd)
+}
+
+/// Starts `cmd`, writes `stdin` to it and waits until `timeout`, when it kills the child's
+/// process group.
+fn wait(
+    cmd: &mut Command,
+    program: &str,
+    stdin: Vec<u8>,
+    timeout: Duration,
+) -> Result<std::process::ExitStatus> {
     let mut child = cmd
         .spawn()
         .with_context(|| format!("cannot start `{program}`"))?;
@@ -103,36 +140,50 @@ fn run(
         std::thread::spawn(move || pipe.write_all(&stdin));
     }
     let started = Instant::now();
-    let status = loop {
+    loop {
         if let Some(status) = child.try_wait()? {
-            break status;
+            return Ok(status);
         }
-        if started.elapsed() >= inst.timeout {
+        if started.elapsed() >= timeout {
             let killed = kill_group(&mut child)
                 .map(|()| String::new())
                 .unwrap_or_else(|e| format!("; killing its process group failed: {e}"));
-            bail!(
-                "timed out after {:?}{killed}; stderr in {}",
-                inst.timeout,
-                err_path.display()
-            );
+            bail!("timed out after {timeout:?}{killed}");
         }
         std::thread::sleep(Duration::from_millis(20));
-    };
-    if !status.success() {
-        let stderr = std::fs::read_to_string(&err_path).unwrap_or_default();
-        let last = stderr
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("");
-        bail!("{status}: {last} (stderr in {})", err_path.display());
     }
-    let size = std::fs::metadata(&out_path)?.len();
-    if size > MAX_STDOUT {
-        bail!("printed {size} bytes, more than {MAX_STDOUT}");
+}
+
+/// A file opened at `path` and removed from it at once: the open handle (and the child's
+/// copy of it) still reads and writes it, and the OS frees it with the last handle.
+fn unnamed(path: &Path) -> Result<File> {
+    let f = File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .with_context(|| format!("creating {}", path.display()))?;
+    std::fs::remove_file(path).with_context(|| format!("removing {}", path.display()))?;
+    Ok(f)
+}
+
+/// Reads what the child wrote to `f` (at most [`MAX_STDOUT`] bytes, a larger log is cut and
+/// says so) and writes it to `path` with every credential redacted. Returns the bytes as read
+/// and the text as kept.
+fn keep(f: &mut File, path: &Path) -> Result<(Vec<u8>, String)> {
+    use std::io::{Read, Seek};
+    let mut bytes = Vec::new();
+    f.seek(std::io::SeekFrom::Start(0))?;
+    f.take(MAX_STDOUT + 1).read_to_end(&mut bytes)?;
+    // limit: a log that is not UTF-8 is kept with replacement characters, so the scanner can
+    // read it; the plugin's answer itself is never changed.
+    let mut text = secrets::redact(&String::from_utf8_lossy(&bytes));
+    if bytes.len() as u64 > MAX_STDOUT {
+        text += &format!("\n[log cut at {MAX_STDOUT} bytes]\n");
     }
-    Ok(out_path)
+    std::fs::write(path, &text).with_context(|| format!("writing {}", path.display()))?;
+    Ok((bytes, text))
 }
 
 /// The absolute path `program` (an expanded argv[0]) names, checked once and then spawned as
@@ -607,6 +658,36 @@ mod tests {
         std::fs::write(&path, content).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         w.instance("prs", "gh", "ok", "")
+    }
+
+    /// While the plugin runs, its logs have no name in the run dir; after it ends, a timeout
+    /// included, they are there with the credential it printed redacted.
+    #[test]
+    fn logs_get_a_name_only_once_redacted() {
+        let w = World::new();
+        let tok = ["gh", "p_", "Zq3vK9mW2xR7tY5pL8nB4cD6fG1hJ0kAa2Ss"].concat();
+        let seen = w.t.0.join("seen");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s' '{tok}'\necho '{tok}' >&2\nls \"$RRECALL_STORE/runs/r1\" > {}\nsleep 5\n",
+            seen.display()
+        );
+        let mut inst = script_plugin(&w, "leak", &script);
+        inst.timeout = Duration::from_millis(1000);
+        let e = format!(
+            "{:#}",
+            call(&w.ctx(), &inst, "collect", &command(&inst), &"{}").unwrap_err()
+        );
+        assert!(e.contains("timed out"), "{e}");
+        assert_eq!(
+            std::fs::read_to_string(&seen).unwrap(),
+            "",
+            "no log name while running"
+        );
+        for ext in ["stdout", "stderr"] {
+            let kept =
+                std::fs::read_to_string(w.run_dir().join(format!("prs.collect.{ext}"))).unwrap();
+            assert_eq!(kept.trim_end(), "[redacted:github-token]", "{ext}");
+        }
     }
 
     #[test]

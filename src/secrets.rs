@@ -1,12 +1,15 @@
 //! What the built-in `secrets` check looks for (spec §10): common token and key formats,
 //! private key blocks, passwords in URLs and high-entropy assignments. It names the pattern a
-//! text matches and never returns the matched text.
+//! text matches and never returns the matched text; [`redact`] replaces every match in what the
+//! core keeps of a plugin's output (spec §6.3).
 //!
 //! Every scan reads a bounded window from each candidate position and skips candidates inside
 //! a token it already read, so the time is linear in the text: a check runs over every
 //! proposal of a run before it answers (spec §6.5).
 
 /// The most characters a value or token is read for; real credentials are shorter.
+use std::ops::Range;
+
 const WINDOW: usize = 256;
 
 /// A token that starts with a fixed prefix at a word boundary and goes on with at least `min`
@@ -119,8 +122,51 @@ const SECRET_WORDS: [&str; 8] = [
 /// Words between a label and its separator in prose: `the deploy token is: ...`.
 const LINKING_WORDS: [&str; 3] = ["is", "was", "are"];
 
+/// One match: the bytes it covers and the pattern's name.
+type Hit = (Range<usize>, &'static str);
+
 /// The name of the first pattern `text` matches.
 pub fn find(text: &str) -> Option<&'static str> {
+    hits(text).first().map(|h| h.1)
+}
+
+/// `text` with every match replaced by `[redacted:<pattern>]`; overlapping matches leave one
+/// marker. What the core keeps of a plugin's output goes through this (spec §6.3).
+pub fn redact(text: &str) -> String {
+    let mut hits = hits(text);
+    if hits.is_empty() {
+        return text.to_string();
+    }
+    // Stable: at one start the pattern tried first names the marker.
+    hits.sort_by_key(|h| (h.0.start, std::cmp::Reverse(h.0.end)));
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for (r, name) in hits {
+        if r.start >= at {
+            out += &text[at..r.start];
+            out += &format!("[redacted:{name}]");
+        }
+        at = at.max(r.end);
+    }
+    out += &text[at..];
+    out
+}
+
+/// Every match, pattern by pattern in the order [`find`] tries them.
+fn hits(text: &str) -> Vec<Hit> {
+    let mut out = Vec::new();
+    prefixed(text, &mut out);
+    slack_webhook(text, &mut out);
+    jwt(text, &mut out);
+    private_key(text, &mut out);
+    password_in_url(text, &mut out);
+    bearer(text, &mut out);
+    assignment(text, &mut out);
+    out
+}
+
+/// The tokens of [`PREFIXED`], prefix included.
+fn prefixed(text: &str, out: &mut Vec<Hit>) {
     let b = text.as_bytes();
     for p in PREFIXED {
         for prefix in p.prefixes {
@@ -136,30 +182,11 @@ pub fn find(text: &str) -> Option<&'static str> {
                     tok.len() >= p.min && shaped(tok)
                 };
                 if ok {
-                    return Some(p.name);
+                    out.push((i..start + tok.len(), p.name));
                 }
             }
         }
     }
-    if slack_webhook(text) {
-        return Some("slack-webhook");
-    }
-    if jwt(text) {
-        return Some("jwt");
-    }
-    if private_key(text) {
-        return Some("private-key");
-    }
-    if password_in_url(text) {
-        return Some("password-in-url");
-    }
-    if bearer(text) {
-        return Some("bearer-token");
-    }
-    if assignment(text) {
-        return Some("high-entropy-assignment");
-    }
-    None
 }
 
 /// How many bytes from `start` on belong to `alphabet`, counting at most `cap`.
@@ -177,35 +204,38 @@ fn shaped(tok: &[u8]) -> bool {
 }
 
 /// `hooks.slack.com/services/T<team>/B<bot>/<secret>`, the whole path.
-fn slack_webhook(text: &str) -> bool {
+fn slack_webhook(text: &str, out: &mut Vec<Hit>) {
     let b = text.as_bytes();
-    text.match_indices("hooks.slack.com/services/")
-        .any(|(i, m)| {
-            let mut at = i + m.len();
-            for (lead, min) in [(Some(b'T'), 2), (Some(b'B'), 2), (None, 16)] {
-                if lead.is_some_and(|l| b.get(at) != Some(&l)) {
-                    return false;
-                }
-                let n = run(b, at, alnum, WINDOW);
-                if n < min {
-                    return false;
-                }
-                at += n;
-                if lead.is_some() {
-                    if b.get(at) != Some(&b'/') {
-                        return false;
-                    }
-                    at += 1;
-                }
+    let path_end = |mut at: usize| {
+        for (lead, min) in [(Some(b'T'), 2), (Some(b'B'), 2), (None, 16)] {
+            if lead.is_some_and(|l| b.get(at) != Some(&l)) {
+                return None;
             }
-            true
-        })
+            let n = run(b, at, alnum, WINDOW);
+            if n < min {
+                return None;
+            }
+            at += n;
+            if lead.is_some() {
+                if b.get(at) != Some(&b'/') {
+                    return None;
+                }
+                at += 1;
+            }
+        }
+        Some(at)
+    };
+    for (i, m) in text.match_indices("hooks.slack.com/services/") {
+        if let Some(end) = path_end(i + m.len()) {
+            out.push((i..end, "slack-webhook"));
+        }
+    }
 }
 
 /// Three dot-separated base64url segments of at least 10 characters, the first two starting
 /// with `eyJ` (a JSON object). One pass over the maximal segments, each read once and never
 /// capped: a token with many claims has a long payload.
-fn jwt(text: &str) -> bool {
+fn jwt(text: &str, out: &mut Vec<Hit>) {
     let b = text.as_bytes();
     // The last two segments seen, as (start, end), while each followed the one before by a
     // single `.`.
@@ -229,7 +259,10 @@ fn jwt(text: &str) -> bool {
         let long = i - start >= 10;
         let object = b[start..i].starts_with(b"eyJ");
         match chain.len() {
-            2 if long => return true,
+            2 if long => {
+                out.push((chain[0].0..i, "jwt"));
+                chain.clear();
+            }
             0 | 1 if long && object => chain.push((start, i)),
             _ => {
                 chain.clear();
@@ -239,98 +272,140 @@ fn jwt(text: &str) -> bool {
             }
         }
     }
-    false
 }
 
-/// A PEM or PGP armor line that opens a private key.
-fn private_key(text: &str) -> bool {
-    text.match_indices("-----BEGIN ").any(|(i, m)| {
+/// A PEM or PGP armor line that opens a private key, through its `-----END ...-----` line, or
+/// to the end of the text when none follows: what comes after the header is the key.
+fn private_key(text: &str, out: &mut Vec<Hit>) {
+    let mut done = 0;
+    for (i, m) in text.match_indices("-----BEGIN ") {
+        if i < done {
+            continue;
+        }
         let label: String = text[i + m.len()..].chars().take(64).collect();
-        label
+        let opens = label
             .split("-----")
             .next()
-            .is_some_and(|l| l.contains("PRIVATE KEY") && !l.contains('\n'))
-    })
+            .is_some_and(|l| l.contains("PRIVATE KEY") && !l.contains('\n'));
+        if !opens {
+            continue;
+        }
+        let end = text[i..]
+            .find("-----END ")
+            .map(|e| i + e + "-----END ".len())
+            .and_then(|from| text[from..].find("-----").map(|f| from + f + 5))
+            .unwrap_or(text.len());
+        out.push((i..end, "private-key"));
+        done = end;
+    }
 }
 
-/// `scheme://user:password@host` with a password that is not a placeholder. The authority
-/// ends at the next `/`, so two candidates never share a byte.
-fn password_in_url(text: &str) -> bool {
-    text.match_indices("://").any(|(i, m)| {
-        let authority = text[i + m.len()..]
+/// `scheme://user:password@host` with a password that is not a placeholder; the match is the
+/// password. The authority ends at the next `/`, so two candidates never share a byte.
+fn password_in_url(text: &str, out: &mut Vec<Hit>) {
+    for (i, m) in text.match_indices("://") {
+        let at = i + m.len();
+        let authority = text[at..]
             .split(|c: char| c.is_whitespace() || matches!(c, '/' | '?' | '#'))
             .next()
             .unwrap_or_default();
         let Some((userinfo, _host)) = authority.rsplit_once('@') else {
-            return false;
+            continue;
         };
-        userinfo
-            .split_once(':')
-            .is_some_and(|(_, pw)| !pw.is_empty() && !placeholder(pw))
-    })
+        let Some(colon) = userinfo.find(':') else {
+            continue;
+        };
+        let pw = &userinfo[colon + 1..];
+        if !pw.is_empty() && !placeholder(pw) {
+            out.push((at + colon + 1..at + userinfo.len(), "password-in-url"));
+        }
+    }
 }
 
-/// Template syntax (`${X}`, `<x>`, `{x}`, `%X%`), a mask (`***`) or one repeated character.
-/// A URL escape such as `%74` is not a placeholder.
+/// Template syntax (`${X}`, `<x>`, `{x}`, `[x]`, `%X%`), a mask (`***`) or one repeated
+/// character; `[x]` also covers a redaction marker. A URL escape such as `%74` is not a
+/// placeholder.
 fn placeholder(v: &str) -> bool {
-    v.starts_with(['$', '<', '{', '*'])
+    v.starts_with(['$', '<', '{', '[', '*'])
         || (v.len() > 2 && v.starts_with('%') && v.ends_with('%'))
         || v.bytes().all(|b| b == v.as_bytes()[0])
 }
 
-/// `Bearer <token>` with a random-looking token.
-fn bearer(text: &str) -> bool {
-    text.match_indices("Bearer ")
+/// `Bearer <token>` with a random-looking token; the match is the token.
+fn bearer(text: &str, out: &mut Vec<Hit>) {
+    for (i, m) in text
+        .match_indices("Bearer ")
         .chain(text.match_indices("bearer "))
-        .any(|(i, m)| value_at(text, i + m.len()).is_some_and(random))
+    {
+        if let Some(v) = value_at(text, i + m.len()).filter(|v| random(v)) {
+            out.push((span(text, v), "bearer-token"));
+        }
+    }
 }
 
 /// A secret-named label right before a `=` or `:` (`DB_PASSWORD=...`, `api_key: "..."`, or in
-/// prose `the deploy token is: ...`) and a random-looking literal after it. Only the label
-/// counts: in `the token parser landed in commit: <sha>` the label is `commit`. The scan starts
-/// at each secret word, so separators with no label near them cost nothing.
-fn assignment(text: &str) -> bool {
+/// prose `the deploy token is: ...`) and a random-looking literal after it, which is the
+/// match. Only the label counts: in `the token parser landed in commit: <sha>` the label is
+/// `commit`. The scan starts at each secret word, so separators with no label near them cost
+/// nothing.
+fn assignment(text: &str, out: &mut Vec<Hit>) {
     let lower = text.to_ascii_lowercase();
     let b = lower.as_bytes();
-    SECRET_WORDS.iter().any(|w| {
-        lower.match_indices(w).any(|(i, _)| {
-            // The rest of the label word, bounded: a longer word is no label.
-            let mut at = i + w.len();
-            let n = run(b, at, label_char, 33);
-            if n > 32 {
-                return false;
+    let value = |i: usize, w: &str| {
+        // The rest of the label word, bounded: a longer word is no label.
+        let mut at = i + w.len();
+        let n = run(b, at, label_char, 33);
+        if n > 32 {
+            return None;
+        }
+        at += n;
+        at += run(b, at, |c| matches!(c, b' ' | b'\t' | b'"' | b'\''), 8);
+        let link = run(b, at, label_char, 4);
+        if link > 0 {
+            if !LINKING_WORDS
+                .iter()
+                .any(|l| l.as_bytes() == &b[at..at + link])
+            {
+                return None;
             }
-            at += n;
-            at += run(b, at, |c| matches!(c, b' ' | b'\t' | b'"' | b'\''), 8);
-            let link = run(b, at, label_char, 4);
-            if link > 0 {
-                if !LINKING_WORDS
-                    .iter()
-                    .any(|l| l.as_bytes() == &b[at..at + link])
-                {
-                    return false;
-                }
-                at += link;
-                at += run(b, at, |c| matches!(c, b' ' | b'\t'), 8);
+            at += link;
+            at += run(b, at, |c| matches!(c, b' ' | b'\t'), 8);
+        }
+        if !matches!(b.get(at), Some(b'=' | b':')) {
+            return None;
+        }
+        at += 1;
+        at += run(b, at, |c| matches!(c, b'=' | b'>'), 1);
+        value_at(text, at).filter(|v| random(v))
+    };
+    for w in SECRET_WORDS {
+        for (i, _) in lower.match_indices(w) {
+            if let Some(v) = value(i, w) {
+                out.push((span(text, v), "high-entropy-assignment"));
             }
-            if !matches!(b.get(at), Some(b'=' | b':')) {
-                return false;
-            }
-            at += 1;
-            at += run(b, at, |c| matches!(c, b'=' | b'>'), 1);
-            value_at(text, at).is_some_and(random)
-        })
-    })
+        }
+    }
 }
 
-/// The literal that starts at `at` after spaces and an optional quote, read for at most
-/// [`WINDOW`] characters, or `None` when what follows is code (a call or an index).
+/// Where `sub`, a slice of `text`, lies in it.
+fn span(text: &str, sub: &str) -> Range<usize> {
+    let start = sub.as_ptr() as usize - text.as_ptr() as usize;
+    start..start + sub.len()
+}
+
+/// The literal that starts at `at` after spaces and an optional quote (also one escaped as in
+/// a JSON log, `\"`), read for at most [`WINDOW`] characters, or `None` when what follows is
+/// code (a call or an index).
 fn value_at(text: &str, at: usize) -> Option<&str> {
     let rest = text.get(at..)?.trim_start_matches([' ', '\t']);
+    let rest = rest
+        .strip_prefix('\\')
+        .filter(|r| r.starts_with(['"', '\'']))
+        .unwrap_or(rest);
     let rest = rest.strip_prefix(['"', '\'', '`']).unwrap_or(rest);
     let mut end = rest.len();
     for (n, (i, c)) in rest.char_indices().enumerate() {
-        if n == WINDOW || c.is_whitespace() || "\"'`,;:=()[]{}<>".contains(c) {
+        if n == WINDOW || c.is_whitespace() || "\"'`,;:=()[]{}<>\\".contains(c) {
             end = i;
             break;
         }
@@ -368,7 +443,7 @@ fn random(v: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::find;
+    use super::{find, redact};
 
     /// Secret-shaped strings are built from parts, so this file holds none whole and a failing
     /// assertion prints only the case name and the pattern name.
@@ -474,6 +549,58 @@ mod tests {
             ),
         ] {
             assert_eq!(find(&text), Some(want), "case `{case}`");
+            let red = redact(&text);
+            assert_eq!(find(&red), None, "case `{case}` after redaction");
+            assert!(
+                red.contains(&format!("[redacted:{want}]")),
+                "case `{case}` names its pattern"
+            );
+        }
+    }
+
+    /// Only the credential goes: the text around it, the user and host of a URL, a label and
+    /// the JSON a log keeps stay, so the log still reads. Overlapping matches leave one marker.
+    #[test]
+    fn redaction_replaces_each_match_and_keeps_the_rest() {
+        let r20 = "Zq3vK9mW2xR7tY5pL8nB";
+        let r36 = "Zq3vK9mW2xR7tY5pL8nB4cD6fG1hJ0kAa2Ss";
+        let ghp = j(&["gh", "p_", r36]);
+        for (case, text, want) in [
+            (
+                "two in prose",
+                j(&["a ", &ghp, " b DB_PASSWORD=", r20, " c"]),
+                "a [redacted:github-token] b DB_PASSWORD=[redacted:high-entropy-assignment] c"
+                    .to_string(),
+            ),
+            (
+                "url",
+                j(&["postgres://app:", "s3cr3tPw@db.internal/app"]),
+                "postgres://app:[redacted:password-in-url]@db.internal/app".to_string(),
+            ),
+            (
+                "json log with an escaped quote",
+                j(&[r#"{"key":""#, &ghp, r#"","body":"api_key: ""#, r20, r#"""}"#]),
+                r#"{"key":"[redacted:github-token]","body":"api_key: "[redacted:high-entropy-assignment]""}"#
+                    .to_string(),
+            ),
+            (
+                "key block up to its end line",
+                j(&["x -----BEGIN RSA ", "PRIVATE KEY-----\nMIIE\n-----END RSA PRIVATE KEY----- y"]),
+                "x [redacted:private-key] y".to_string(),
+            ),
+            (
+                "key block without an end line",
+                j(&["x -----BEGIN RSA ", "PRIVATE KEY-----\nMIIE y"]),
+                "x [redacted:private-key]".to_string(),
+            ),
+            (
+                "overlap",
+                j(&["Bearer ", &ghp, " z"]),
+                "Bearer [redacted:github-token] z".to_string(),
+            ),
+            ("nothing", "plain text, sk-learn".to_string(), "plain text, sk-learn".to_string()),
+        ] {
+            assert_eq!(redact(&text), want, "case `{case}`");
         }
     }
 
@@ -540,6 +667,7 @@ mod tests {
             let text = unit.repeat(mib / unit.len());
             let started = std::time::Instant::now();
             let _ = find(&text);
+            let _ = redact(&text);
             let took = started.elapsed();
             assert!(
                 took < std::time::Duration::from_secs(3),
@@ -616,6 +744,7 @@ mod tests {
             ),
         ] {
             assert_eq!(find(text), None, "case `{case}`");
+            assert_eq!(redact(text), text, "case `{case}` is kept as it is");
         }
     }
 }

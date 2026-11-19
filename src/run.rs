@@ -8,6 +8,7 @@ use crate::lock::{self, CollectorLock, LockFile, PluginLock};
 use crate::merge::{self, Effect, Grant, Item, Rules};
 use crate::plugin::{self, Instance, Kind, Spec};
 use crate::process::{self, Ctx};
+use crate::secrets;
 use crate::store::{self, Store};
 use crate::wire::{
     self, CollectorInput, Event, JudgeInput, JudgeItem, PluginInput, Proposal, Rejection,
@@ -64,7 +65,8 @@ pub fn run(project: Option<&str>, opts: &Opts) -> Result<String> {
         accepts: BTreeMap::new(),
     };
     let result = r.pipeline(opts);
-    let report = r.report(&result, started.elapsed().as_secs_f64());
+    // Keys, titles, verdict reasons and error lines come from plugins (spec §4.4).
+    let report = secrets::redact(&r.report(&result, started.elapsed().as_secs_f64()));
     let path = r.ctx.run_dir.join("report.md");
     let written =
         std::fs::write(&path, &report).with_context(|| format!("writing {}", path.display()));
@@ -633,7 +635,8 @@ impl Run {
         let mut hash: Option<String> = None;
         if !changes.is_empty() {
             let diff = merge::net(&base, &work, &effects);
-            let message = self.message(&diff);
+            // Tracked in the store: error lines quote a plugin's stderr (spec §4.3).
+            let message = secrets::redact(&self.message(&diff));
             self.hook(
                 Event::CommitBefore,
                 json!({"diff": diff, "message": message}),
