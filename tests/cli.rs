@@ -43,6 +43,10 @@ impl Env {
     }
 
     fn run_in(&self, cwd: &Path, args: &[&str]) -> Out {
+        self.run_env(cwd, args, &[])
+    }
+
+    fn run_env(&self, cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Out {
         let o = Command::new(env!("CARGO_BIN_EXE_rrecall"))
             .args(args)
             .current_dir(cwd)
@@ -51,6 +55,10 @@ impl Env {
             .env("XDG_CONFIG_HOME", self.root.join("config"))
             .env_remove("RRECALL_PROJECT")
             .env_remove("GIT_DIR")
+            // `open` never starts a real browser in a test.
+            .env("RRECALL_BROWSER", FAKE_BROWSER)
+            .env("FAKE_BROWSER_LOG", self.root.join("browser.log"))
+            .envs(env.iter().copied())
             .output()
             .unwrap();
         Out {
@@ -114,6 +122,11 @@ fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8(o.stdout).unwrap()
 }
 
+const FAKE_BROWSER: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/bin/fake-browser"
+);
+
 const ORIGIN: &str = "git@github.com:lanternfish-dev/lanternfish.git";
 
 // ---- init and project resolution (spec §2) ----
@@ -146,12 +159,14 @@ fn init_creates_store_with_default_skeleton_and_found_sources() {
     let checks = "[[plugins]]\nid = \"no-op\"\n\n[[plugins]]\nid = \"size-limits\"\n\n[[plugins]]\nid = \"secrets\"\n";
     let judges = "[[plugins]]\nid = \"support\"\n\n[[plugins]]\nid = \"removal\"\n\n[[plugins]]\nid = \"duplicate\"\n";
     let runner = "[[plugins]]\nid = \"claude\"\n";
+    let view = "[[plugins]]\nid = \"html\"\n";
     let (c, j, r) = (
         cfg.find(checks).expect(&cfg),
         cfg.find(judges).expect(&cfg),
         cfg.find(runner).expect(&cfg),
     );
-    assert!(c < j && j < r && cfg.ends_with(runner), "{cfg}");
+    assert!(c < j && j < r && r < cfg.find(view).expect(&cfg), "{cfg}");
+    assert!(cfg.ends_with(view), "{cfg}");
     assert_eq!(
         std::fs::read_to_string(store.join(".gitignore")).unwrap(),
         "cache/\nruns/\nviews/\nstate/\n"
@@ -318,13 +333,14 @@ fn help_lists_the_built_commands_only() {
         "rm",
         "agent-instructions",
         "run",
+        "open",
     ] {
         assert!(
             help.contains(&format!("  {c} ")) || help.contains(&format!("  {c}\n")),
             "{c} missing:\n{help}"
         );
     }
-    for later in ["  open", "  doctor", "  plugin"] {
+    for later in ["  doctor", "  plugin"] {
         assert!(!help.contains(later), "{later} listed:\n{help}");
     }
 }
@@ -1220,7 +1236,7 @@ fn init_keeps_the_users_default_runner_and_enables_it() {
     );
     let cfg = std::fs::read_to_string(e.store("kiln").join("rrecall.toml")).unwrap();
     assert!(
-        cfg.ends_with("[[plugins]]\nid = \"codex\"\n") && !cfg.contains("\"claude\""),
+        cfg.contains("[[plugins]]\nid = \"codex\"\n") && !cfg.contains("\"claude\""),
         "{cfg}"
     );
 }
@@ -1265,7 +1281,7 @@ fn init_refuses_a_default_runner_it_cannot_find_and_enables_one_it_finds() {
     .unwrap();
     e.ok(&["init", "kiln"]);
     let cfg = std::fs::read_to_string(e.store("kiln").join("rrecall.toml")).unwrap();
-    assert!(cfg.ends_with("[[plugins]]\nid = \"fast\"\n"), "{cfg}");
+    assert!(cfg.contains("[[plugins]]\nid = \"fast\"\n"), "{cfg}");
 }
 
 #[test]
@@ -1304,4 +1320,163 @@ fn init_that_cannot_write_the_user_config_leaves_nothing_and_can_be_retried() {
             .unwrap()
             .contains("runner = \"claude\"")
     );
+}
+
+// ---- the html view and `open` (spec §8, §2) ----
+
+/// The map data the page embeds.
+fn page_data(page: &str) -> serde_json::Value {
+    let start = r#"<script type="application/json" id="map-data">"#;
+    let from = page.find(start).expect("the data block") + start.len();
+    let to = from
+        + page[from..]
+            .find("</script>")
+            .expect("the data block's end");
+    serde_json::from_str(&page[from..to]).unwrap()
+}
+
+fn page_node<'a>(data: &'a serde_json::Value, id: &str) -> &'a serde_json::Value {
+    data["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == id)
+        .unwrap_or_else(|| panic!("no node {id}"))
+}
+
+fn changed_ids(data: &serde_json::Value) -> Vec<String> {
+    data["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|n| n["changed"] == true)
+        .map(|n| n["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn open_renders_one_self_contained_page_and_opens_it() {
+    let e = fixture_env();
+    q(
+        &e,
+        &[
+            "note",
+            "fetcher",
+            "Ask the fetcher's owner about <b>polls</b> & </script>",
+        ],
+    );
+    let out = q(&e, &["open"]);
+    let page_path = e.store("lanternfish").join("views/index.html");
+    assert!(out.contains(&page_path.display().to_string()), "{out}");
+    let log = std::fs::read_to_string(e.root.join("browser.log")).unwrap();
+    assert_eq!(log, format!("{}\n", page_path.display()));
+
+    let page = std::fs::read_to_string(&page_path).unwrap();
+    // Nothing loads from the network: no URL at all, no external script, style, font or image.
+    for bad in [
+        "http://",
+        "https://",
+        "<link",
+        " src=",
+        "@import",
+        "url(",
+        "@font-face",
+    ] {
+        assert!(!page.contains(bad), "the page holds `{bad}`");
+    }
+    assert!(page.starts_with("<!doctype html>"), "{}", &page[..40]);
+    assert!(
+        page.contains("<title>lanternfish"),
+        "the project names the page"
+    );
+    // The note's markup stays data: it never closes the data block or becomes an element.
+    assert!(!page.contains("<b>polls</b>"));
+    let data = page_data(&page);
+    assert_eq!(data["project"], "lanternfish");
+    let nodes = data["nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 300 + 7, "every node and the seven branches");
+    // Branches in skeleton order, each followed by its subtree.
+    assert_eq!(nodes[0]["id"], "layout");
+    assert_eq!(nodes[1]["parent"], "layout");
+    let fetcher = page_node(&data, "fetcher");
+    assert_eq!(
+        fetcher["note"],
+        "Ask the fetcher's owner about <b>polls</b> & </script>"
+    );
+    assert_eq!(
+        fetcher["sources"],
+        serde_json::json!(["import:lanternfish-outline.txt"])
+    );
+    // The inspector's history is what `why` reports, branches included.
+    for id in ["fetcher", "layout", "scheduler"] {
+        let why: serde_json::Value = serde_json::from_str(&q(&e, &["why", id, "--json"])).unwrap();
+        assert_eq!(page_node(&data, id)["history"], why["history"], "{id}");
+    }
+    assert_eq!(
+        page_node(&data, "fetcher")["history"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    // No run yet: nothing is "changed since the last run".
+    assert_eq!(data["last_run"], serde_json::Value::Null);
+    assert!(changed_ids(&data).is_empty());
+
+    // The same map and history render the same bytes.
+    q(&e, &["open"]);
+    assert_eq!(std::fs::read_to_string(&page_path).unwrap(), page);
+}
+
+#[test]
+fn the_changed_filter_holds_the_last_run_and_what_came_after_it() {
+    let e = fixture_env();
+    let store = e.store("lanternfish");
+    q(&e, &["note", "scheduler", "Before the run."]);
+    q(&e, &["note", "parser", "Changed by the run."]);
+    // Make the last note commit a run commit: its node changed in the last run.
+    git(
+        &store,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.invalid",
+            "commit",
+            "-q",
+            "--amend",
+            "-m",
+            "run 2026-11-19T090000Z: +0 ~1 -0",
+        ],
+    );
+    q(&e, &["note", "fetcher", "After the run."]);
+    q(&e, &["open"]);
+    let page = std::fs::read_to_string(store.join("views/index.html")).unwrap();
+    let data = page_data(&page);
+    assert_eq!(
+        data["last_run"]["subject"],
+        "run 2026-11-19T090000Z: +0 ~1 -0"
+    );
+    assert_eq!(changed_ids(&data), ["fetcher", "parser"]);
+}
+
+#[test]
+fn open_reports_a_browser_that_fails_and_keeps_the_page() {
+    let e = fixture_env();
+    let o = e.run_env(
+        &e.work(),
+        &["--project", "lanternfish", "open"],
+        &[("FAKE_BROWSER_EXIT", "3")],
+    );
+    assert_eq!(o.code, 1, "{}", o.stderr);
+    let page_path = e.store("lanternfish").join("views/index.html");
+    assert!(
+        o.stderr.contains(&page_path.display().to_string()),
+        "{}",
+        o.stderr
+    );
+    assert!(page_path.is_file());
+    // A store that does not exist: exit 3, nothing opened.
+    let o = e.run(&["--project", "nowhere", "open"]);
+    assert_eq!(o.code, 3, "{}", o.stderr);
 }

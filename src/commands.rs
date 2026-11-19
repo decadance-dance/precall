@@ -66,6 +66,7 @@ pub fn init(name_arg: Option<&str>, project_flag: Option<&str>) -> Result<String
         "support",
         "removal",
         "duplicate",
+        "html",
     ];
     if let Some(top) = &top {
         ids.push("repo");
@@ -112,6 +113,7 @@ pub fn init(name_arg: Option<&str>, project_flag: Option<&str>) -> Result<String
         "\n# The runner the judges call (spec §6.8).\n[[plugins]]\nid = {}\n",
         config::toml_str(&runner)
     );
+    cfg += "\n# The built-in html view: views/index.html after each run, and `rrecall open` (spec §8).\n[[plugins]]\nid = \"html\"\n";
     // The user config gains a default runner (the judges name none, spec §6.8) and the
     // project's entry. It is written before the store and restored if the store fails, so a
     // failure leaves nothing behind and init can run again.
@@ -300,6 +302,33 @@ fn stored_node<'a>(s: &'a Store, id: &str) -> Result<&'a Node> {
 }
 
 /// Sets or clears the user's note (spec §5 I7); the only field this command writes.
+/// `rrecall open`: renders the built-in html view and opens it with `RRECALL_BROWSER`, else the
+/// platform's opener (spec §2, §8). The page stays written when the opener fails.
+pub fn open_page(project: Option<&str>) -> Result<String> {
+    let (name, root) = config::resolve_project(project)?;
+    let page = crate::view::write(&root, &name)?;
+    let browser = std::env::var_os("RRECALL_BROWSER")
+        .filter(|b| !b.is_empty())
+        .unwrap_or_else(|| {
+            if cfg!(target_os = "macos") {
+                "open"
+            } else {
+                "xdg-open"
+            }
+            .into()
+        });
+    let shown = browser.to_string_lossy();
+    let status = std::process::Command::new(&browser)
+        .arg(&page)
+        .stdin(std::process::Stdio::null())
+        .status()
+        .with_context(|| format!("starting `{shown}` to open {}", page.display()))?;
+    if !status.success() {
+        anyhow::bail!("`{shown}` {status} opening {}", page.display());
+    }
+    Ok(format!("{}\n", page.display()))
+}
+
 pub fn note(project: Option<&str>, id: &str, text: &str) -> Result<String> {
     let (mut s, _held) = open_locked(project)?;
     let new = (!text.is_empty()).then(|| text.to_string());
@@ -371,6 +400,7 @@ pub fn builtin(id: &str, entry: Option<&str>) -> Result<String> {
         "git-history" => crate::git_history::run(entry, &input),
         "files" => crate::files::run(entry, &input),
         "github" => crate::github::run(entry, &input),
+        "html" => crate::view::run(&input),
         _ => crate::checks::run(id, &input).map(|out| out + "\n"),
     }
 }

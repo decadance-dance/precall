@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE}} · rrecall map</title>
+<style>
+:root {
+  --bg: #f7f7f5; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6b66; --line: #dddcd6;
+  --accent: #2f5fd0; --changed: #c26a00; --changed-bg: #fff3e0; --note-bg: #fffbe6;
+  --sel: #2f5fd0; --mark: #ffe066;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17181a; --panel: #1f2023; --ink: #e8e6e1; --muted: #9a9890; --line: #34353a;
+    --accent: #7ea2ff; --changed: #ffb454; --changed-bg: #3a2a12; --note-bg: #2e2a17;
+    --sel: #7ea2ff; --mark: #7a6300;
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--ink);
+  background: var(--bg); display: flex; flex-direction: column;
+}
+header {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 10px 16px;
+  background: var(--panel); border-bottom: 1px solid var(--line);
+}
+header h1 { font-size: 17px; margin: 0; }
+#lastrun { color: var(--muted); font-size: 12px; flex: 1 1 260px; }
+#search {
+  font: inherit; padding: 5px 9px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg); color: var(--ink); width: 240px;
+}
+label.toggle { display: inline-flex; gap: 6px; align-items: center; color: var(--changed); }
+label.toggle.off { color: var(--muted); }
+.tabs { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.tabs button, .tool {
+  font: inherit; border: 0; padding: 5px 12px; background: var(--panel); color: var(--ink); cursor: pointer;
+}
+.tabs button[aria-selected="true"] { background: var(--accent); color: #fff; }
+.tool { border: 1px solid var(--line); border-radius: 6px; padding: 3px 9px; font-size: 12px; }
+main { flex: 1; display: flex; min-height: 0; }
+#views { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.pane { flex: 1; overflow: auto; }
+[hidden] { display: none !important; }
+.bar { display: flex; gap: 8px; align-items: center; padding: 8px 16px; color: var(--muted); font-size: 12px; }
+#inspector {
+  width: 380px; flex: none; overflow: auto; padding: 16px 18px; background: var(--panel);
+  border-left: 1px solid var(--line);
+}
+#inspector h2 { font-size: 18px; margin: 4px 0 6px; }
+#inspector h3 {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 18px 0 6px;
+}
+.crumbs { font-size: 12px; color: var(--muted); }
+.crumbs button { font: inherit; color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer; }
+.meta { font-size: 12px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.badge { font-size: 11px; padding: 1px 6px; border-radius: 9px; border: 1px solid var(--line); color: var(--muted); }
+.badge.changed { color: var(--changed); border-color: var(--changed); background: var(--changed-bg); }
+.badge.noted { background: var(--note-bg); }
+.body { white-space: pre-wrap; margin: 10px 0 0; }
+.note { white-space: pre-wrap; background: var(--note-bg); border-left: 3px solid #e0b400; padding: 8px 10px; border-radius: 4px; }
+.empty { color: var(--muted); font-style: italic; }
+code, .mono { font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+ul.plain { list-style: none; margin: 0; padding: 0; }
+ul.plain li { padding: 3px 0; word-break: break-word; }
+ul.plain button { font: inherit; color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer; text-align: left; }
+.hist li { border-left: 2px solid var(--line); padding: 2px 0 6px 10px; }
+.hist .when { color: var(--muted); }
+.hist .line { color: var(--muted); margin-top: 2px; }
+/* Outline */
+ul.tree { list-style: none; margin: 0; padding-left: 18px; }
+#outline > ul.tree { padding: 4px 16px 24px 10px; }
+.row { display: flex; align-items: baseline; gap: 6px; padding: 1px 4px; border-radius: 4px; }
+.row.sel { background: color-mix(in srgb, var(--sel) 15%, transparent); }
+.twisty {
+  width: 16px; flex: none; font-size: 10px; border: 0; background: none; color: var(--muted); cursor: pointer; padding: 0;
+}
+.twisty:disabled { visibility: hidden; }
+.row .t { font: inherit; border: 0; background: none; color: var(--ink); cursor: pointer; padding: 0; text-align: left; }
+.row.branch > .t { font-weight: 600; }
+.row .id { color: var(--muted); font-size: 11px; }
+.row .snip { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+mark { background: var(--mark); color: inherit; border-radius: 2px; }
+/* Mind map */
+#mindmap svg { display: block; }
+.mm-node { cursor: pointer; }
+.mm-node rect { fill: var(--panel); stroke: var(--line); stroke-width: 1; }
+.mm-node.branch rect { stroke-width: 2; }
+.mm-node.changed rect { fill: var(--changed-bg); stroke: var(--changed); }
+.mm-node.sel rect { stroke: var(--sel); stroke-width: 2.5; }
+.mm-node.hit text { font-weight: 700; }
+.mm-node text { fill: var(--ink); font-size: 12px; dominant-baseline: middle; }
+.mm-node:focus { outline: none; }
+.mm-node:focus rect { stroke: var(--sel); stroke-dasharray: 3 2; }
+.mm-root text { font-size: 15px; font-weight: 700; fill: var(--ink); dominant-baseline: middle; }
+.mm-toggle circle { fill: var(--panel); stroke: var(--muted); }
+.mm-toggle text { fill: var(--muted); font-size: 11px; text-anchor: middle; dominant-baseline: central; }
+.mm-edge { fill: none; stroke-width: 1.6; opacity: .7; }
+@media (max-width: 800px) {
+  main { flex-direction: column; }
+  #inspector { width: auto; border-left: 0; border-top: 1px solid var(--line); max-height: 45%; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1 id="project"></h1>
+  <span id="lastrun"></span>
+  <input id="search" type="search" placeholder="Search titles, bodies, notes, sources" aria-label="Search the map">
+  <label class="toggle" id="changed-label"><input type="checkbox" id="changed"> <span id="changed-text"></span></label>
+  <span class="tabs" role="tablist">
+    <button role="tab" id="tab-map" aria-selected="true">Mind map</button>
+    <button role="tab" id="tab-outline" aria-selected="false">Outline</button>
+  </span>
+</header>
+<main>
+  <div id="views">
+    <div class="bar" id="mapbar">
+      <button class="tool" id="expand">Expand all</button>
+      <button class="tool" id="collapse">Collapse all</button>
+      <span id="count-map"></span>
+    </div>
+    <div class="pane" id="mindmap"><svg id="svg" role="img" aria-label="Mind map of the project"></svg></div>
+    <div class="bar" id="outlinebar" hidden><span id="count-outline"></span></div>
+    <div class="pane" id="outline" hidden></div>
+  </div>
+  <aside id="inspector" aria-live="polite"></aside>
+</main>
+<script type="application/json" id="map-data">{{DATA}}</script>
+<script>
+"use strict";
+const D = JSON.parse(document.getElementById("map-data").textContent);
+const byId = new Map(D.nodes.map(n => [n.id, n]));
+const roots = D.nodes.filter(n => !n.parent);
+const svg = document.getElementById("svg");
+const NS = svg.namespaceURI;
+const PALETTE = ["#2f7dd1", "#2f9e6b", "#c4572e", "#8a5cc7", "#c79a1c", "#c2417a", "#2a9aa8", "#6b7d2a"];
+const branchOf = n => { while (n.parent) n = byId.get(n.parent); return n; };
+const color = n => PALETTE[roots.indexOf(branchOf(n)) % PALETTE.length];
+const depthOf = n => { let d = 1; while (n.parent) { n = byId.get(n.parent); d++; } return d; };
+
+let selected = null, query = "", onlyChanged = false, tab = "map";
+// The mind map opens with the branches and their children; deeper levels start collapsed.
+const collapsed = new Set(D.nodes.filter(n => n.children.length && depthOf(n) >= 2).map(n => n.id));
+const closed = new Set(); // collapsed in the outline
+
+function el(tag, attrs, ...kids) {
+  const e = tag.startsWith("svg:") ? document.createElementNS(NS, tag.slice(4)) : document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "class") e.setAttribute("class", v);
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+    else e.setAttribute(k, v);
+  }
+  for (const k of kids) if (k != null) e.append(k);
+  return e;
+}
+
+// ---- filters ----
+const haystack = n => [n.title, n.body, n.id, n.note || "", n.sources.join(" "), n.date || "", n.state || ""].join("\n").toLowerCase();
+const hay = new Map(D.nodes.map(n => [n.id, haystack(n)]));
+const isHit = n => (!onlyChanged || n.changed) && (!query || hay.get(n.id).includes(query));
+/** Ids to show when a filter is on: the hits and their ancestors; null shows everything. */
+function shownSet() {
+  if (!query && !onlyChanged) return null;
+  const s = new Set();
+  for (const n of D.nodes) if (isHit(n)) for (let a = n; a && !s.has(a.id); a = byId.get(a.parent)) s.add(a.id);
+  return s;
+}
+const hitCount = () => D.nodes.filter(isHit).length;
+
+function highlight(text) {
+  const frag = document.createDocumentFragment();
+  if (!query) { frag.append(text); return frag; }
+  const low = text.toLowerCase();
+  let i = 0, j;
+  while ((j = low.indexOf(query, i)) >= 0) {
+    frag.append(text.slice(i, j), el("mark", {}, text.slice(j, j + query.length)));
+    i = j + query.length;
+  }
+  frag.append(text.slice(i));
+  return frag;
+}
+
+// ---- mind map ----
+const COL = 290, ROW = 30, BOX_H = 24, MAXC = 34;
+const label = t => t.length > MAXC ? t.slice(0, MAXC - 1) + "…" : t;
+const boxW = t => label(t).length * 7 + 18;
+
+function drawMap() {
+  const shown = shownSet();
+  const kidsOf = n => shown ? n.children.filter(id => shown.has(id)) : (collapsed.has(n.id) ? [] : n.children);
+  let row = 0;
+  const placed = [];
+  function place(n, depth) {
+    const kids = kidsOf(n).map(id => place(byId.get(id), depth + 1));
+    const y = kids.length ? (kids[0].y + kids[kids.length - 1].y) / 2 : row++ * ROW;
+    const p = { n, depth, y, kids };
+    placed.push(p);
+    return p;
+  }
+  const top = roots.filter(r => !shown || shown.has(r.id)).map(r => place(r, 1));
+  const rootY = top.length ? (top[0].y + top[top.length - 1].y) / 2 : 0;
+  const pad = 20, rootW = D.project.length * 9 + 20;
+  const xOf = d => pad + (d === 0 ? 0 : rootW + 40 + (d - 1) * COL);
+  const maxDepth = Math.max(1, ...placed.map(p => p.depth));
+  svg.replaceChildren();
+  svg.setAttribute("width", xOf(maxDepth) + COL);
+  svg.setAttribute("height", Math.max(row, 1) * ROW + 2 * pad);
+  const g = el("svg:g", { transform: `translate(0 ${pad + BOX_H / 2})` });
+  svg.append(g);
+  const edge = (x1, y1, x2, y2, c) => {
+    const mx = (x1 + x2) / 2;
+    g.append(el("svg:path", { class: "mm-edge", stroke: c, d: `M${x1} ${y1} C${mx} ${y1} ${mx} ${y2} ${x2} ${y2}` }));
+  };
+  for (const p of top) edge(xOf(0) + rootW, rootY, xOf(1), p.y, color(p.n));
+  // Unfiltered, an edge starts past its parent's collapse toggle.
+  const gap = shown ? 0 : 22;
+  for (const p of placed) for (const k of p.kids) edge(xOf(p.depth) + boxW(p.n.title) + gap, p.y, xOf(k.depth), k.y, color(k.n));
+  g.append(el("svg:g", { class: "mm-root" }, el("svg:text", { x: xOf(0), y: rootY }, D.project)));
+  for (const p of placed) {
+    const n = p.n, x = xOf(p.depth), w = boxW(n.title);
+    const cls = ["mm-node", n.parent ? "" : "branch", n.changed ? "changed" : "", n.id === selected ? "sel" : "",
+      (query || onlyChanged) && isHit(n) ? "hit" : ""].join(" ");
+    const node = el("svg:g", {
+      class: cls, tabindex: "0", role: "button", "aria-label": n.title,
+      onclick: () => select(n.id),
+      onkeydown: e => { if (e.key === "Enter") select(n.id); if (e.key === " ") { e.preventDefault(); toggle(n.id); } },
+    },
+      el("svg:title", {}, n.title),
+      el("svg:rect", { x, y: p.y - BOX_H / 2, width: w, height: BOX_H, rx: 6, style: n.parent ? "" : `stroke:${color(n)}` }),
+      el("svg:text", { x: x + 9, y: p.y }, label(n.title)));
+    g.append(node);
+    if (n.children.length && !shown) {
+      const open = !collapsed.has(n.id);
+      g.append(el("svg:g", { class: "mm-toggle", style: "cursor:pointer", onclick: () => toggle(n.id) },
+        el("svg:title", {}, open ? "Collapse" : `Expand ${n.children.length}`),
+        el("svg:circle", { cx: x + w + 11, cy: p.y, r: 8 }),
+        el("svg:text", { x: x + w + 11, y: p.y }, open ? "−" : String(n.children.length))));
+    }
+  }
+  document.getElementById("count-map").textContent = shown ? `${hitCount()} matching` : `${D.nodes.length} nodes`;
+}
+
+function toggle(id) {
+  if (collapsed.has(id)) collapsed.delete(id); else collapsed.add(id);
+  drawMap();
+}
+
+// ---- outline ----
+function drawOutline() {
+  const shown = shownSet();
+  const build = ids => {
+    const ul = el("ul", { class: "tree" });
+    for (const id of ids) {
+      if (shown && !shown.has(id)) continue;
+      const n = byId.get(id);
+      const isClosed = !shown && closed.has(id);
+      const row = el("div", { class: `row${n.parent ? "" : " branch"}${n.id === selected ? " sel" : ""}` },
+        el("button", {
+          class: "twisty", "aria-label": isClosed ? "Expand" : "Collapse",
+          onclick: () => { if (closed.has(id)) closed.delete(id); else closed.add(id); drawOutline(); },
+        }, n.children.length ? (isClosed ? "▸" : "▾") : ""),
+        el("button", { class: "t", onclick: () => select(id) }, highlight(n.title)),
+        el("span", { class: "id mono" }, n.id),
+        n.changed ? el("span", { class: "badge changed" }, "changed") : null,
+        n.note ? el("span", { class: "badge noted" }, "note") : null,
+        n.date ? el("span", { class: "badge" }, n.date) : null,
+        n.state ? el("span", { class: "badge" }, n.state) : null,
+        el("span", { class: "snip" }, highlight(n.body)));
+      if (!n.children.length) row.firstChild.disabled = true;
+      ul.append(el("li", {}, row, n.children.length && !isClosed ? build(n.children) : null));
+    }
+    return ul;
+  };
+  document.getElementById("outline").replaceChildren(build(roots.map(r => r.id)));
+  document.getElementById("count-outline").textContent = shown ? `${hitCount()} matching` : `${D.nodes.length} nodes`;
+}
+
+// ---- inspector ----
+function inspect() {
+  const box = document.getElementById("inspector");
+  const n = byId.get(selected);
+  if (!n) {
+    box.replaceChildren(el("p", { class: "empty" }, "Select a node in the mind map or the outline."));
+    return;
+  }
+  const path = [];
+  for (let a = byId.get(n.parent); a; a = byId.get(a.parent)) path.unshift(a);
+  const crumbs = el("div", { class: "crumbs" });
+  path.forEach((a, i) => crumbs.append(i ? " / " : "", el("button", { onclick: () => select(a.id) }, a.title)));
+  const meta = el("div", { class: "meta" }, el("code", {}, n.id),
+    n.date ? el("span", { class: "badge" }, n.date) : null,
+    n.state ? el("span", { class: "badge" }, n.state) : null,
+    n.changed ? el("span", { class: "badge changed" }, "changed since the last run") : null);
+  const list = (items, f) => items.length ? el("ul", { class: "plain" }, ...items.map(i => el("li", {}, f(i)))) : el("p", { class: "empty" }, "None.");
+  const hist = n.history.length ? el("ul", { class: "plain hist" }, ...n.history.slice().reverse().map(c =>
+    el("li", {}, el("div", {}, el("span", { class: "when mono" }, `${c.date} ${c.commit} `), c.subject),
+      ...c.body.map(l => el("div", { class: "line mono" }, l))))) : el("p", { class: "empty" }, "None.");
+  box.replaceChildren(
+    crumbs, el("h2", {}, n.title), meta,
+    el("p", { class: "body" }, n.body),
+    el("h3", {}, "Your note"),
+    n.note ? el("div", { class: "note" }, n.note) : el("p", { class: "empty" }, `No note. Add one: rrecall note ${n.id} "<text>"`),
+    el("h3", {}, "Sources"), list(n.sources, s => el("code", {}, s)),
+    el("h3", {}, `Children (${n.children.length})`), list(n.children, id => el("button", { onclick: () => select(id) }, byId.get(id).title)),
+    el("h3", {}, "History, newest first"), hist);
+}
+
+function select(id) {
+  if (!byId.has(id)) return;
+  selected = id;
+  // Reveal it in the mind map.
+  for (let a = byId.get(byId.get(id).parent); a; a = byId.get(a.parent)) { collapsed.delete(a.id); closed.delete(a.id); }
+  try { history.replaceState(null, "", "#" + encodeURIComponent(id)); } catch (e) { /* a file: URL may refuse */ }
+  drawAll();
+}
+
+function drawAll() {
+  if (tab === "map") drawMap(); else drawOutline();
+  inspect();
+}
+
+// ---- header ----
+document.getElementById("project").textContent = D.project;
+const lr = D.last_run;
+document.getElementById("lastrun").textContent = lr ? `Last run ${lr.date} · ${lr.commit} · ${lr.subject}` : "No run yet";
+const nChanged = D.nodes.filter(n => n.changed).length;
+const changedBox = document.getElementById("changed");
+document.getElementById("changed-text").textContent = lr ? `Changed since the last run (${nChanged})` : "Changed since the last run (no run yet)";
+if (!lr) { changedBox.disabled = true; document.getElementById("changed-label").classList.add("off"); }
+changedBox.addEventListener("change", () => { onlyChanged = changedBox.checked; drawAll(); });
+document.getElementById("search").addEventListener("input", e => { query = e.target.value.trim().toLowerCase(); drawAll(); });
+document.getElementById("expand").addEventListener("click", () => { collapsed.clear(); drawMap(); });
+document.getElementById("collapse").addEventListener("click", () => {
+  D.nodes.forEach(n => { if (n.children.length) collapsed.add(n.id); });
+  drawMap();
+});
+function setTab(t) {
+  tab = t;
+  document.getElementById("tab-map").setAttribute("aria-selected", t === "map");
+  document.getElementById("tab-outline").setAttribute("aria-selected", t === "outline");
+  document.getElementById("mindmap").hidden = document.getElementById("mapbar").hidden = t !== "map";
+  document.getElementById("outline").hidden = document.getElementById("outlinebar").hidden = t !== "outline";
+  drawAll();
+}
+document.getElementById("tab-map").addEventListener("click", () => setTab("map"));
+document.getElementById("tab-outline").addEventListener("click", () => setTab("outline"));
+
+const fromHash = decodeURIComponent(location.hash.slice(1));
+if (byId.has(fromHash)) select(fromHash); else drawAll();
+</script>
+</body>
+</html>

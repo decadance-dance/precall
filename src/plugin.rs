@@ -233,7 +233,7 @@ pub fn builtin() -> Result<BTreeMap<String, Plugin>> {
     for text in builtin_manifests() {
         let mut manifest = parse_manifest(text, None, "built in")?;
         match &mut manifest.spec {
-            Spec::Check(c) | Spec::Runner(c) => c.command[0] = exe_text.to_string(),
+            Spec::Check(c) | Spec::Runner(c) | Spec::View(c) => c.command[0] = exe_text.to_string(),
             Spec::Collector(c) => {
                 for argv in [
                     &mut c.fingerprint,
@@ -271,6 +271,7 @@ fn builtin_manifests() -> impl Iterator<Item = &'static str> {
             crate::files::MANIFEST,
             crate::git_history::MANIFEST,
             crate::github::MANIFEST,
+            crate::view::MANIFEST,
         ])
         .chain(crate::slack::MANIFESTS)
 }
