@@ -62,6 +62,7 @@ pub fn run(project: Option<&str>, opts: &Opts) -> Result<String> {
         models: BTreeMap::new(),
         warnings: Vec::new(),
         commit: None,
+        drift: None,
         accepts: BTreeMap::new(),
         fetched: Default::default(),
         since: BTreeMap::new(),
@@ -120,6 +121,37 @@ pub fn summary_of(report: &str) -> &str {
     report[from..]
         .find("\n## ")
         .map_or(report, |i| &report[..from + i])
+}
+
+/// Drift (spec §5): the nodes the net diff changed over the nodes before or after the run,
+/// branches excluded; a node both updated and moved counts once.
+fn drift(before: &Store, after: &Store, diff: &[Effect]) -> String {
+    let total = before
+        .nodes
+        .values()
+        .chain(after.nodes.values())
+        .filter(|n| n.parent.is_some())
+        .map(|n| n.id.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
+    let changed = diff
+        .iter()
+        .map(|e| e.id.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
+    let count = |c: &str| diff.iter().filter(|e| e.change == c).count();
+    let pct = if total == 0 {
+        0.0
+    } else {
+        100.0 * changed as f64 / total as f64
+    };
+    format!(
+        "{changed} of {total} nodes changed ({pct:.1}%): {} added, {} updated, {} moved, {} removed",
+        count("added"),
+        count("updated"),
+        count("moved"),
+        count("removed")
+    )
 }
 
 /// Why a plugin call gave no answer.
@@ -214,6 +246,8 @@ struct Run {
     models: BTreeMap<String, (String, String)>,
     warnings: Vec<String>,
     commit: Option<(String, String)>,
+    /// A forced run's drift (spec §5), once its changes are written.
+    drift: Option<String>,
     /// This round's `accept` verdicts by full key: for the report only, never sent back.
     accepts: BTreeMap<String, Vec<RoundVerdict>>,
     /// Collector instance to its `fetch` output: fetched once per run, sent every round.
@@ -704,8 +738,12 @@ impl Run {
             changes.push((lock::LOCK_FILE.to_string(), Some(lock_text)));
         }
         let mut hash: Option<String> = None;
-        if !changes.is_empty() {
-            let diff = merge::net(&base, &work, &effects);
+        let diff = merge::net(&base, &work, &effects);
+        // Reported once the changes are written: an abort before the commit changed nothing.
+        let measured = opts.force.then(|| drift(&base, &work, &diff));
+        if changes.is_empty() {
+            self.drift = measured;
+        } else {
             // Tracked in the store: error lines quote a plugin's stderr (spec §4.3).
             let message = secrets::redact(&self.message(&diff));
             self.hook(
@@ -714,7 +752,9 @@ impl Run {
                 "",
             )?;
             // `false`: git found nothing to commit (its own normalization), so no commit to report.
-            if store::write_and_commit(&self.ctx.store, &changes, &message)? {
+            let committed = store::write_and_commit(&self.ctx.store, &changes, &message)?;
+            self.drift = measured;
+            if committed {
                 let h = store::git(&self.ctx.store, &["rev-parse", "HEAD"])?
                     .trim()
                     .to_string();
@@ -1554,6 +1594,9 @@ impl Run {
             s += &format!("- unsettled: {id} ({})\n", one_line(why, 2000));
         }
         s += &format!("- rejected: {}\n", self.left_rejected());
+        if let Some(d) = &self.drift {
+            s += &format!("- drift: {d}\n");
+        }
         let (total, per) = self
             .budget
             .spent

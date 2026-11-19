@@ -879,6 +879,67 @@ fn the_commit_message_lists_each_change() {
     );
 }
 
+// ---- Drift under --force (spec §5, §4.4) ----
+
+#[test]
+fn a_forced_run_reports_drift_over_the_nodes_before_or_after_it() {
+    let w = W::new();
+    w.seed("layout", &[API, AUTH, THEIRS, r#"{"id":"old","parent":"layout","title":"Old","body":"","sources":["file:old.md"],"order":3}"#]);
+    let p = props(&[
+        add("a", "layout", "Queue"),
+        add("b", "layout", "Retry"),
+        json!({"key": "c", "op": "update", "id": "api", "body": "gRPC API.", "sources": ["file:api.md"], "reason": "switched to gRPC"}),
+        json!({"key": "d", "op": "remove", "id": "old", "sources": [], "evidence": "file:old.md@abc", "reason": "file deleted"}),
+        json!({"key": "e", "op": "move", "id": "auth", "parent": "how-it-works", "sources": ["file:auth.md"], "reason": "a mechanism"}),
+    ]);
+    w.config(&w.inst("repo", "col", &format!("out = {}", q(&p))));
+    let o = w.run_code(&["--force"], 0);
+    // 4 nodes before plus 2 added; `theirs` is the one left alone; branches do not count.
+    let line = "- drift: 5 of 6 nodes changed (83.3%): 2 added, 1 updated, 1 moved, 1 removed\n";
+    assert!(w.report().contains(line), "{}", w.report());
+    assert!(
+        o.stdout.contains(line),
+        "`rrecall run` prints it: {}",
+        o.stdout
+    );
+    assert!(
+        w.cmd(&["status"]).stdout.contains(line),
+        "and `rrecall status`"
+    );
+}
+
+#[test]
+fn a_forced_run_that_changes_nothing_reports_zero_drift_and_a_normal_run_none() {
+    let w = world(&props(&[]));
+    w.run_code(&[], 0);
+    assert!(!w.report().contains("drift"), "{}", w.report());
+    w.run_code(&["--force"], 0);
+    assert!(
+        w.report().contains(
+            "- drift: 0 of 4 nodes changed (0.0%): 0 added, 0 updated, 0 moved, 0 removed\n"
+        ),
+        "{}",
+        w.report()
+    );
+}
+
+#[test]
+fn a_forced_run_denied_before_its_commit_reports_no_drift() {
+    let w = world(&props(&[add("a", "layout", "Queue")]));
+    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    w.config(&format!(
+        "{cfg}{}",
+        w.inst(
+            "cgate",
+            "cgate",
+            &format!("out = {}", q(r#"{"deny":"not today"}"#))
+        )
+    ));
+    w.run_code(&["--force"], 4);
+    assert!(w.report().contains("not today"), "{}", w.report());
+    assert!(!w.report().contains("drift"), "{}", w.report());
+}
+
 // ---- The cost cap and runners (spec §9, §6.8) ----
 
 /// An add citing the kind `note`, which the `prompted` collector owns.

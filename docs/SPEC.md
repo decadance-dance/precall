@@ -177,7 +177,7 @@ unreachable: chat (login expired)
 
 Untracked Markdown in `runs/<run-id>/`: every proposal with its verdicts per round, unreachable sources with the error, unsettled collectors and why, cost per plugin, wall time. `rrecall status` summarizes the last one.
 
-It starts with `# Run <run-id>` and a `## Summary` section (result and exit code, commit, collected and skipped collectors, unreachable and unsettled ones, the count left rejected, cost, wall time), then `## Proposals` (one `### <collector>/<key>` per proposal, its outcome and verdicts per round) and `## Warnings` (hooks, views, resolve). `rrecall status` prints the summary; `rrecall run` prints it too.
+It starts with `# Run <run-id>` and a `## Summary` section (result and exit code, commit, collected and skipped collectors, unreachable and unsettled ones, the count left rejected, drift on a `--force` run (§5), cost, wall time), then `## Proposals` (one `### <collector>/<key>` per proposal, its outcome and verdicts per round) and `## Warnings` (hooks, views, resolve). `rrecall status` prints the summary; `rrecall run` prints it too.
 
 The report quotes plugins (proposal keys and titles, verdict reasons, error lines), so it is redacted like the logs (§6.3) before it is written or printed.
 
@@ -223,6 +223,7 @@ Plugin-level rules (built-in, can be disabled or replaced):
 Measured, not enforced:
 
 - **Drift under `--force`.** Running `rrecall run --force` twice in a row over unchanged sources changes at most 5% of nodes. This is the acceptance criterion of M3's live run, reported as a metric in every forced run's report. Normal runs over unchanged sources change nothing (I1); the drift bound is about how well collectors and judges hold the map when they do run.
+  - Drift is the number of nodes the run's net diff (§4.3) added, updated, moved or removed, over the nodes in the map before or after the run (the nodes before plus those added); branches do not count, and a node both updated and moved counts once. A forced run shows it, once its changes are written, in the report's summary (§4.4), after `rejected`: `- drift: 2 of 13 nodes changed (15.4%): 2 added, 0 updated, 0 moved, 0 removed`, the percentage with one decimal; a forced run that changes nothing shows `0 of <total> nodes changed (0.0%)`. A normal run, and a run that stops before writing its changes, show no drift.
 
 ## 6. Plugin protocol
 
