@@ -12,6 +12,7 @@ kind = "judge"
 
 [judge]
 prompt = "support.md"
+ops = ["add", "update", "add_source"]
 "#,
     r#"id = "removal"
 name = "Removal: checks that a removal's evidence says what it claims"
@@ -21,6 +22,7 @@ kind = "judge"
 
 [judge]
 prompt = "removal.md"
+ops = ["remove"]
 "#,
     r#"id = "duplicate"
 name = "Duplicate: rejects an addition that restates an existing node"
@@ -30,6 +32,7 @@ kind = "judge"
 
 [judge]
 prompt = "duplicate.md"
+ops = ["add"]
 "#,
 ];
 

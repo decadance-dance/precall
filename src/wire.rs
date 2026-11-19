@@ -575,8 +575,22 @@ fn checked_proposals(plugin: &str, props: Vec<Proposal>) -> Result<Vec<Proposal>
 }
 
 /// A check's or judge's output (spec §6.5): exactly one verdict per key given, returned in
-/// the order of `keys`. Anything else fails the whole output.
+/// the order of `keys`. Anything else, a key left out included, fails the whole output.
 pub fn decode_verdicts(plugin: &str, stdout: &str, keys: &[String]) -> Result<Vec<Verdict>> {
+    let (verdicts, missing) = decode_verdicts_given(plugin, stdout, keys)?;
+    match missing.first() {
+        Some(k) => bail!("plugin `{plugin}`: no verdict for `{k}`"),
+        None => Ok(verdicts),
+    }
+}
+
+/// A judge's output (spec §6.5), which may leave keys out: the verdicts given, in the order of
+/// `keys`, and the keys without one. Anything else wrong fails the whole output.
+pub fn decode_verdicts_given(
+    plugin: &str,
+    stdout: &str,
+    keys: &[String],
+) -> Result<(Vec<Verdict>, Vec<String>)> {
     let mut by_key = BTreeMap::new();
     for (i, v) in decode_items::<Verdict>(plugin, stdout, "verdicts")?
         .into_iter()
@@ -599,13 +613,18 @@ pub fn decode_verdicts(plugin: &str, stdout: &str, keys: &[String]) -> Result<Ve
             bail!("plugin `{plugin}`: verdict {n}: key `{}` twice", v.key);
         }
     }
-    keys.iter()
-        .map(|k| {
-            by_key
-                .remove(k)
-                .ok_or_else(|| anyhow!("plugin `{plugin}`: no verdict for `{k}`"))
+    let mut missing = Vec::new();
+    let verdicts = keys
+        .iter()
+        .filter_map(|k| {
+            let v = by_key.remove(k);
+            if v.is_none() {
+                missing.push(k.clone());
+            }
+            v
         })
-        .collect()
+        .collect();
+    Ok((verdicts, missing))
 }
 
 /// A `resolve` entrypoint's output (spec §6.4): every reference asked for, `None` when it
@@ -752,6 +771,20 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn a_judge_may_leave_keys_out_but_not_break_the_rest() {
+        let keys = ["gh/a".to_string(), "gh/b".to_string(), "gh/c".to_string()];
+        let some = r#"{"verdicts":[{"key":"gh/c","verdict":"reject","reason":"no"},{"key":"gh/a","verdict":"accept","reason":""}]}"#;
+        let (v, missing) = decode_verdicts_given("support", some, &keys).unwrap();
+        let got: Vec<&str> = v.iter().map(|v| v.key.as_str()).collect();
+        assert_eq!(got, ["gh/a", "gh/c"]);
+        assert_eq!(missing, ["gh/b"]);
+        // A key not given still fails the whole output, even with another left out.
+        let bad = r#"{"verdicts":[{"key":"gh/z","verdict":"accept","reason":""}]}"#;
+        let e = decode_verdicts_given("support", bad, &keys).unwrap_err();
+        assert!(e.to_string().contains("`gh/z`"), "{e}");
     }
 
     #[test]

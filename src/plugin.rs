@@ -4,7 +4,7 @@
 use crate::config::{self, BranchDef, PluginEntry, StoreConfig, UserConfig};
 use crate::error;
 use crate::node::{is_kind, is_slug};
-use crate::wire::{Event, Params};
+use crate::wire::{Event, Op, Params};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -120,6 +120,9 @@ pub struct JudgeSpec {
     pub model: Option<String>,
     #[serde(default, deserialize_with = "config::duration_opt")]
     pub timeout: Option<Duration>,
+    /// The ops it checks; a batch with none of them makes no call (spec §6.5). `None`: every op.
+    #[serde(default)]
+    pub ops: Option<Vec<Op>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -432,6 +435,11 @@ fn check_manifest(raw: RawManifest, dir: Option<&Path>) -> Result<Manifest, Stri
             match &j.prompt {
                 Some(file) => prompt_file(file).map_err(|e| format!("[{t}] prompt: {e}"))?,
                 None => only_with_prompt(t, &j.runner, &j.model)?,
+            }
+            if j.ops.as_ref().is_some_and(Vec::is_empty) {
+                return Err(format!(
+                    "[{t}] ops: name at least one op, or leave it out for all"
+                ));
             }
         }
         Spec::Hook(h) if h.events.is_empty() => {
@@ -1290,6 +1298,20 @@ repo = ""
             ),
             (
                 format!(
+                    "{}[judge]\ncommand = [\"./j\"]\nops = [\"add\", \"rename\"]\n",
+                    head("j", "judge")
+                ),
+                "rename",
+            ),
+            (
+                format!(
+                    "{}[judge]\ncommand = [\"./j\"]\nops = []\n",
+                    head("j", "judge")
+                ),
+                "ops",
+            ),
+            (
+                format!(
                     "{}[check]\ncommand = [\"./c\"]\n[params]\n\"Bad Name\" = 1\n",
                     head("c", "check")
                 ),
@@ -1745,6 +1767,17 @@ repo = ""
             );
             assert!(!p.dir.join(file).exists(), "{id}: the prompt is not a file");
         }
+        // The ops each checks (spec §10); a batch with none of them makes no call (§6.5).
+        let ops = |id: &str| match &plugins[id].manifest.spec {
+            Spec::Judge(j) => j.ops.clone(),
+            _ => None,
+        };
+        assert_eq!(
+            ops("support"),
+            Some(vec![Op::Add, Op::Update, Op::AddSource])
+        );
+        assert_eq!(ops("removal"), Some(vec![Op::Remove]));
+        assert_eq!(ops("duplicate"), Some(vec![Op::Add]));
         assert_eq!(builtin_prompt("support", "removal.md"), None);
         // The hash covers the embedded prompt, not only the version and the manifest; a check
         // has no prompt.

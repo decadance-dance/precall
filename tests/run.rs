@@ -850,6 +850,158 @@ fn a_child_of_a_rejected_parent_is_rejected_too() {
     assert_eq!(child["verdicts"][0]["reason"], "parent rejected");
 }
 
+// ---- A judge that leaves verdicts out, a judge with none of its ops (spec §6.5) ----
+
+/// `world` with `repo` proposing `a` and `b`, and the judge answering its calls with `outs`.
+fn reasked(outs: &[&str]) -> W {
+    let w = world(&props(&[
+        add("a", "layout", "Queue"),
+        add("b", "layout", "Cache"),
+    ]));
+    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    w.config(&format!(
+        "{cfg}{}",
+        w.inst(
+            "judge",
+            "judge",
+            &format!("scenario = \"seq\", out = {}", q(&outs.join("\n")))
+        )
+    ));
+    w
+}
+
+const ACCEPT_A: &str = r#"{"verdicts":[{"key":"repo/a","verdict":"accept","reason":"ok"}]}"#;
+
+/// The names of the logs in the last run dir.
+fn logs(w: &W) -> Vec<String> {
+    let runs = w.store().join("runs");
+    let last = std::fs::read_dir(&runs)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .max()
+        .unwrap();
+    let mut names: Vec<String> = std::fs::read_dir(last)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn a_missing_verdict_is_asked_once_more_with_only_its_proposal() {
+    let w = reasked(&[
+        ACCEPT_A,
+        r#"{"verdicts":[{"key":"repo/b","verdict":"accept","reason":"ok"}]}"#,
+    ]);
+    w.run_code(&[], 0);
+    assert_eq!(w.calls("judge"), 2);
+    assert_eq!(
+        w.input("judge", 2)["proposals"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(w.input("judge", 2)["proposals"][0]["key"], "repo/b");
+    let map = w.map("layout");
+    assert!(map.contains("Queue") && map.contains("Cache"), "{map}");
+    assert!(
+        w.report()
+            .contains("- re-asked: judge in round 1: repo/b\n"),
+        "{}",
+        w.report()
+    );
+    let logs = logs(&w);
+    for log in ["judge.judge.stdout", "judge.reask.stdout"] {
+        assert!(logs.iter().any(|l| l == log), "{log}: {logs:?}");
+    }
+}
+
+#[test]
+fn a_verdict_missing_twice_drops_only_its_proposal() {
+    let w = reasked(&[ACCEPT_A, r#"{"verdicts":[]}"#]);
+    w.run_code(&[], 5);
+    assert_eq!(w.calls("judge"), 2);
+    let map = w.map("layout");
+    assert!(map.contains("Queue") && !map.contains("Cache"), "{map}");
+    assert!(w.lock()["collectors"].get("repo").is_none(), "unsettled");
+    let report = w.report();
+    assert!(
+        report.contains(
+            "- re-asked: judge in round 1: repo/b; still without a verdict, dropped: repo/b\n"
+        ),
+        "{report}"
+    );
+    assert!(
+        report.contains("dropped: judge `judge` gave no verdict"),
+        "{report}"
+    );
+    assert_eq!(w.calls("repo"), 1, "a dropped proposal does not go back");
+}
+
+#[test]
+fn an_invalid_judge_output_still_drops_the_whole_batch_without_a_second_call() {
+    let w = reasked(&[
+        r#"{"verdicts":[{"key":"repo/a","verdict":"accept","reason":"ok"},{"key":"repo/z","verdict":"accept","reason":"ok"}]}"#,
+    ]);
+    w.run_code(&[], 5);
+    assert_eq!(w.calls("judge"), 1);
+    let map = w.map("layout");
+    assert!(!map.contains("Queue") && !map.contains("Cache"), "{map}");
+    assert!(!w.report().contains("re-asked"), "{}", w.report());
+}
+
+/// `world` with `repo` proposing `out` and the judge `rjudge`, which checks only `remove`.
+fn remove_judged(out: &[Value]) -> W {
+    let w = world(&props(out));
+    w.plugin(
+        "rjudge",
+        "judge",
+        &format!("[judge]\ncommand = [{}]\nops = [\"remove\"]\n", q(&fake())),
+        "",
+    );
+    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    w.config(&format!(
+        "{cfg}{}",
+        w.inst("rjudge", "rjudge", "scenario = \"all\", out = \"accept\"")
+    ));
+    w
+}
+
+#[test]
+fn a_judge_is_not_called_for_a_batch_with_none_of_its_ops() {
+    let w = remove_judged(&[add("a", "layout", "Queue")]);
+    w.run_code(&[], 0);
+    assert_eq!(w.calls("rjudge"), 0);
+    assert!(
+        w.map("layout").contains("Queue"),
+        "accepted by the skipped judge"
+    );
+    assert!(
+        w.report().contains(
+            "- judge skipped: rjudge in round 1, the batch holds none of its ops (remove)\n"
+        ),
+        "{}",
+        w.report()
+    );
+}
+
+#[test]
+fn a_batch_with_one_of_its_ops_calls_the_judge_with_the_whole_batch() {
+    let rm = json!({"key": "r", "op": "remove", "id": "auth", "sources": [], "evidence": "file:gone.md", "reason": "gone"});
+    let w = remove_judged(&[add("a", "layout", "Queue"), rm]);
+    w.run_code(&[], 0);
+    assert_eq!(w.calls("rjudge"), 1);
+    let keys: Vec<Value> = w.input("rjudge", 1)["proposals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["key"].clone())
+        .collect();
+    assert_eq!(keys, [json!("repo/a"), json!("repo/r")]);
+    assert!(!w.report().contains("judge skipped"), "{}", w.report());
+}
+
 #[test]
 fn the_commit_message_lists_each_change() {
     let w = W::new();
@@ -2095,7 +2247,12 @@ fn a_relative_claude_config_dir_is_resolved_against_the_dir_rrecall_runs_in() {
 /// `world` with `repo` adding `a`, the built-in `claude` runner and built-in judge `judge`,
 /// whose fake agent answers `verdicts`.
 fn judged(judge: &str, verdicts: Value) -> W {
-    let w = world(&props(&[add("a", "layout", "Queue")]));
+    judged_on(judge, add("a", "layout", "Queue"), verdicts)
+}
+
+/// `judged` with `repo` proposing `proposal` (key `a`).
+fn judged_on(judge: &str, proposal: Value, verdicts: Value) -> W {
+    let w = world(&props(&[proposal]));
     agent(&w, "ok", &verdicts);
     let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
     w.config(&format!(
@@ -2115,9 +2272,20 @@ fn verdict(key: &str, v: &str, reason: &str) -> Value {
 #[test]
 fn a_builtin_judge_runs_its_embedded_prompt_through_the_runner_and_its_reject_holds() {
     for judge in ["support", "removal", "duplicate"] {
-        let w = judged(judge, verdict("repo/a", "reject", "no source backs it"));
+        // `removal` checks only removals (its `ops`), the others additions too.
+        let proposal = if judge == "removal" {
+            json!({"key": "a", "op": "remove", "id": "auth", "sources": [], "evidence": "file:gone.md", "reason": "gone"})
+        } else {
+            add("a", "layout", "Queue")
+        };
+        let w = judged_on(
+            judge,
+            proposal,
+            verdict("repo/a", "reject", "no source backs it"),
+        );
         w.run_code(&[], 0);
         assert!(!w.map("layout").contains("Queue"), "{judge}");
+        assert!(w.map("layout").contains("\"id\":\"auth\""), "{judge}");
         assert!(w.report().contains("no source backs it"), "{judge}");
         let stdin = std::fs::read_to_string(w.root.join("home/agent/claude.stdin.1")).unwrap();
         let prompt = rrecall::plugin::builtin_prompt(judge, &format!("{judge}.md")).unwrap();
@@ -2144,6 +2312,15 @@ fn a_builtin_judge_revise_goes_back_to_the_collector_with_its_instruction() {
 fn a_builtin_judge_that_omits_a_verdict_accepts_nothing() {
     let w = judged("duplicate", json!({"verdicts": []}));
     let o = w.run_code(&[], 5);
+    assert!(
+        w.root.join("home/agent/claude.stdin.2").is_file(),
+        "asked once more"
+    );
+    assert!(
+        w.report().contains("(duplicate $0.50)"),
+        "both calls count: {}",
+        w.report()
+    );
     assert!(!w.map("layout").contains("Queue"));
     assert!(o.stderr.contains("duplicate"), "{}", o.stderr);
     assert!(w.lock()["collectors"].get("repo").is_none(), "unsettled");
