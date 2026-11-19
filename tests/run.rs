@@ -1787,7 +1787,10 @@ fn the_builtin_slack_collector_reads_through_a_connector_runner_once_a_day() {
     w.run_code(&[], 0);
     assert_eq!(agent_rec("claude.calls").lines().count(), 2);
     // A day later the agent reads from the settled run, with the overlap and the cap.
-    assert!(collect.contains("\"since\": null"), "the first run reads its whole window");
+    assert!(
+        collect.contains("\"since\": null"),
+        "the first run reads its whole window"
+    );
     assert!(
         collect.contains("one day before `since.at`") && collect.contains("`lookback_days`"),
         "{collect}"

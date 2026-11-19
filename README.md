@@ -4,7 +4,7 @@
 
 A run sends collectors over the project's sources (the repo, its tracker, its chat, your notes), merges what they find into the current map, and lets checks and judges send rejected changes back for rework before anything is committed. The map lives in its own git repository, so every change shows in `git diff` and `git blame`. People read it as an HTML page; coding agents query one branch at a time (`rrecall show decisions`).
 
-Status: milestone 1: the map store and the query commands (`init`, `import`, `ls`, `show`, `find`, `why`, `recent`, `status`, `note`, `rm`, `agent-instructions`); milestone 2: the plugin protocol, `rrecall run` and the built-in checks; milestone 3 in progress: the built-in `claude` and `codex` runners and declarative plugins (a manifest and a prompt), the built-in judges `support`, `removal` and `duplicate`, and the built-in collectors `files`, `git-history` and `github`, with the `slack` collector next. The product and the plan: [docs/VISION.md](docs/VISION.md) and [docs/SPEC.md](docs/SPEC.md). Contributing: [AGENTS.md](AGENTS.md).
+Status: milestone 1: the map store and the query commands (`init`, `import`, `ls`, `show`, `find`, `why`, `recent`, `status`, `note`, `rm`, `agent-instructions`); milestone 2: the plugin protocol, `rrecall run` and the built-in checks; milestone 3 in progress: the built-in `claude` and `codex` runners and declarative plugins (a manifest and a prompt), the built-in judges `support`, `removal` and `duplicate`, and the built-in collectors `files`, `git-history`, `github` and `slack`. A run collects incrementally: each collector reads only what changed since its last settled run; `rrecall run --force` reads everything again. The product and the plan: [docs/VISION.md](docs/VISION.md) and [docs/SPEC.md](docs/SPEC.md). Contributing: [AGENTS.md](AGENTS.md).
 
 ## Slack
 
@@ -33,6 +33,6 @@ allowed_runners = ["claude-slack", "claude"]
 params = { channels = ["eng-platform"], dms = [], lookback_days = 14 }
 ```
 
-It runs at most once a day (`min_interval = "1d"`) and proposes decisions, people and blockers, each citing `slack:<channel-id>/<ts>`. `allowed_runners` keeps Slack text on these two runner instances; judges can stay on the plain `claude` one. `connectors = true` runs the agent in a fresh Claude Code config dir that keeps your login: your CLAUDE.md, settings, permission rules, hooks and local plugins stay out; what your account syncs from claude.ai (its connectors and synced plugins) still loads.
+It runs at most once a day (`min_interval = "1d"`), reads from a day before its last settled run (the first run, and `--force`, read the last `lookback_days` days) and proposes decisions, people and blockers, each citing `slack:<channel-id>/<ts>`. `allowed_runners` keeps Slack text on these two runner instances; judges can stay on the plain `claude` one. `connectors = true` runs the agent in a fresh Claude Code config dir that keeps your login: your CLAUDE.md, settings, permission rules, hooks and local plugins stay out; what your account syncs from claude.ai (its connectors and synced plugins) still loads.
 
 License: [Apache-2.0](LICENSE).
