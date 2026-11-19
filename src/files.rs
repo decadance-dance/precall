@@ -261,9 +261,14 @@ impl Scope {
             return None;
         }
         // The rules collection reads by: a regular file, no symlink, text by the byte rule.
+        // `--literal-pathspecs`: a name such as `:notes.md` is a path, not pathspec magic.
         let bytes = match commit {
             Some(c) => {
-                let entry = git(&self.root, &["ls-tree", "-z", c, "--", rel]).ok()?;
+                let entry = git(
+                    &self.root,
+                    &["--literal-pathspecs", "ls-tree", "-z", c, "--", rel],
+                )
+                .ok()?;
                 let (meta, path) = entry.trim_end_matches('\0').split_once('\t')?;
                 if path != rel {
                     return None;

@@ -267,6 +267,20 @@ struct Want {
     reason: String,
 }
 
+/// A release's title: its tag, or for a tag longer than a title its first 70 characters and a
+/// hash of the whole name, so two long tags never share one. A tag holds no whitespace, so no
+/// release title equals a stream's `Merged <branch>`, and the title is the node's identity.
+fn tag_title(name: &str) -> String {
+    if name.chars().count() <= TITLE_MAX {
+        return name.to_string();
+    }
+    let head: String = name.chars().take(TITLE_MAX - 10).collect();
+    format!(
+        "{head}… {}",
+        &crate::files::sha256_hex(name.as_bytes())[..8]
+    )
+}
+
 fn wanted(dir: &Path, repo: &str, branch: &str) -> Result<Vec<Want>> {
     let main = main_commits(dir, branch)?;
     let tags = tags(dir, &main)?;
@@ -278,7 +292,7 @@ fn wanted(dir: &Path, repo: &str, branch: &str) -> Result<Vec<Want>> {
             .filter(|(sha, _)| main.contains_key(sha))
             .map(|(sha, m)| Want {
                 key: format!("merge:{}", &sha[..SHA_LEN]),
-                title: cut(&m.branch, TITLE_MAX),
+                title: cut(&format!("Merged {}", m.branch), TITLE_MAX),
                 body: cut(&m.body, BODY_MAX),
                 date: m.date.clone(),
                 source: reference(repo, sha),
@@ -308,7 +322,7 @@ fn wanted(dir: &Path, repo: &str, branch: &str) -> Result<Vec<Want>> {
         };
         out.push(Want {
             key: format!("tag:{}", t.name),
-            title: cut(&t.name, TITLE_MAX),
+            title: tag_title(&t.name),
             body: cut(&body, BODY_MAX),
             date: t.date.clone(),
             source: reference(repo, &t.commit),
@@ -326,9 +340,9 @@ fn collect(dir: &Path, repo: &str, branch: &str, input: &str) -> Result<String> 
     if input["round"].as_u64().unwrap_or(1) > 1 {
         return Ok(json!({"proposals": []}).to_string());
     }
-    // This collector's nodes by the reference they cite and their title, the tag or the
-    // branch: two tags of one commit, or a stream and the release tagged on its merge, cite
-    // one commit and stay two nodes.
+    // This collector's nodes by the reference they cite and their title (`tag_title`, or
+    // `Merged <branch>` for a stream): two tags of one commit, or a stream and the release
+    // tagged on its merge, cite one commit and stay two nodes.
     let mut ours: BTreeMap<(&str, &str), &Value> = BTreeMap::new();
     for n in input["nodes"].as_array().into_iter().flatten() {
         let title = n["title"].as_str().unwrap_or("");
@@ -345,10 +359,11 @@ fn collect(dir: &Path, repo: &str, branch: &str, input: &str) -> Result<String> 
                 "key": w.key, "op": "add", "parent": "done", "title": w.title, "body": w.body,
                 "date": w.date, "state": "done", "sources": [w.source], "reason": w.reason,
             })),
-            Some(n) if n["body"] != w.body.as_str() => proposals.push(json!({
-                "key": w.key, "op": "update", "id": n["id"], "title": w.title,
-                "body": w.body, "sources": [w.source], "reason": w.reason,
-            })),
+            Some(n) if n["body"] != w.body.as_str() || n["date"] != w.date.as_str() => proposals
+                .push(json!({
+                    "key": w.key, "op": "update", "id": n["id"], "title": w.title,
+                    "body": w.body, "date": w.date, "sources": [w.source], "reason": w.reason,
+                })),
             Some(_) => {}
         }
     }

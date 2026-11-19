@@ -234,10 +234,13 @@ fn git_history_proposes_a_done_node_per_merged_branch_until_there_are_releases()
     history_config(&w);
     w.run(0);
     let done = w.map("done");
-    assert_eq!(titles(&done), ["feature/lexer", "feature/parser"]);
+    assert_eq!(
+        titles(&done),
+        ["Merged feature/lexer", "Merged feature/parser"]
+    );
     let parser = done
         .iter()
-        .find(|n| n["title"] == "feature/parser")
+        .find(|n| n["title"] == "Merged feature/parser")
         .unwrap();
     assert_eq!(parser["body"], "Add the parser");
     assert_eq!(parser["date"], "2026-03-04");
@@ -261,7 +264,7 @@ fn git_history_proposes_a_done_node_per_merged_branch_until_there_are_releases()
     let done = w.map("done");
     assert_eq!(
         titles(&done),
-        ["feature/lexer", "feature/parser", "v0.1.0"],
+        ["Merged feature/lexer", "Merged feature/parser", "v0.1.0"],
         "merges after the newest tag wait for the next release"
     );
     let rel = done.iter().find(|n| n["title"] == "v0.1.0").unwrap();
@@ -355,7 +358,7 @@ fn git_history_keeps_two_tags_of_one_commit_and_a_stream_tagged_on_its_merge_apa
     let first = done_pairs(&w);
     assert_eq!(
         first.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>(),
-        ["feature/a", "v1", "v2"]
+        ["Merged feature/a", "v1", "v2"]
     );
     let head = w.store_head();
     let o = w.raw(&["--project", "widget", "run", "--force"], None, &[]);
@@ -366,6 +369,97 @@ fn git_history_keeps_two_tags_of_one_commit_and_a_stream_tagged_on_its_merge_apa
         head,
         "a forced run over unchanged history changes nothing"
     );
+}
+
+/// The `done` nodes as (title, body, date), sorted.
+fn done_facts(w: &W) -> Vec<(String, String, String)> {
+    let mut v: Vec<(String, String, String)> = w
+        .map("done")
+        .iter()
+        .map(|n| {
+            let f = |k: &str| n[k].as_str().unwrap_or("").to_string();
+            (f("title"), f("body"), f("date"))
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn git_history_keeps_a_stream_apart_from_a_release_tagged_with_its_branchs_name() {
+    // Review round 2, finding 1: branch `v3` merged, then the merge tagged `v3`.
+    let w = W::new();
+    w.commit_file("README.md", "widget\n", "init");
+    w.git(&["checkout", "-q", "-b", "v3"]);
+    w.commit_file("v3.txt", "v3", "stream");
+    w.git(&["checkout", "-q", "main"]);
+    w.git(&[
+        "merge",
+        "-q",
+        "--no-ff",
+        "v3",
+        "-m",
+        "Merge branch 'v3'",
+        "-m",
+        "Stream body",
+    ]);
+    history_config(&w);
+    w.run(0);
+    w.git(&["tag", "-a", "v3", "-m", "Release body"]);
+    w.run(0);
+    let facts = done_facts(&w);
+    let bodies: Vec<(&str, &str)> = facts
+        .iter()
+        .map(|(t, b, _)| (t.as_str(), b.as_str()))
+        .collect();
+    assert_eq!(
+        bodies,
+        [("Merged v3", "Stream body"), ("v3", "Release body")],
+        "the stream survives and the tag gets its own node"
+    );
+}
+
+#[test]
+fn git_history_keeps_two_long_tags_with_one_cut_title_apart() {
+    // Review round 2, finding 1: titles are cut to 80 characters, tag names are not.
+    let w = W::new();
+    w.commit_file("README.md", "widget\n", "init");
+    history_config(&w);
+    let stem = "r".repeat(85);
+    w.git(&["tag", "-a", &format!("{stem}-a"), "-m", "Alpha"]);
+    w.git(&["tag", "-a", &format!("{stem}-b"), "-m", "Beta"]);
+    w.run(0);
+    let first = done_facts(&w);
+    assert_eq!(first.len(), 2, "{first:?}");
+    assert_ne!(first[0].0, first[1].0, "two tags, two titles");
+    assert!(first.iter().all(|(t, _, _)| t.chars().count() <= 80));
+    let head = w.store_head();
+    let o = w.raw(&["--project", "widget", "run", "--force"], None, &[]);
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    assert_eq!(done_facts(&w), first);
+    assert_eq!(w.store_head(), head, "a forced run changes nothing");
+}
+
+#[test]
+fn git_history_updates_a_release_whose_tag_date_changed() {
+    // Review round 2, finding 3: `v1` recreated at the same commit a day later.
+    let w = W::new();
+    w.commit_file("README.md", "widget\n", "init");
+    history_config(&w);
+    git_at(
+        &w.repo(),
+        "2026-01-01T10:00:00Z",
+        &["tag", "-a", "v1", "-m", "Notes"],
+    );
+    w.run(0);
+    assert_eq!(done_facts(&w)[0].2, "2026-01-01");
+    git_at(
+        &w.repo(),
+        "2026-01-02T10:00:00Z",
+        &["tag", "-f", "-a", "v1", "-m", "Notes"],
+    );
+    w.run(0);
+    assert_eq!(done_facts(&w)[0].2, "2026-01-02");
 }
 
 #[test]
@@ -1168,6 +1262,31 @@ fn files_resolve_keeps_to_what_collection_reads() {
     assert_eq!(t[&refs[0]], Value::Null);
     assert_eq!(t[&refs[1]], Value::Null);
     assert_eq!(t[&refs[2]], "Known\n");
+}
+
+#[test]
+fn files_resolves_a_name_git_would_read_as_pathspec_magic() {
+    // Review round 2, finding 2: a leading `:` is pathspec syntax unless pathspecs are literal.
+    let w = W::new();
+    w.commit_file("README.md", "widget\n", "init");
+    std::fs::write(w.repo().join(":notes.md"), "Colon path\n").unwrap();
+    w.git(&["--literal-pathspecs", "add", "--", ":notes.md"]);
+    w.git(&["commit", "-q", "-m", "notes"]);
+    let c = w.git(&["rev-parse", "--short=12", "HEAD"]);
+    let o = files(&w, "fetch", &files_params(&w, true, &[]), "{}");
+    let f: Value = serde_json::from_str(&o.stdout).unwrap();
+    assert!(
+        f["files"].as_array().unwrap().contains(&json!(":notes.md")),
+        "{f}"
+    );
+    let r = format!("file::notes.md@{c}");
+    let t = texts(&files(
+        &w,
+        "resolve",
+        &files_params(&w, true, &[]),
+        &json!({ "refs": [&r] }).to_string(),
+    ));
+    assert_eq!(t[&r], "Colon path\n");
 }
 
 #[test]
