@@ -236,12 +236,15 @@ fn kill_group(child: &mut Child) -> Result<(), std::io::Error> {
 /// Runs the hook instances subscribed to `event`, in config order (spec §6.6). On a `*.before`
 /// event the first hook that denies, fails, times out or prints anything but `{}` or
 /// `{"deny": "<reason>"}` aborts the run (exit 4). On other events a failure is only returned,
-/// one line per hook, for the report.
+/// one line per hook, for the report. A non-empty `tag` goes into the log names
+/// (`<hook>.<event>.<tag>.stdout`), so an event that fires per collector or per round keeps
+/// every call's logs.
 pub fn run_hooks(
     ctx: &Ctx,
     instances: &[Instance],
     event: Event,
     data: &serde_json::Value,
+    tag: &str,
 ) -> Result<Vec<String>> {
     let input = HookInput {
         event,
@@ -250,6 +253,11 @@ pub fn run_hooks(
         data: data.clone(),
     };
     let name = event.name();
+    let entry = if tag.is_empty() {
+        name.clone()
+    } else {
+        format!("{name}.{tag}")
+    };
     let mut warnings = Vec::new();
     for inst in instances {
         let Spec::Hook(h) = &inst.plugin.manifest.spec else {
@@ -260,7 +268,7 @@ pub fn run_hooks(
         }
         if !event.can_deny() {
             // The event ignores output, so only the process itself can fail.
-            if let Err(e) = run(ctx, inst, &name, &h.command, &input) {
+            if let Err(e) = run(ctx, inst, &entry, &h.command, &input) {
                 warnings.push(format!(
                     "hook `{}` failed on `{name}`: plugin `{}` ({name}): {e:#}",
                     inst.id, inst.id
@@ -268,7 +276,7 @@ pub fn run_hooks(
             }
             continue;
         }
-        let deny = call(ctx, inst, &name, &h.command, &input)
+        let deny = call(ctx, inst, &entry, &h.command, &input)
             .and_then(|o| wire::decode_hook(&inst.id, &o))
             .map_err(|e| {
                 error::aborted(format!(
@@ -518,7 +526,7 @@ mod tests {
         let data = serde_json::json!({});
         let allow = w.instance("gate", "gate", "ok", "{}");
         assert_eq!(
-            run_hooks(&w.ctx(), &[allow], Event::RunBefore, &data).unwrap(),
+            run_hooks(&w.ctx(), &[allow], Event::RunBefore, &data, "").unwrap(),
             Vec::<String>::new()
         );
         assert!(w.run_dir().join("gate.run.before.stderr").is_file());
@@ -537,7 +545,7 @@ mod tests {
         ] {
             let mut inst = w.instance("gate", "gate", scenario, out);
             inst.timeout = Duration::from_millis(300);
-            let e = run_hooks(&w.ctx(), &[inst], Event::RunBefore, &data).unwrap_err();
+            let e = run_hooks(&w.ctx(), &[inst], Event::RunBefore, &data, "").unwrap_err();
             assert_eq!(crate::error::exit_code(&e), 4, "{e:#}");
             let e = format!("{e:#}");
             assert!(
@@ -547,7 +555,7 @@ mod tests {
         }
         // A hook not subscribed to the event does not run.
         let crash = w.instance("gate", "gate", "crash", "");
-        assert!(run_hooks(&w.ctx(), &[crash], Event::CommitBefore, &data).is_ok());
+        assert!(run_hooks(&w.ctx(), &[crash], Event::CommitBefore, &data, "").is_ok());
     }
 
     #[test]
@@ -562,7 +570,8 @@ mod tests {
                 &w.ctx(),
                 &[first, second],
                 Event::CommitBefore,
-                &serde_json::json!({})
+                &serde_json::json!({}),
+                "",
             )
             .unwrap_err()
         );
@@ -580,6 +589,7 @@ mod tests {
             &[inst],
             Event::CommitAfter,
             &serde_json::json!({}),
+            "",
         )
         .unwrap();
         assert!(warnings.is_empty(), "{warnings:?}");
@@ -763,6 +773,7 @@ mod tests {
             &[ok, bad],
             Event::CommitAfter,
             &serde_json::json!({"commit": "abc"}),
+            "",
         )
         .unwrap();
         assert_eq!(warnings.len(), 1, "{warnings:?}");

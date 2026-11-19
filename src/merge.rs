@@ -879,7 +879,12 @@ mod tests {
             "repo",
             r#"{"key":"b","op":"remove","id":"auth","evidence":"file:gone"}"#,
         );
-        let out = apply(&s, &rules(), std::slice::from_ref(&parent), &BTreeMap::new());
+        let out = apply(
+            &s,
+            &rules(),
+            std::slice::from_ref(&parent),
+            &BTreeMap::new(),
+        );
         assert!(out.failed["repo/a"].contains("I3"), "{:?}", out.failed);
         assert!(out.store.nodes.contains_key("api"));
         let out = apply(&s, &rules(), &[parent.clone(), child], &BTreeMap::new());

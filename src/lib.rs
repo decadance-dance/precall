@@ -9,6 +9,7 @@ pub mod outline;
 pub mod plugin;
 pub mod process;
 pub mod query;
+pub mod run;
 pub mod store;
 pub mod wire;
 #[cfg(test)]

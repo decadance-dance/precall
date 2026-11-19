@@ -3,6 +3,7 @@
 use crate::config::{self, BranchDef, STORE_CONFIG};
 use crate::error;
 use crate::history;
+use crate::lock;
 use crate::node::{self, Node};
 use crate::outline;
 use crate::query;
@@ -14,6 +15,14 @@ use std::path::Path;
 pub fn open(project: Option<&str>) -> Result<Store> {
     let (_, path) = config::resolve_project(project)?;
     Store::load(&path)
+}
+
+/// The store loaded under its run lock, for a command that writes it: a run in progress would
+/// otherwise commit its in-memory map over this command's change.
+fn open_locked(project: Option<&str>) -> Result<(Store, lock::StoreLock)> {
+    let (_, path) = config::resolve_project(project)?;
+    let held = lock::acquire(&path, true)?.context("the store lock was not granted")?;
+    Ok((Store::load(&path)?, held))
 }
 
 pub fn init(name_arg: Option<&str>, project_flag: Option<&str>) -> Result<String> {
@@ -200,7 +209,7 @@ pub fn recent(project: Option<&str>, since: &str, json: bool) -> Result<String> 
     history::recent(&open(project)?, since, json)
 }
 
-/// The last run report under `runs/`; the reports themselves come with `rrecall run` (M2).
+/// The summary of the last run report under `runs/` (spec §2).
 pub fn status(project: Option<&str>, json: bool) -> Result<String> {
     let s = open(project)?;
     let last = std::fs::read_dir(s.root.join("runs"))
@@ -218,7 +227,9 @@ pub fn status(project: Option<&str>, json: bool) -> Result<String> {
     };
     Ok(match (json, last, report) {
         (true, run, report) => format!("{}\n", serde_json::json!({ "run": run, "report": report })),
-        (false, Some(run), Some(report)) => format!("Last run: {run}\n\n{report}"),
+        (false, Some(run), Some(report)) => {
+            format!("Last run: {run}\n\n{}", crate::run::summary_of(&report))
+        }
         _ => "No run report yet: this map has not been through `rrecall run`.\n".into(),
     })
 }
@@ -235,7 +246,7 @@ fn stored_node<'a>(s: &'a Store, id: &str) -> Result<&'a Node> {
 
 /// Sets or clears the user's note (spec §5 I7); the only field this command writes.
 pub fn note(project: Option<&str>, id: &str, text: &str) -> Result<String> {
-    let mut s = open(project)?;
+    let (mut s, _held) = open_locked(project)?;
     let new = (!text.is_empty()).then(|| text.to_string());
     if stored_node(&s, id)?.note == new {
         return Ok(format!("No change: `{id}` already has this note.\n"));
@@ -259,7 +270,7 @@ pub fn rm(
     reason: Option<&str>,
     recursive: bool,
 ) -> Result<String> {
-    let mut s = open(project)?;
+    let (mut s, _held) = open_locked(project)?;
     stored_node(&s, id)?;
     let desc = s.descendants(id);
     if !desc.is_empty() && !recursive {
@@ -296,8 +307,8 @@ For the live status of a task, ask the tracker the map points to.
 ";
 
 pub fn import(project: Option<&str>, file: &Path) -> Result<String> {
-    let (_, path) = config::resolve_project(project)?;
-    let mut s = Store::load(&path)?;
+    let (mut s, _held) = open_locked(project)?;
+    let path = s.root.clone();
     if s.nodes.len() > s.branches.len() {
         return Err(error::usage(
             "the map already has nodes; `rrecall import` seeds an empty map",

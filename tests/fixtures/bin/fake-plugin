@@ -1,9 +1,13 @@
 #!/bin/sh
 # A fake plugin for tests. Its scenario comes from the env var RRECALL_PARAM_SCENARIO (the
-# instance's `scenario` param): ok (print RRECALL_PARAM_OUT), binary (print a byte that is not
-# UTF-8), crash (exit 3), sleep (never answers; the pid of the sleep it starts goes to
+# instance's `scenario` param): ok (print RRECALL_PARAM_OUT), seq (on the Nth call print line N
+# of RRECALL_PARAM_OUT, the last line once the lines run out), binary (print a byte that is not
+# UTF-8), all (a check or judge: the verdict RRECALL_PARAM_OUT for every `<collector>/<key>` in
+# its input), crash (exit 3), sleep (never answers; the pid of the sleep it starts goes to
 # RRECALL_PARAM_RECORD.pid). It records its argv, cwd and RRECALL_* environment to
-# RRECALL_PARAM_RECORD and its stdin to RRECALL_PARAM_RECORD.stdin, and writes one line to stderr.
+# RRECALL_PARAM_RECORD, its stdin to RRECALL_PARAM_RECORD.stdin (and RRECALL_PARAM_RECORD.stdin.N
+# for the Nth call), appends one line per call to RRECALL_PARAM_RECORD.calls, and writes one line
+# to stderr.
 rec="${RRECALL_PARAM_RECORD:-/dev/null}"
 {
     printf 'argv:'
@@ -12,9 +16,29 @@ rec="${RRECALL_PARAM_RECORD:-/dev/null}"
     env | grep '^RRECALL_' | sort
 } > "$rec"
 cat > "$rec.stdin"
+n=1
+if [ "$rec" != /dev/null ]; then
+    echo call >> "$rec.calls"
+    n=$(wc -l < "$rec.calls" | tr -d ' ')
+    cp "$rec.stdin" "$rec.stdin.$n"
+fi
 echo "fake plugin: scenario ${RRECALL_PARAM_SCENARIO}" >&2
 case "$RRECALL_PARAM_SCENARIO" in
     ok) printf '%s' "$RRECALL_PARAM_OUT" ;;
+    seq)
+        total=$(printf '%s\n' "$RRECALL_PARAM_OUT" | wc -l | tr -d ' ')
+        [ "$n" -gt "$total" ] && n=$total
+        printf '%s\n' "$RRECALL_PARAM_OUT" | sed -n "${n}p" | tr -d '\n' ;;
+    all)
+        printf '{"verdicts":['
+        sep=
+        for k in $(grep -o '"key":"[^"]*/[^"]*"' "$rec.stdin" | sed 's/"key"://'); do
+            extra=
+            [ "$RRECALL_PARAM_OUT" = revise ] && extra=',"instruction":"fake instruction"'
+            printf '%s{"key":%s,"verdict":"%s","reason":"fake %s"%s}' "$sep" "$k" "$RRECALL_PARAM_OUT" "$RRECALL_PARAM_OUT" "$extra"
+            sep=,
+        done
+        printf ']}' ;;
     binary) printf '\377' ;;
     crash) exit 3 ;;
     sleep) sleep 30 & echo $! > "$rec.pid"; wait ;;

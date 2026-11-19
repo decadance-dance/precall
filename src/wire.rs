@@ -164,6 +164,55 @@ pub struct Verdict {
     pub instruction: Option<String>,
 }
 
+/// What a fingerprint entrypoint and a view get on stdin (spec §4.1 steps 2 and 10).
+#[derive(Debug, Serialize)]
+pub struct PluginInput {
+    pub project: String,
+    pub run_id: String,
+    pub params: Params,
+}
+
+/// Runner input (spec §6.8).
+// limit: `prompt` is the prompt file's text as is and `output_schema` only the top-level shape;
+// rendering the prompt with its input and schema, and a full schema, come with #7.
+#[derive(Debug, Serialize)]
+pub struct RunnerInput {
+    pub prompt: String,
+    pub input: serde_json::Value,
+    pub output_schema: serde_json::Value,
+    pub model: String,
+    /// Seconds.
+    pub timeout: u64,
+    pub read_only: bool,
+}
+
+/// Runner output (spec §6.8).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerOutput {
+    pub output: serde_json::Value,
+    pub cost_usd: f64,
+    pub model: String,
+}
+
+/// A runner's answer: `cost_usd` a finite number of at least 0, `model` not empty.
+pub fn decode_runner(plugin: &str, stdout: &str) -> Result<RunnerOutput> {
+    let obj = parse(plugin, stdout)?;
+    no_nulls(&obj).map_err(|e| anyhow!("plugin `{plugin}`: output {e}"))?;
+    let out = RunnerOutput::deserialize(serde_json::Value::Object(obj))
+        .map_err(|e| anyhow!("plugin `{plugin}`: output does not decode: {e}"))?;
+    if !out.cost_usd.is_finite() || out.cost_usd < 0.0 {
+        bail!(
+            "plugin `{plugin}`: `cost_usd` {} is not a cost",
+            out.cost_usd
+        );
+    }
+    if out.model.trim().is_empty() {
+        bail!("plugin `{plugin}`: `model` is empty");
+    }
+    Ok(out)
+}
+
 /// The events of spec §6.6.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Event {
@@ -675,6 +724,35 @@ mod tests {
         ] {
             let e = decode_verdicts("j", bad, &keys).unwrap_err().to_string();
             assert!(e.contains("plugin `j`"), "{bad}: {e}");
+        }
+    }
+
+    #[test]
+    fn runner_output_is_strict() {
+        let r = decode_runner(
+            "fake",
+            r#"{"output":{"proposals":[]},"cost_usd":0.25,"model":"fake-1"}"#,
+        )
+        .unwrap();
+        assert_eq!(r.cost_usd, 0.25);
+        assert_eq!(r.model, "fake-1");
+        assert_eq!(r.output, serde_json::json!({"proposals": []}));
+        for (bad, want) in [
+            (r#"{"output":{},"model":"m"}"#, "cost_usd"),
+            (r#"{"output":{},"cost_usd":-1,"model":"m"}"#, "cost_usd"),
+            (r#"{"output":{},"cost_usd":0,"model":""}"#, "model"),
+            (
+                r#"{"output":{},"cost_usd":0,"model":"m","tokens":3}"#,
+                "tokens",
+            ),
+            (r#"{"output":null,"cost_usd":0,"model":"m"}"#, "output"),
+            ("[]", "object"),
+        ] {
+            let e = decode_runner("fake", bad).unwrap_err().to_string();
+            assert!(
+                e.contains("plugin `fake`") && e.contains(want),
+                "{bad}: {e}"
+            );
         }
     }
 
