@@ -34,6 +34,7 @@ command = ["rrecall", "builtin", "claude"]
 prices = {}
 connectors = false
 tools = []
+effort = ""
 "#,
     r#"id = "codex"
 name = "Codex, headless and read-only (codex exec)"
@@ -255,12 +256,33 @@ fn model_args(flag: &str, model: &str) -> Result<Vec<String>> {
     Ok(vec![flag.into(), model.into()])
 }
 
+/// The `claude` runner's param `effort` (spec §6.8): empty, or one of these.
+const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+fn check_effort(effort: &str) -> Result<(), String> {
+    if effort.is_empty() || EFFORTS.contains(&effort) {
+        Ok(())
+    } else {
+        Err(format!(
+            "param `effort` must be one of {}, or empty for the agent's default",
+            EFFORTS.join(", ")
+        ))
+    }
+}
+
+/// A `claude` instance's params checked at load (exit 4), before any run calls it.
+pub fn check_params(params: &toml::Table) -> Result<(), String> {
+    check_effort(params.get("effort").and_then(|v| v.as_str()).unwrap_or(""))
+}
+
 /// The `claude` runner's params `connectors` and `tools` (spec §6.8): whether the call loads
-/// the user's claude.ai connectors, and which of their tools, by exact name, it may use.
+/// the user's claude.ai connectors, and which of their tools, by exact name, it may use; and
+/// `effort`, passed as `--effort` when set.
 #[derive(Default, Debug)]
 struct Access {
     connectors: bool,
     tools: Vec<String>,
+    effort: Option<String>,
 }
 
 fn access_from_env() -> Result<Access> {
@@ -286,7 +308,15 @@ fn access_from_env() -> Result<Access> {
     if !tools.is_empty() && !connectors {
         bail!("param `tools` needs `connectors = true`: without it no MCP tool loads");
     }
-    Ok(Access { connectors, tools })
+    let effort = param("effort").filter(|e| !e.is_empty());
+    if let Some(e) = &effort {
+        check_effort(e).map_err(|m| anyhow!(m))?;
+    }
+    Ok(Access {
+        connectors,
+        tools,
+        effort,
+    })
 }
 
 /// `mcp__<server>__<tool>`, each part letters, digits, `_` or `-`: one tool, so a server-wide
@@ -388,6 +418,10 @@ fn claude_launch(input: &RunnerInput, dir: &Path, access: &Access) -> Result<Lau
     );
     args.push(input.output_schema.to_string());
     args.extend(model_args("--model", &input.model)?);
+    // In the launch args, so the wrap-up turn resumes with the same effort.
+    if let Some(e) = &access.effort {
+        args.extend(["--effort".into(), e.clone()]);
+    }
     Ok(Launch {
         program: "claude",
         args,

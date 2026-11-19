@@ -62,6 +62,7 @@ pub fn run(project: Option<&str>, opts: &Opts) -> Result<String> {
         models: BTreeMap::new(),
         warnings: Vec::new(),
         commit: None,
+        drift: None,
         accepts: BTreeMap::new(),
         fetched: Default::default(),
         since: BTreeMap::new(),
@@ -120,6 +121,37 @@ pub fn summary_of(report: &str) -> &str {
     report[from..]
         .find("\n## ")
         .map_or(report, |i| &report[..from + i])
+}
+
+/// Drift (spec §5): the nodes the net diff changed over the nodes before or after the run,
+/// branches excluded; a node both updated and moved counts once.
+fn drift(before: &Store, after: &Store, diff: &[Effect]) -> String {
+    let total = before
+        .nodes
+        .values()
+        .chain(after.nodes.values())
+        .filter(|n| n.parent.is_some())
+        .map(|n| n.id.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
+    let changed = diff
+        .iter()
+        .map(|e| e.id.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
+    let count = |c: &str| diff.iter().filter(|e| e.change == c).count();
+    let pct = if total == 0 {
+        0.0
+    } else {
+        100.0 * changed as f64 / total as f64
+    };
+    format!(
+        "{changed} of {total} nodes changed ({pct:.1}%): {} added, {} updated, {} moved, {} removed",
+        count("added"),
+        count("updated"),
+        count("moved"),
+        count("removed")
+    )
 }
 
 /// Why a plugin call gave no answer.
@@ -214,6 +246,8 @@ struct Run {
     models: BTreeMap<String, (String, String)>,
     warnings: Vec<String>,
     commit: Option<(String, String)>,
+    /// A forced run's drift (spec §5), once its changes are written.
+    drift: Option<String>,
     /// This round's `accept` verdicts by full key: for the report only, never sent back.
     accepts: BTreeMap<String, Vec<RoundVerdict>>,
     /// Collector instance to its `fetch` output: fetched once per run, sent every round.
@@ -625,8 +659,12 @@ impl Run {
             changes.push((lock::LOCK_FILE.to_string(), Some(lock_text)));
         }
         let mut hash: Option<String> = None;
-        if !changes.is_empty() {
-            let diff = merge::net(&base, &work, &effects);
+        let diff = merge::net(&base, &work, &effects);
+        // Reported once the changes are written: an abort before the commit changed nothing.
+        let measured = opts.force.then(|| drift(&base, &work, &diff));
+        if changes.is_empty() {
+            self.drift = measured;
+        } else {
             // Tracked in the store: error lines quote a plugin's stderr (spec §4.3).
             let message = secrets::redact(&self.message(&diff));
             self.hook(
@@ -635,7 +673,22 @@ impl Run {
                 "",
             )?;
             // `false`: git found nothing to commit (its own normalization), so no commit to report.
-            if store::write_and_commit(&self.ctx.store, &changes, &message)? {
+            let written = store::write_and_commit(&self.ctx.store, &changes, &message);
+            let lag = written
+                .as_ref()
+                .is_err_and(|e| e.downcast_ref::<store::IndexLag>().is_some());
+            if written.is_ok() || lag {
+                self.drift = measured;
+            }
+            if lag {
+                // The commit landed: the report shows it beside the error.
+                if let Ok(h) = store::git(&self.ctx.store, &["rev-parse", "HEAD"]) {
+                    let subject = message.lines().next().unwrap_or("").to_string();
+                    self.commit = Some((h.trim().to_string(), subject));
+                }
+            }
+            let committed = written?;
+            if committed {
                 let h = store::git(&self.ctx.store, &["rev-parse", "HEAD"])?
                     .trim()
                     .to_string();
@@ -720,27 +773,28 @@ impl Run {
             None => None,
         };
         let (runner, model) = self.configured(inst);
-        let combined = sha256(
-            json!({
-                "fingerprint": output,
-                "plugin": self.hashes.get(&inst.id),
-                "params": inst.params_json(),
-                "runner": runner,
-                "model": model,
-            })
-            .to_string()
-            .as_bytes(),
-        );
-        let setup = sha256(
-            json!({
-                "plugin": self.hashes.get(&inst.id),
-                "params": inst.params_json(),
-                "runner": runner,
-                "model": model,
-            })
-            .to_string()
-            .as_bytes(),
-        );
+        let mut setup_parts = json!({
+            "plugin": self.hashes.get(&inst.id),
+            "params": inst.params_json(),
+            "runner": runner,
+            "model": model,
+        });
+        // The built-in `claude` runner's effort counts like the model, but only when set: an
+        // unset one, or another runner's param of that name, leaves every setup as it was
+        // (spec §4.1).
+        if let Some(e) = self
+            .runner_of(inst)
+            .ok()
+            .filter(|r| r.plugin.builtin && r.plugin.manifest.id == "claude")
+            .and_then(|r| r.params.get("effort")?.as_str())
+            .filter(|e| !e.is_empty())
+        {
+            setup_parts["effort"] = e.into();
+        }
+        let setup = sha256(setup_parts.to_string().as_bytes());
+        let mut combined_parts = setup_parts;
+        combined_parts["fingerprint"] = json!(output);
+        let combined = sha256(combined_parts.to_string().as_bytes());
         let entry = old.collectors.get(&inst.id);
         // Where the last settled run stopped, unless this run reads everything (spec §4.2).
         let since = match entry {
@@ -1475,6 +1529,9 @@ impl Run {
             s += &format!("- unsettled: {id} ({})\n", one_line(why, 2000));
         }
         s += &format!("- rejected: {}\n", self.left_rejected());
+        if let Some(d) = &self.drift {
+            s += &format!("- drift: {d}\n");
+        }
         let (total, per) = self
             .budget
             .spent

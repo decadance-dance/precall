@@ -879,7 +879,212 @@ fn the_commit_message_lists_each_change() {
     );
 }
 
+// ---- Drift under --force (spec §5, §4.4) ----
+
+#[test]
+fn a_forced_run_reports_drift_over_the_nodes_before_or_after_it() {
+    let w = W::new();
+    w.seed("layout", &[API, AUTH, THEIRS, r#"{"id":"old","parent":"layout","title":"Old","body":"","sources":["file:old.md"],"order":3}"#]);
+    let p = props(&[
+        add("a", "layout", "Queue"),
+        add("b", "layout", "Retry"),
+        json!({"key": "c", "op": "update", "id": "api", "body": "gRPC API.", "sources": ["file:api.md"], "reason": "switched to gRPC"}),
+        json!({"key": "d", "op": "remove", "id": "old", "sources": [], "evidence": "file:old.md@abc", "reason": "file deleted"}),
+        json!({"key": "e", "op": "move", "id": "auth", "parent": "how-it-works", "sources": ["file:auth.md"], "reason": "a mechanism"}),
+    ]);
+    w.config(&w.inst("repo", "col", &format!("out = {}", q(&p))));
+    let o = w.run_code(&["--force"], 0);
+    // 4 nodes before plus 2 added; `theirs` is the one left alone; branches do not count.
+    let line = "- drift: 5 of 6 nodes changed (83.3%): 2 added, 1 updated, 1 moved, 1 removed\n";
+    assert!(w.report().contains(line), "{}", w.report());
+    assert!(
+        o.stdout.contains(line),
+        "`rrecall run` prints it: {}",
+        o.stdout
+    );
+    assert!(
+        w.cmd(&["status"]).stdout.contains(line),
+        "and `rrecall status`"
+    );
+}
+
+#[test]
+fn a_forced_run_that_changes_nothing_reports_zero_drift_and_a_normal_run_none() {
+    let w = world(&props(&[]));
+    w.run_code(&[], 0);
+    assert!(!w.report().contains("drift"), "{}", w.report());
+    w.run_code(&["--force"], 0);
+    assert!(
+        w.report().contains(
+            "- drift: 0 of 4 nodes changed (0.0%): 0 added, 0 updated, 0 moved, 0 removed\n"
+        ),
+        "{}",
+        w.report()
+    );
+}
+
+#[test]
+fn a_forced_run_denied_before_its_commit_reports_no_drift() {
+    let w = world(&props(&[add("a", "layout", "Queue")]));
+    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    w.config(&format!(
+        "{cfg}{}",
+        w.inst(
+            "cgate",
+            "cgate",
+            &format!("out = {}", q(r#"{"deny":"not today"}"#))
+        )
+    ));
+    w.run_code(&["--force"], 4);
+    assert!(w.report().contains("not today"), "{}", w.report());
+    assert!(!w.report().contains("drift"), "{}", w.report());
+}
+
+#[test]
+fn a_forced_run_whose_commit_landed_but_index_sync_failed_still_reports_drift() {
+    let w = world(&props(&[add("a", "layout", "Queue")]));
+    // Another git process holds the store's index: the commit lands, updating the index fails.
+    std::fs::write(w.store().join(".git/index.lock"), "").unwrap();
+    let o = w.run_code(&["--force"], 1);
+    std::fs::remove_file(w.store().join(".git/index.lock")).unwrap();
+    assert!(o.stderr.contains("landed"), "{}", o.stderr);
+    let report = w.report();
+    assert!(
+        report.contains(
+            "- drift: 1 of 5 nodes changed (20.0%): 1 added, 0 updated, 0 moved, 0 removed\n"
+        ),
+        "{report}"
+    );
+    assert!(
+        report.contains(&format!("- commit: {} run ", &w.head()[..12])),
+        "{report}"
+    );
+}
+
+#[test]
+fn a_node_moved_in_one_round_and_updated_in_the_next_counts_once() {
+    let w = W::new();
+    w.seed("layout", &[API, AUTH]);
+    let outs = format!(
+        "{}\n{}",
+        props(&[
+            json!({"key": "a", "op": "move", "id": "auth", "parent": "how-it-works", "sources": ["file:auth.md"], "reason": "a mechanism"}),
+            json!({"key": "b", "op": "update", "id": "api", "body": "gRPC API.", "sources": ["file:api.md"], "reason": "switched"}),
+        ]),
+        props(&[
+            json!({"key": "b", "op": "update", "id": "auth", "body": "JWT tokens.", "sources": ["file:auth.md"], "reason": "tokens are JWTs"}),
+        ])
+    );
+    let verdicts = format!(
+        "{}\n{}",
+        r#"{"verdicts":[{"key":"repo/a","verdict":"accept","reason":"ok"},{"key":"repo/b","verdict":"revise","reason":"wrong node","instruction":"it is about auth"}]}"#,
+        r#"{"verdicts":[{"key":"repo/b","verdict":"accept","reason":"ok"}]}"#
+    );
+    w.config(&format!(
+        "{}{}",
+        w.inst(
+            "repo",
+            "col",
+            &format!("scenario = \"seq\", out = {}", q(&outs))
+        ),
+        w.inst(
+            "judge",
+            "judge",
+            &format!("scenario = \"seq\", out = {}", q(&verdicts))
+        ),
+    ));
+    w.run_code(&["--force"], 0);
+    assert!(
+        w.report().contains(
+            "- drift: 1 of 2 nodes changed (50.0%): 0 added, 1 updated, 1 moved, 0 removed\n"
+        ),
+        "{}",
+        w.report()
+    );
+}
+
 // ---- The cost cap and runners (spec §9, §6.8) ----
+
+#[test]
+fn the_claude_effort_counts_in_the_setup_only_when_set() {
+    let w = W::new();
+    let d = w.root.join("home/agent");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join("scenario"), "ok").unwrap();
+    std::fs::write(d.join("out"), props(&[])).unwrap();
+    let with = |params: &str| {
+        w.config(&format!(
+            "{}runner = \"claude\"\n\n[[plugins]]\nid = \"claude\"\nparams = {{ {params} }}\n",
+            w.inst("writer", "prompted", "")
+        ));
+    };
+    let setup = || w.lock()["collectors"]["writer"]["setup"].clone();
+    let calls = || std::fs::read_to_string(d.join("claude.calls")).map_or(0, |t| t.lines().count());
+    with("");
+    w.run_code(&[], 0);
+    let unset = setup();
+    with("effort = \"\"");
+    w.run_code(&[], 0);
+    assert_eq!(calls(), 1, "an empty effort is unset: nothing due");
+    assert_eq!(setup(), unset);
+    with("effort = \"high\"");
+    w.run_code(&[], 0);
+    assert_eq!(calls(), 2, "a set effort makes the collector due");
+    let high = setup();
+    assert_ne!(high, unset);
+    let prompt = std::fs::read_to_string(d.join("claude.stdin.2")).unwrap();
+    assert!(
+        prompt.contains(r#""since": null"#),
+        "a new setup reads everything"
+    );
+    with("effort = \"low\"");
+    w.run_code(&[], 0);
+    assert_ne!(setup(), high);
+}
+
+#[test]
+fn a_third_party_runner_param_named_effort_keeps_the_setup() {
+    let w = W::new();
+    w.plugin(
+        "erunner",
+        "runner",
+        &format!("[runner]\ncommand = [{}]\n", q(&fake())),
+        "effort = \"\"\n",
+    );
+    let out = json!({"output": {"proposals": []}, "cost_usd": 0.0, "model": "fake-1"});
+    let with = |uses: &str, params: &str| {
+        w.config(&format!(
+            "{}{}",
+            w.inst("writer", "prompted", ""),
+            w.inst(
+                "runner",
+                uses,
+                &format!("out = {}{params}", q(&out.to_string()))
+            )
+        ));
+    };
+    with("runner", "");
+    w.run_code(&[], 0);
+    let lock = w.lock();
+    with("erunner", ", effort = \"auto\"");
+    w.run_code(&[], 0);
+    assert_eq!(w.calls("runner"), 1, "nothing due");
+    assert_eq!(w.lock()["collectors"], lock["collectors"]);
+}
+
+#[test]
+fn an_unknown_claude_effort_fails_the_load_naming_the_instance() {
+    let w = W::new();
+    w.config("[[plugins]]\nid = \"claude\"\nparams = { effort = \"extreme\" }\n");
+    let o = w.run_code(&[], 4);
+    assert!(
+        o.stderr.contains("plugin instance `claude`")
+            && o.stderr
+                .contains("param `effort` must be one of low, medium, high, xhigh, max"),
+        "{}",
+        o.stderr
+    );
+}
 
 /// An add citing the kind `note`, which the `prompted` collector owns.
 fn note_add() -> Value {
