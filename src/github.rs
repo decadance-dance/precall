@@ -32,6 +32,10 @@ limit = 100
 /// resolve gives the whole text.
 const BODY_CUT: usize = 2000;
 
+/// The prompt files of this built-in, as (plugin id, file name, text) (spec §6.2).
+pub const PROMPTS: [(&str, &str, &str); 1] =
+    [("github", "github.md", include_str!("collectors/github.md"))];
+
 /// A resolved text longer than this is cut.
 const RESOLVE_MAX: usize = 100_000;
 

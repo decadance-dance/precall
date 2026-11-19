@@ -34,6 +34,10 @@ include = ["**"]
 exclude = []
 "#;
 
+/// The prompt files of this built-in, as (plugin id, file name, text) (spec §6.2).
+pub const PROMPTS: [(&str, &str, &str); 1] =
+    [("files", "files.md", include_str!("collectors/files.md"))];
+
 /// A resolved text longer than this is cut, so one big file cannot flood a judge's input.
 const RESOLVE_MAX: usize = 100_000;
 
