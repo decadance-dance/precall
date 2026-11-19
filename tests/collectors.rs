@@ -821,6 +821,37 @@ fn files_pins_one_commit_for_its_files_citations_and_cursor() {
 }
 
 #[test]
+fn files_takes_its_own_cursor_in_a_sha256_repository() {
+    // Review round 1, finding 5: 64-character object ids.
+    let w = W::bare();
+    w.git(&["init", "-q", "-b", "main", "--object-format=sha256"]);
+    w.commit_file("base.md", "base\n", "base");
+    let settled = w.git(&["rev-parse", "HEAD"]).trim().to_string();
+    assert_eq!(settled.len(), 64);
+    w.commit_file("base.md", "base v2\n", "base v2");
+    let o = files(
+        &w,
+        "fetch",
+        &files_params(&w, true, &[]),
+        &since(json!(settled)),
+    );
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    let f: Value = serde_json::from_str(&o.stdout).unwrap();
+    assert_eq!(f["focus"]["changed"], json!(["base.md"]), "{f}");
+    let head = w.git(&["rev-parse", "HEAD"]).trim().to_string();
+    assert_eq!(f["cursor"], head.as_str());
+    // A citation at a 64-character commit id resolves too.
+    let r = format!("file:base.md@{head}");
+    let t = texts(&files(
+        &w,
+        "resolve",
+        &files_params(&w, true, &[]),
+        &json!({ "refs": [r] }).to_string(),
+    ));
+    assert_eq!(t[&r], "base v2\n");
+}
+
+#[test]
 fn files_without_git_returns_no_cursor() {
     let w = W::new();
     std::fs::write(w.repo().join("a.md"), "a\n").unwrap();

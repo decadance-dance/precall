@@ -95,6 +95,8 @@ fn strings(name: &str) -> Result<Vec<String>> {
 
 impl Scope {
     fn from_params() -> Result<Scope> {
+        // limit: an instance whose `path` is one file fails with the missing path once that file
+        // is deleted, so its deletion never reaches the agent; the user removes or repoints it.
         let path = sources::path_param()?;
         let (root, only) = if path.is_dir() {
             (path, None)
