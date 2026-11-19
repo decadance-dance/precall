@@ -261,6 +261,9 @@ struct Run {
     cursors: std::sync::Mutex<BTreeMap<String, Value>>,
 }
 
+/// Per proposal key, the branch each judge was shown it under (`None`: no place to land).
+type JudgedIn = BTreeMap<String, BTreeMap<String, Option<String>>>;
+
 /// `name`, and `name.N` from round 2 on (spec §6.3 log names).
 fn entry(name: &str, round: u32) -> String {
     if round <= 1 {
@@ -1077,18 +1080,20 @@ impl Run {
         )?;
         // Step 7: checks over the diff, then judges over what every check accepted.
         let map_ids: Vec<String> = work.nodes.keys().cloned().collect();
-        // The branches each judge was shown an add or move under, by proposal key.
-        // `None` when the judge's batch gave it no destination (it left its collector's scope).
-        let mut judged_in: BTreeMap<String, BTreeSet<Option<String>>> = BTreeMap::new();
+        // The branch each judge was shown an add or move under, by proposal key and judge; a
+        // re-ask replaces its judge's first one. `None` when the judge's batch gave it no
+        // destination (it left its collector's scope).
+        let mut judged_in: JudgedIn = BTreeMap::new();
         for check in self.of_kind(Kind::Check) {
             let live: Vec<&Item> = valid
                 .iter()
                 .filter(|it| !dropped.contains_key(&it.key()))
                 .collect();
             let lands = lands(work, rules, earlier, &live);
-            self.judge_with(
+            // A check that leaves a key out fails whole, so there is nothing to re-ask.
+            let _ = self.judge_with(
                 &check,
-                round,
+                &entry("check", round),
                 work,
                 &live,
                 None,
@@ -1102,50 +1107,111 @@ impl Run {
             .iter()
             .filter(|it| !dropped.contains_key(&it.key()) && !verdicts.contains_key(&it.key()))
             .collect();
-        let judges = self.of_kind(Kind::Judge);
-        if !judges.is_empty() && !judged.is_empty() {
-            let texts = self.resolve(round, &judged, &mut dropped);
-            for judge in judges {
-                let live: Vec<&Item> = judged
+        // Resolved once, for the first judge that is not skipped (spec §6.5 `ops`).
+        let mut texts: Option<BTreeMap<String, Option<String>>> = None;
+        for judge in self.of_kind(Kind::Judge) {
+            let live = |dropped: &BTreeMap<String, String>| -> Vec<&Item> {
+                judged
                     .iter()
                     .copied()
                     .filter(|it| !dropped.contains_key(&it.key()))
-                    .collect();
-                if let Spec::Judge(plugin::JudgeSpec { ops: Some(ops), .. }) =
-                    &judge.plugin.manifest.spec
-                    && !live.is_empty()
-                    && !live.iter().any(|it| ops.contains(&it.p.op))
-                {
-                    let names: Vec<&str> = ops.iter().map(|o| wire::op_name(*o)).collect();
-                    self.judge_notes.push(format!(
-                        "judge skipped: {} in round {round}, the batch holds none of its ops ({})",
-                        judge.id,
-                        names.join(", ")
-                    ));
+                    .collect()
+            };
+            let mut batch = live(&dropped);
+            if batch.is_empty() || self.skipped_judge(&judge, round, &batch) {
+                continue;
+            }
+            if texts.is_none() {
+                texts = Some(self.resolve(round, &judged, &mut dropped));
+                batch = live(&dropped);
+                if batch.is_empty() || self.skipped_judge(&judge, round, &batch) {
                     continue;
                 }
-                let lands = lands(work, rules, earlier, &live);
-                for it in live
+            }
+            let mut ask = |run: &mut Run,
+                           name: String,
+                           batch: &[&Item],
+                           verdicts: &mut BTreeMap<String, Vec<RoundVerdict>>,
+                           dropped: &mut BTreeMap<String, String>| {
+                // Every batch gets the nodes of the branches it lands in, applied alone.
+                let lands = lands(work, rules, earlier, batch);
+                for it in batch
                     .iter()
                     .filter(|it| matches!(it.p.op, wire::Op::Add | wire::Op::Move))
                 {
                     judged_in
                         .entry(it.key())
                         .or_default()
-                        .insert(lands.get(&it.key()).cloned());
+                        .insert(judge.id.clone(), lands.get(&it.key()).cloned());
                 }
-                self.judge_with(
+                run.judge_with(
                     &judge,
-                    round,
+                    &name,
                     work,
-                    &live,
-                    Some(&texts),
+                    batch,
+                    texts.as_ref(),
                     &map_ids,
                     &lands,
-                    &mut verdicts,
-                    &mut dropped,
-                );
+                    verdicts,
+                    dropped,
+                )
+            };
+            let Ok(missing) = ask(
+                self,
+                entry("judge", round),
+                &batch,
+                &mut verdicts,
+                &mut dropped,
+            ) else {
+                continue;
+            };
+            if missing.is_empty() {
+                continue;
             }
+            let again: Vec<&Item> = batch
+                .iter()
+                .copied()
+                .filter(|it| missing.contains(&it.key()))
+                .collect();
+            let follow_up = ask(
+                self,
+                entry("reask", round),
+                &again,
+                &mut verdicts,
+                &mut dropped,
+            );
+            let head = format!(
+                "re-asked: {} in round {round}: {}",
+                judge.id,
+                missing.join(", ")
+            );
+            let note = match follow_up {
+                Ok(still) if still.is_empty() => head,
+                Ok(still) => {
+                    for k in &still {
+                        dropped.entry(k.clone()).or_insert_with(|| {
+                            format!(
+                                "judge `{}` gave no verdict, also when asked again",
+                                judge.id
+                            )
+                        });
+                    }
+                    format!(
+                        "{head}; still without a verdict, dropped: {}",
+                        still.join(", ")
+                    )
+                }
+                Err(why) if why == "budget" => format!(
+                    "re-ask refused by the budget: {} in round {round}, dropped: {}",
+                    judge.id,
+                    missing.join(", ")
+                ),
+                Err(_) => format!(
+                    "{head}; the follow-up failed (see Warnings), dropped: {}",
+                    missing.join(", ")
+                ),
+            };
+            self.judge_notes.push(note);
         }
         let mut accepted: Vec<Item> = valid
             .iter()
@@ -1161,7 +1227,9 @@ impl Run {
                 .filter_map(|it| {
                     let shown = judged_in.get(&it.key())?;
                     let now = landed(&post, it)?;
-                    let away = shown.iter().find(|b| b.as_deref() != Some(now.as_str()))?;
+                    let away = shown
+                        .values()
+                        .find(|b| b.as_deref() != Some(now.as_str()))?;
                     let away = match away {
                         Some(b) => format!("judged under `{b}`"),
                         None => "judged with no place to land".to_string(),
@@ -1198,82 +1266,31 @@ impl Run {
         })
     }
 
-    /// One check or judge over `live`: its verdicts that are not `accept` go to `verdicts`, the
-    /// others to `accepts` for the report; a failure drops everything it was given. A judge
-    /// that leaves keys out is asked once more with only those; what it leaves out again is
-    /// dropped (spec §6.5).
-    #[allow(clippy::too_many_arguments)]
-    fn judge_with(
-        &mut self,
-        inst: &Instance,
-        round: u32,
-        work: &Store,
-        live: &[&Item],
-        texts: Option<&BTreeMap<String, Option<String>>>,
-        map_ids: &[String],
-        lands: &BTreeMap<String, String>,
-        verdicts: &mut BTreeMap<String, Vec<RoundVerdict>>,
-        dropped: &mut BTreeMap<String, String>,
-    ) {
-        if live.is_empty() {
-            return;
+    /// Whether `judge` names `ops` and `batch` holds none of them: then it is not called, accepts
+    /// the batch, and the report says why (spec §6.5).
+    fn skipped_judge(&mut self, judge: &Instance, round: u32, batch: &[&Item]) -> bool {
+        let Spec::Judge(plugin::JudgeSpec { ops: Some(ops), .. }) = &judge.plugin.manifest.spec
+        else {
+            return false;
+        };
+        if batch.iter().any(|it| ops.contains(&it.p.op)) {
+            return false;
         }
-        let kind = if texts.is_some() { "judge" } else { "check" };
-        let missing = self.judge_call(
-            inst,
-            &entry(kind, round),
-            work,
-            live,
-            texts,
-            map_ids,
-            lands,
-            verdicts,
-            dropped,
-        );
-        if missing.is_empty() {
-            return;
-        }
-        let again: Vec<&Item> = live
-            .iter()
-            .copied()
-            .filter(|it| missing.contains(&it.key()))
-            .collect();
-        let still = self.judge_call(
-            inst,
-            &entry("reask", round),
-            work,
-            &again,
-            texts,
-            map_ids,
-            lands,
-            verdicts,
-            dropped,
-        );
-        for k in still {
-            dropped.entry(k).or_insert_with(|| {
-                format!("judge `{}` gave no verdict, also when asked again", inst.id)
-            });
-        }
-        // Dropped: still left out, or the follow-up failed or was refused by the budget.
-        let lost: Vec<&str> = missing
-            .iter()
-            .filter(|k| dropped.contains_key(*k))
-            .map(String::as_str)
-            .collect();
-        let mut note = format!(
-            "re-asked: {} in round {round}: {}",
-            inst.id,
-            missing.join(", ")
-        );
-        if !lost.is_empty() {
-            note += &format!("; still without a verdict, dropped: {}", lost.join(", "));
-        }
-        self.judge_notes.push(note);
+        let names: Vec<&str> = ops.iter().map(|o| wire::op_name(*o)).collect();
+        self.judge_notes.push(format!(
+            "judge skipped: {} in round {round}, the batch holds none of its ops ({})",
+            judge.id,
+            names.join(", ")
+        ));
+        true
     }
 
-    /// One call of `judge_with`, logged as `name`: the keys a judge's valid output left out.
+    /// One check or judge call over `live`, logged as `name`: its verdicts that are not `accept`
+    /// go to `verdicts`, the others to `accepts` for the report. It returns the keys a judge's
+    /// valid output left out; a failure drops everything it was given and returns why
+    /// ("budget" when the cap refused it) (spec §6.5).
     #[allow(clippy::too_many_arguments)]
-    fn judge_call(
+    fn judge_with(
         &mut self,
         inst: &Instance,
         name: &str,
@@ -1284,7 +1301,10 @@ impl Run {
         lands: &BTreeMap<String, String>,
         verdicts: &mut BTreeMap<String, Vec<RoundVerdict>>,
         dropped: &mut BTreeMap<String, String>,
-    ) -> Vec<String> {
+    ) -> Result<Vec<String>, String> {
+        if live.is_empty() {
+            return Ok(Vec::new());
+        }
         let keys: Vec<String> = live.iter().map(|it| it.key()).collect();
         let branches: BTreeSet<&str> = live
             .iter()
@@ -1361,7 +1381,7 @@ impl Run {
                         saw: saw.clone(),
                     });
                 }
-                missing
+                Ok(missing)
             }
             Err(f) => {
                 let why = match f {
@@ -1374,7 +1394,7 @@ impl Run {
                 for k in keys {
                     dropped.entry(k).or_insert_with(|| why.clone());
                 }
-                Vec::new()
+                Err(why)
             }
         }
     }
@@ -1618,8 +1638,9 @@ impl Run {
         for (id, why) in &self.unsettled {
             s += &format!("- unsettled: {id} ({})\n", one_line(why, 2000));
         }
+        // Every key, uncut: the report must name each one re-asked or dropped (spec §4.4).
         for note in &self.judge_notes {
-            s += &format!("- {}\n", one_line(note, 2000));
+            s += &format!("- {}\n", one_line(note, usize::MAX));
         }
         s += &format!("- rejected: {}\n", self.left_rejected());
         if let Some(d) = &self.drift {

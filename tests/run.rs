@@ -1003,6 +1003,213 @@ fn a_batch_with_one_of_its_ops_calls_the_judge_with_the_whole_batch() {
 }
 
 #[test]
+fn a_reask_gets_the_nodes_where_its_own_batch_lands_and_counts_there() {
+    // `judge` rejects the move and leaves the add out. Asked again with the add alone, it sees
+    // the add land in `layout`, next to the Queue there, and its accept counts there.
+    let w = W::new();
+    w.seed("layout", &[PARENT, QUEUE]);
+    let m = json!({"key": "m", "op": "move", "id": "parent", "parent": "how-it-works", "sources": ["file:p.md"], "reason": "moved"});
+    let a = json!({"key": "q", "op": "add", "parent": "parent", "title": "Queue", "body": "", "sources": ["file:q2.md"], "reason": "found"});
+    let outs = [
+        json!({"verdicts": [{"key": "repo/m", "verdict": "reject", "reason": "no"}]}).to_string(),
+        json!({"verdicts": [{"key": "repo/q", "verdict": "accept", "reason": "ok"}]}).to_string(),
+    ];
+    w.config(&format!(
+        "max_rounds = 1\n{}{}{}",
+        w.inst("repo", "col", &format!("out = {}", q(&props(&[m, a])))),
+        w.inst("check", "check", "scenario = \"all\", out = \"accept\""),
+        w.inst(
+            "judge",
+            "judge",
+            &format!("scenario = \"seq\", out = {}", q(&outs.join("\n")))
+        ),
+    ));
+    w.run_code(&[], 0);
+    let input = w.input("judge", 2);
+    assert_eq!(input["proposals"].as_array().unwrap().len(), 1, "{input}");
+    assert_eq!(node_ids(&input), ["parent", "queue"]);
+    assert!(w.map("layout").contains("queue-2"), "{}", w.report());
+}
+
+#[test]
+fn a_batch_every_judge_skips_resolves_no_source() {
+    let w = W::new();
+    let fake = q(&fake());
+    w.plugin(
+        "rcol",
+        "collector",
+        &format!(
+            "[collector]\nscope = {SCOPE}\nsource_kinds = [\"{{kind}}\"]\nfingerprint = [\"/bin/cat\", \"{{fp}}\"]\ncommand = [{fake}]\nresolve_prompt = \"p.md\"\nrunner = \"runner\"\n"
+        ),
+        &format!("fp = {}\nkind = \"note\"\n", q(&w.fp().to_string_lossy())),
+    );
+    w.plugin(
+        "rjudge",
+        "judge",
+        &format!("[judge]\ncommand = [{fake}]\nops = [\"remove\"]\n"),
+        "",
+    );
+    let texts = json!({"output": {"texts": {"note:queue.md": "The queue."}}, "cost_usd": 0.2, "model": "fake-1"});
+    w.config(&format!(
+        "{}{}{}",
+        w.inst(
+            "notes",
+            "rcol",
+            &format!("out = {}", q(&props(&[note_add()])))
+        ),
+        w.inst(
+            "runner",
+            "runner",
+            &format!("out = {}", q(&texts.to_string()))
+        ),
+        w.inst("rjudge", "rjudge", "scenario = \"all\", out = \"accept\""),
+    ));
+    w.run_code(&[], 0);
+    assert_eq!(w.calls("runner"), 0, "no paid resolve: {}", w.report());
+    assert_eq!(w.calls("rjudge"), 0);
+    assert!(w.map("layout").contains("Queue"));
+}
+
+#[test]
+fn the_report_names_every_key_reasked_and_dropped() {
+    let items: Vec<Value> = (0..120)
+        .map(|i| {
+            add(
+                &format!("item-{i:03}-from-tracker"),
+                "layout",
+                &format!("Item {i:03}"),
+            )
+        })
+        .collect();
+    let w = world(&props(&items));
+    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    w.config(&format!(
+        "{cfg}{}",
+        w.inst(
+            "judge",
+            "judge",
+            &format!("out = {}", q(r#"{"verdicts":[]}"#))
+        )
+    ));
+    w.run_code(&[], 5);
+    let report = w.report();
+    let line = report
+        .lines()
+        .find(|l| l.starts_with("- re-asked: judge in round 1: "))
+        .unwrap_or_else(|| panic!("{report}"));
+    for i in 0..120 {
+        let k = format!("repo/item-{i:03}-from-tracker");
+        assert_eq!(line.matches(&k).count(), 2, "asked and dropped: {k}");
+    }
+}
+
+#[test]
+fn a_reask_refused_by_the_budget_is_reported_as_refused() {
+    let w = world(&props(&[
+        add("a", "layout", "Queue"),
+        add("b", "layout", "Cache"),
+    ]));
+    let out = json!({"output": {"verdicts": [{"key": "repo/a", "verdict": "accept", "reason": "ok"}]}, "cost_usd": 0.6, "model": "fake-1"});
+    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    w.config(&format!(
+        "max_cost_usd = 0.5\n{cfg}{}{}",
+        w.inst(
+            "runner",
+            "runner",
+            &format!("out = {}", q(&out.to_string()))
+        ),
+        w.inst("pjudge", "pjudge", ""),
+    ));
+    w.run_code(&[], 5);
+    assert_eq!(w.calls("runner"), 1, "the follow-up was refused");
+    let report = w.report();
+    assert!(
+        report.contains("- re-ask refused by the budget: pjudge in round 1, dropped: repo/b\n"),
+        "{report}"
+    );
+    assert!(!report.contains("- re-asked:"), "{report}");
+    let map = w.map("layout");
+    assert!(map.contains("Queue") && !map.contains("Cache"), "{map}");
+}
+
+#[test]
+fn a_verdict_missing_twice_leaves_only_its_collector_to_retry_from_its_cursor() {
+    let gh_b = json!({"key": "b", "op": "add", "parent": "layout", "title": "Cache", "body": "Cache body.", "sources": ["gh-pr:o/r#5"], "reason": "found Cache"});
+    let repo = [
+        with_cursor(&[], json!("c1")),
+        with_cursor(&[add("a", "layout", "Queue")], json!("c2")),
+        with_cursor(&[add("a", "layout", "Queue")], json!("c3")),
+    ];
+    let github = [
+        with_cursor(&[], json!("g1")),
+        with_cursor(&[gh_b], json!("g2")),
+    ];
+    // Run 2: `github/b` answered, `repo/a` left out twice; run 3: `repo/a` accepted.
+    let judge = [
+        r#"{"verdicts":[{"key":"github/b","verdict":"accept","reason":"ok"}]}"#,
+        r#"{"verdicts":[]}"#,
+        r#"{"verdicts":[{"key":"repo/a","verdict":"accept","reason":"ok"}]}"#,
+    ];
+    let w = W::new();
+    w.seed("layout", &[API, AUTH, NOTED, THEIRS]);
+    let seq = |out: &[String]| format!("scenario = \"seq\", out = {}", q(&out.join("\n")));
+    w.config(&format!(
+        "{}{}{}{}",
+        w.inst("repo", "col", &seq(&repo)),
+        w.inst(
+            "github",
+            "col",
+            &format!("kind = \"gh-pr\", {}", seq(&github))
+        ),
+        w.inst("check", "check", "scenario = \"all\", out = \"accept\""),
+        w.inst(
+            "judge",
+            "judge",
+            &format!("scenario = \"seq\", out = {}", q(&judge.join("\n")))
+        ),
+    ));
+    w.run_code(&[], 0);
+    let first = w.lock()["collectors"].clone();
+    assert_eq!(
+        (
+            first["repo"]["cursor"].as_str(),
+            first["github"]["cursor"].as_str()
+        ),
+        (Some("c1"), Some("g1"))
+    );
+    std::fs::write(w.fp(), "v2").unwrap();
+    w.run_code(&[], 5);
+    let lock = w.lock()["collectors"].clone();
+    assert_eq!(lock["repo"]["unsettled"], true, "{lock}");
+    assert_eq!(
+        lock["repo"]["cursor"], "c1",
+        "the cursor stays at the settled run"
+    );
+    assert_eq!(lock["repo"]["settled_at"], first["repo"]["settled_at"]);
+    assert!(lock["github"].get("unsettled").is_none(), "{lock}");
+    assert_eq!(
+        lock["github"]["cursor"], "g2",
+        "the other collector settles"
+    );
+    let map = w.map("layout");
+    assert!(map.contains("Cache") && !map.contains("Queue"), "{map}");
+    // Only `repo` is due again, and it reads from its settled cursor.
+    w.run_code(&[], 0);
+    assert_eq!((w.calls("repo"), w.calls("github")), (3, 2));
+    assert_eq!(
+        w.input("repo", 3)["since"],
+        json!({"at": first["repo"]["settled_at"], "cursor": "c1"})
+    );
+    assert_eq!(w.lock()["collectors"]["repo"]["cursor"], "c3");
+    assert!(w.map("layout").contains("Queue"));
+    // Nothing changed: nothing is collected and nothing is committed.
+    let before = w.snapshot();
+    w.run_code(&[], 0);
+    assert_eq!(w.snapshot(), before);
+    assert_eq!((w.calls("repo"), w.calls("github")), (3, 2));
+}
+
+#[test]
 fn the_commit_message_lists_each_change() {
     let w = W::new();
     w.seed("layout", &[API, AUTH, r#"{"id":"old","parent":"layout","title":"Old","body":"","sources":["file:old.md"],"order":3}"#]);
