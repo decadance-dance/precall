@@ -103,6 +103,9 @@ pub struct CollectorInput {
     pub nodes: Vec<Node>,
     pub rejections: Vec<Rejection>,
     pub params: Params,
+    /// The output of the collector's `fetch` entrypoint, when it has one (spec §6.1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fetched: Option<serde_json::Value>,
 }
 
 /// A proposal of the previous round that was not accepted, with every verdict on it.
@@ -927,6 +930,7 @@ mod tests {
                 }],
             }],
             params: Params::from([("repo".into(), "o/r".into())]),
+            fetched: None,
         };
         let v = serde_json::to_value(&input).unwrap();
         let keys: Vec<_> = v.as_object().unwrap().keys().cloned().collect();

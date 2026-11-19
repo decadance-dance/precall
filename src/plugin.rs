@@ -84,6 +84,9 @@ pub struct CollectorSpec {
     pub command: Option<Vec<String>>,
     #[serde(default)]
     pub prompt: Option<String>,
+    /// Only with `prompt`: its JSON output reaches every collect input as `fetched` (§6.4).
+    #[serde(default)]
+    pub fetch: Option<Vec<String>>,
     #[serde(default)]
     pub resolve: Option<Vec<String>>,
     #[serde(default)]
@@ -169,6 +172,7 @@ impl Manifest {
             Spec::Collector(c) => vec![
                 ("fingerprint", c.fingerprint.as_ref()),
                 ("command", c.command.as_ref()),
+                ("fetch", c.fetch.as_ref()),
                 ("resolve", c.resolve.as_ref()),
             ],
             Spec::Judge(j) => vec![("command", j.command.as_ref())],
@@ -230,6 +234,19 @@ pub fn builtin() -> Result<BTreeMap<String, Plugin>> {
         let mut manifest = parse_manifest(text, None, "built in")?;
         match &mut manifest.spec {
             Spec::Check(c) | Spec::Runner(c) => c.command[0] = exe_text.to_string(),
+            Spec::Collector(c) => {
+                for argv in [
+                    &mut c.fingerprint,
+                    &mut c.command,
+                    &mut c.fetch,
+                    &mut c.resolve,
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    argv[0] = exe_text.to_string();
+                }
+            }
             _ => {}
         }
         found.insert(
@@ -250,6 +267,11 @@ fn builtin_manifests() -> impl Iterator<Item = &'static str> {
         .into_iter()
         .chain(crate::runner::MANIFESTS)
         .chain(crate::judges::MANIFESTS)
+        .chain([
+            crate::files::MANIFEST,
+            crate::git_history::MANIFEST,
+            crate::github::MANIFEST,
+        ])
         .chain(crate::slack::MANIFESTS)
 }
 
@@ -258,6 +280,8 @@ fn builtin_manifests() -> impl Iterator<Item = &'static str> {
 fn builtin_prompts() -> impl Iterator<Item = (&'static str, &'static str, &'static str)> {
     crate::judges::PROMPTS
         .into_iter()
+        .chain(crate::files::PROMPTS)
+        .chain(crate::github::PROMPTS)
         .chain(crate::slack::PROMPTS)
 }
 
@@ -379,6 +403,9 @@ fn check_manifest(raw: RawManifest, dir: Option<&Path>) -> Result<Manifest, Stri
                 "prompt",
                 c.prompt.is_some(),
             )?;
+            if c.fetch.is_some() && c.prompt.is_none() {
+                return Err(format!("[{t}] `fetch` goes only with a prompt"));
+            }
             if c.resolve.is_some() && c.resolve_prompt.is_some() {
                 return Err(format!(
                     "[{t}] has both `resolve` and `resolve_prompt`; keep one"
@@ -1153,6 +1180,12 @@ repo = ""
                     "{base}fingerprint = [\"f\"]\ncommand = [\"./c\"]\nrunner = \"claude\""
                 )),
                 "runner",
+            ),
+            (
+                col(&format!(
+                    "{base}fingerprint = [\"f\"]\ncommand = [\"./c\"]\nfetch = [\"./f\"]"
+                )),
+                "fetch",
             ),
             (
                 col(&format!("{base}fingerprint = [\"f\"]\ncommand = []")),

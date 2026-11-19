@@ -2090,3 +2090,101 @@ fn an_add_a_judge_saw_without_a_destination_does_not_commit() {
     assert_eq!(node_ids(&w.input("dup", 1)), ["anchor"]);
     assert!(!w.map("layout").contains("queue-2"), "{}", w.map("layout"));
 }
+
+/// A store plugin `fetching`: the `prompted` collector plus a `fetch` argv (spec §6.1).
+fn fetching(w: &W) {
+    let fake = q(&fake());
+    let fp = q(&w.fp().to_string_lossy());
+    w.plugin(
+        "fetching",
+        "collector",
+        &format!(
+            "[collector]\nscope = {SCOPE}\nsource_kinds = [\"note\"]\nfingerprint = [\"/bin/cat\", \"{{fp}}\"]\nfetch = [{fake}]\nprompt = \"p.md\"\nrunner = \"runner\"\n"
+        ),
+        &format!("fp = {fp}\n"),
+    );
+}
+
+#[test]
+fn a_fetch_output_reaches_every_collect_input_of_its_instance_once_per_run() {
+    let w = W::new();
+    fetching(&w);
+    let add = add("a", "layout", "Kiln");
+    let r = json!({"output": {"proposals": [add]}, "cost_usd": 0.0, "model": "fake-1"});
+    w.config(&format!(
+        "max_rounds = 2\n{}{}{}",
+        w.inst("writer", "fetching", "out = '{\"pulls\": [7]}'"),
+        w.inst("runner", "runner", &format!("out = {}", q(&r.to_string()))),
+        w.inst("check", "check", "scenario = \"all\", out = \"revise\""),
+    ));
+    w.run(&[]);
+    // The fetch got the plugin input on stdin and ran once, though the collector ran twice.
+    assert_eq!(w.calls("writer"), 1);
+    assert_eq!(w.input("writer", 1)["params"]["out"], "{\"pulls\": [7]}");
+    assert!(
+        std::fs::read_to_string(w.rec("writer"))
+            .unwrap()
+            .contains("argv:")
+    );
+    assert_eq!(w.calls("runner"), 2);
+    for n in [1, 2] {
+        assert_eq!(
+            w.input("runner", n)["input"]["fetched"],
+            json!({"pulls": [7]}),
+            "call {n}"
+        );
+    }
+    let runs = w.store().join("runs");
+    let run = std::fs::read_dir(&runs)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert!(run.join("writer.fetch.stdout").exists());
+}
+
+#[test]
+fn a_failing_or_malformed_fetch_makes_its_collector_unreachable() {
+    for (scenario, out) in [
+        ("crash", ""),
+        ("ok", "{\"a\": 1, \"a\": 2}"),
+        ("ok", "not json"),
+    ] {
+        let w = W::new();
+        fetching(&w);
+        w.config(&format!(
+            "{}{}",
+            w.inst(
+                "writer",
+                "fetching",
+                &format!("scenario = {}, out = {}", q(scenario), q(out))
+            ),
+            w.inst("runner", "runner", ""),
+        ));
+        let o = w.run_code(&[], 5);
+        assert!(
+            o.stderr.contains("writer"),
+            "{scenario} {out}: {}",
+            o.stderr
+        );
+        assert_eq!(w.calls("runner"), 0, "{scenario} {out}: no collect call");
+        assert!(
+            w.lock()["collectors"].get("writer").is_none(),
+            "not settled"
+        );
+    }
+}
+
+#[test]
+fn a_collector_without_fetch_gets_no_fetched_key() {
+    let w = W::new();
+    let r = json!({"output": {"proposals": []}, "cost_usd": 0.0, "model": "fake-1"});
+    w.config(&format!(
+        "{}{}",
+        w.inst("writer", "prompted", ""),
+        w.inst("runner", "runner", &format!("out = {}", q(&r.to_string()))),
+    ));
+    w.run_code(&[], 0);
+    assert!(w.input("runner", 1)["input"].get("fetched").is_none());
+}

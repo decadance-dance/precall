@@ -8,7 +8,9 @@
 # codex.env.N.
 d="$HOME/agent"
 echo call >> "$d/codex.calls"
-n=$(wc -l < "$d/codex.calls" | tr -d ' ')
+# Calls run in parallel (collectors do): mkdir claims the call number atomically.
+n=1
+while ! mkdir "$d/codex.slot.$n" 2>/dev/null; do n=$((n + 1)); done
 printf '%s\n' "$@" > "$d/codex.argv.$n"
 cat > "$d/codex.stdin.$n"
 env | sort > "$d/codex.env.$n"

@@ -12,7 +12,9 @@
 # its stdin to claude.stdin.N, its environment to claude.env.N and its cwd to claude.cwd.N.
 d="$HOME/agent"
 echo call >> "$d/claude.calls"
-n=$(wc -l < "$d/claude.calls" | tr -d ' ')
+# Calls run in parallel (collectors do): mkdir claims the call number atomically.
+n=1
+while ! mkdir "$d/claude.slot.$n" 2>/dev/null; do n=$((n + 1)); done
 printf '%s\n' "$@" > "$d/claude.argv.$n"
 cat > "$d/claude.stdin.$n"
 env | sort > "$d/claude.env.$n"
