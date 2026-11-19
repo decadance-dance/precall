@@ -6,8 +6,8 @@ TL;DR: A `release-<ver>` branch comes off `develop`, a `hotfix-<ver>` branch off
 ### Do
 - Cut it when `develop` has collected enough, usually a finished milestone: `git checkout -b release-1.2.0 origin/develop`.
 - Limit it to small bug fixes, the version bump and the release notes. New work keeps going to `develop` in parallel.
-- Give the release its own issue (`Release 1.2.0`). Its checklist holds only what is done before the PR into `main` merges: version bumped in `Cargo.toml` and `Cargo.lock`; shipped issues marked; notes ready; `ci-ok` green and the cross-model review done on the draft PR. The steps after the merge (tag, GitHub Release, Homebrew tap, PR into `develop`, deleting the branch) go in the issue as notes.
-- Bump the version in its own commit: edit `version` in `Cargo.toml`, then run `bin/check`, which rewrites `Cargo.lock` with the same number; commit both.
+- Give the release its own issue (`Release 1.2.0`). Its checklist holds only what is done before the PR into `main` merges: version bumped in `Cargo.toml`, `Cargo.lock` and the `--tag` of the `cargo install` command in `README.md`; shipped issues marked; notes ready; `ci-ok` green and the cross-model review done on the draft PR. The steps after the merge (tag, GitHub Release, Homebrew tap, PR into `develop`, deleting the branch) go in the issue as notes.
+- Bump the version in its own commit: edit `version` in `Cargo.toml` and the `--tag` of the `cargo install` command in `README.md`, then run `bin/check`, which rewrites `Cargo.lock` with the same number; commit all three.
 - List what ships by the branch's contents, not by dates: work merged into `develop` after the cut does not ship. The PRs are the merge commits on the branch since the last tag (for the first release, all of them: drop `<last tag>..`):
   ```
   git log --first-parent --merges --format=%H <last tag>..release-1.2.0 |
@@ -26,9 +26,10 @@ TL;DR: A `release-<ver>` branch comes off `develop`, a `hotfix-<ver>` branch off
   The workflow builds the binaries first (macOS arm64 and x86_64, Linux x86_64 and arm64), then publishes the Release with `rrecall-<ver>-<target>.tar.gz` for each, `SHA256SUMS`, and `rrecall.rb`: the Homebrew formula for this version, written by `bin/formula` from those checksums. Check the published Release (`gh release view 1.2.0`); a failed workflow run (a failed build, a lightweight tag, a tag that differs from `version` in `Cargo.toml`) leaves none.
 - Then the maintainer updates the Homebrew tap, the repository `decadance-dance/homebrew-tap` (`brew install decadance-dance/tap/rrecall`): its `Formula/rrecall.rb` becomes the Release's `rrecall.rb`, which carries the new version, the URLs and the sha256 of each binary.
   ```
-  cd <tap checkout> && git pull && mkdir -p Formula
-  gh release download 1.2.0 -R decadance-dance/rrecall -p rrecall.rb -O Formula/rrecall.rb --clobber
-  git add Formula/rrecall.rb && git commit -m "rrecall 1.2.0" && git push
+  # a subshell, so the shell stays in the project checkout for the PR into develop below
+  ( cd <tap checkout> && git pull && mkdir -p Formula &&
+    gh release download 1.2.0 -R decadance-dance/rrecall -p rrecall.rb -O Formula/rrecall.rb --clobber &&
+    git add Formula/rrecall.rb && git commit -m "rrecall 1.2.0" && git push )
   brew update && brew upgrade rrecall && brew test rrecall   # brew install decadance-dance/tap/rrecall the first time
   ```
 - Then open a PR from the same branch into `develop` (`gh pr create --base develop --head release-1.2.0 --title "Release 1.2.0 into develop" --body "Closes #<release issue>"`). If it conflicts, branch `merge/1.2.0` off `develop`, merge `release-1.2.0` into it, resolve, and PR `merge/1.2.0` into `develop` with the same title.
@@ -43,7 +44,7 @@ TL;DR: A `release-<ver>` branch comes off `develop`, a `hotfix-<ver>` branch off
 ## Hotfix branch (`hotfix-*`)
 ### Do
 - Use it only when something broke for users and the next release cannot wait. It is the only branch that comes off `main`: `git checkout -b hotfix-1.2.1 origin/main`.
-- Give it its own issue (`Hotfix 1.2.1`) with the release issue's checklist: version bumped in `Cargo.toml` and `Cargo.lock`; the hotfix issue marked with milestone `1.2.1`; notes ready; `ci-ok` green and the cross-model review done on the draft PR into `main`. The post-merge steps go in the issue as notes. Mark only the hotfix issue with the milestone: the closed issues waiting on `develop` ship with the next release. The notes' input is the hotfix issue and the hotfix PR into `main`, not `develop`'s history.
+- Give it its own issue (`Hotfix 1.2.1`) with the release issue's checklist: version bumped in `Cargo.toml`, `Cargo.lock` and the `README.md` install `--tag`; the hotfix issue marked with milestone `1.2.1`; notes ready; `ci-ok` green and the cross-model review done on the draft PR into `main`. The post-merge steps go in the issue as notes. Mark only the hotfix issue with the milestone: the closed issues waiting on `develop` ship with the next release. The notes' input is the hotfix issue and the hotfix PR into `main`, not `develop`'s history.
 - Finish it like a release: version bump, a PR into `main`, the tag and the GitHub Release on `main`, then a PR from the same branch into `develop`.
 
 ### Don't
@@ -65,13 +66,13 @@ TL;DR: A `release-<ver>` branch comes off `develop`, a `hotfix-<ver>` branch off
 # release a version
 git checkout -b release-1.2.0 origin/develop
 # release issue #<r>; milestone 1.2.0 on it and on every issue closed by a PR merged on the branch since the last tag
-# version bump in Cargo.toml + bin/check (Cargo.lock); NOTES=<outside the repo>/RELEASE-1.2.0.md drafted and edited (never committed)
+# version bump in Cargo.toml and the README cargo install --tag + bin/check (Cargo.lock); NOTES=<outside the repo>/RELEASE-1.2.0.md drafted and edited (never committed)
 git push -u origin release-1.2.0 && gh pr create --draft --base main --title "Release 1.2.0" --body "Refs #<r>"
 # ci-ok green, cross-model review done: tick the checklist, then gh pr ready
 # maintainer:
 gh pr merge <pr> -R decadance-dance/rrecall --merge
 git checkout main && git pull && git tag -a 1.2.0 --cleanup=verbatim -F "$NOTES" && git push origin 1.2.0   # the push builds the binaries and publishes the Release
-# in the tap checkout: gh release download 1.2.0 -R decadance-dance/rrecall -p rrecall.rb -O Formula/rrecall.rb --clobber, git add, commit, push
+# in a subshell in the tap checkout: gh release download 1.2.0 -R decadance-dance/rrecall -p rrecall.rb -O Formula/rrecall.rb --clobber, git add, commit, push
 gh pr create --base develop --head release-1.2.0 --title "Release 1.2.0 into develop" --body "Closes #<r>"
 gh pr merge <develop pr> -R decadance-dance/rrecall --merge
 git push origin --delete release-1.2.0 && git branch -d release-1.2.0

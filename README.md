@@ -14,10 +14,16 @@ With Homebrew, on macOS or Linux:
 brew install decadance-dance/tap/rrecall
 ```
 
-With Cargo, a released version (the versions are the [Releases](https://github.com/decadance-dance/rrecall/releases)), or the unreleased `develop` branch without `--tag`:
+With Cargo, the latest release (all versions: [Releases](https://github.com/decadance-dance/rrecall/releases)):
 
 ```sh
 cargo install --git https://github.com/decadance-dance/rrecall --tag 0.1.0 --locked
+```
+
+With Cargo, the unreleased development branch `develop`:
+
+```sh
+cargo install --git https://github.com/decadance-dance/rrecall --locked
 ```
 
 Each Release also carries prebuilt binaries for macOS (arm64, x86_64) and Linux (x86_64, arm64; static) with their `SHA256SUMS`. rrecall keeps the map in a git repository, so it needs `git`.

@@ -50,7 +50,15 @@ jobs:
         with:
           fetch-depth: 0
       # A checkout of a tag ref does not carry the annotated tag object; fetch it explicitly.
-      - run: git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+      - run: git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}" "+refs/heads/main:refs/remotes/origin/main"
+      # Publish only a tag on main, and only for the commit the build jobs checked out (the tag's
+      # commit when the workflow started): a tag on a feature or release branch, or one moved since,
+      # publishes nothing.
+      - run: |
+          commit=$(git rev-parse "$GITHUB_REF_NAME^{commit}")
+          built=$(git rev-parse "$GITHUB_SHA^{commit}")
+          [ "$commit" = "$built" ] || { echo "::error::tag $GITHUB_REF_NAME points at $commit, but this run built $built"; exit 1; }
+          git merge-base --is-ancestor "$commit" origin/main || { echo "::error::tag $GITHUB_REF_NAME ($commit) is not on main; tag main after the release PR merges"; exit 1; }
       # Notes = the tag message body (its subject when the body is empty). Fails on a lightweight tag,
       # so no release is published with a commit message as notes.
       - run: |
