@@ -918,6 +918,54 @@ fn github_fetches_prs_issues_and_releases_through_gh_with_bodies_cut() {
 }
 
 #[test]
+fn github_returns_its_newest_times_as_the_cursor_and_fetches_only_what_is_newer() {
+    let w = W::new();
+    canned(&w);
+    let fetch = |stdin: &str| -> Value {
+        let o = w.builtin("github", "fetch", &gh_params(), stdin);
+        assert_eq!(o.code, 0, "{}", o.stderr);
+        serde_json::from_str(&o.stdout).unwrap()
+    };
+    let full = fetch(r#"{"since": null}"#);
+    let newest = json!({"updated": "2026-03-02T10:00:00Z", "published": "2026-03-03T10:00:00Z"});
+    assert_eq!(full["cursor"], newest);
+    assert!(!gh_argv(&w).contains("updated:>="), "{}", gh_argv(&w));
+    std::fs::remove_file(w.root.join("rec/gh.argv")).unwrap();
+    let older = json!({"updated": "2026-03-01T10:00:00Z", "published": "2026-03-03T10:00:00Z"});
+    let f = fetch(&since(older));
+    let argv = gh_argv(&w);
+    for noun in ["pr", "issue"] {
+        assert!(
+            argv.contains(&format!(
+                "{noun} list -R acme/widget --state all --search sort:updated-desc updated:>=2026-03-01T10:00:00Z --limit 50"
+            )),
+            "{argv}"
+        );
+    }
+    assert_eq!(
+        f["releases"],
+        json!([]),
+        "no release published after the cursor"
+    );
+    assert_eq!(f["cursor"], newest);
+    // Nothing new: the cursor stays where it was.
+    for key in ["pr-list", "issue-list", "api.releases"] {
+        gh(&w, key, &json!([]));
+    }
+    let later = json!({"updated": "2026-04-01T00:00:00Z", "published": "2026-04-01T00:00:00Z"});
+    assert_eq!(fetch(&since(later.clone()))["cursor"], later);
+    // A cursor that is not two times is not used.
+    let o = w.builtin(
+        "github",
+        "fetch",
+        &gh_params(),
+        &since(json!({"updated": "x sort:created"})),
+    );
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    assert!(!gh_argv(&w).contains("x sort:created"), "{}", gh_argv(&w));
+}
+
+#[test]
 fn github_fingerprint_follows_the_newest_update_and_release() {
     let w = W::new();
     gh(

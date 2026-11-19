@@ -46,7 +46,7 @@ pub fn run(entry: &str, input: &str) -> Result<String> {
     }
     match entry {
         "fingerprint" => fingerprint(&repo),
-        "fetch" => fetch(&repo),
+        "fetch" => fetch(&repo, input),
         "resolve" => resolve(&repo, input),
         _ => Err(crate::error::usage(format!(
             "`github` has no entrypoint `{entry}`"
@@ -127,29 +127,53 @@ fn cut_keep_lines(text: &str, max: usize) -> String {
     text.chars().take(max).collect()
 }
 
+/// A time of the cursor `since` gives, when it is one (it goes into a search query).
+fn cursor_time(input: &Value, key: &str) -> Option<String> {
+    input["since"]["cursor"][key]
+        .as_str()
+        .filter(|t| crate::lock::parse_utc(t).is_some())
+        .map(str::to_string)
+}
+
+/// The latest of the cursor's time and the times listed under `key` (all UTC, same format).
+fn newest(prev: Option<String>, items: &[&Value], key: &str) -> Option<String> {
+    items
+        .iter()
+        .filter_map(|v| v[key].as_str().map(str::to_string))
+        .chain(prev)
+        .max()
+}
+
 /// The pull requests, issues and releases the agent proposes from, newest `limit` of each:
 /// pull requests and issues by last update, so closing or merging an old one reaches the agent
-/// as the evidence for a removal.
-fn fetch(repo: &str) -> Result<String> {
+/// as the evidence for a removal. With a cursor from the last settled run, only what was updated
+/// (pull requests, issues) or published (releases) since; the cursor is the newest of each.
+fn fetch(repo: &str, input: &str) -> Result<String> {
+    let input: Value = serde_json::from_str(input).context("the fetch input is no JSON")?;
+    let (updated, published) = (
+        cursor_time(&input, "updated"),
+        cursor_time(&input, "published"),
+    );
     let limit = limit();
-    let releases = releases(repo, limit)?;
+    let mut releases = releases(repo, limit)?;
+    // limit: an edit to the notes of a release published before the cursor waits for a full
+    // read (`--force`); the release list says nothing about edits.
+    if let Some(p) = &published {
+        releases.retain(|r| r["published_at"].as_str().is_some_and(|t| t > p.as_str()));
+    }
+    let search = match &updated {
+        // Inclusive: the newest item of the last run comes once more rather than a same-second
+        // update being missed.
+        Some(t) => format!("sort:updated-desc updated:>={t}"),
+        None => "sort:updated-desc".to_string(),
+    };
     let limit = limit.to_string();
     let list = |noun: &str, fields: &str| -> Result<Vec<Value>> {
         // limit: `--search` goes through GitHub's search, which returns at most 1000 items, so a
         // `limit` above 1000 gives 1000; enough for a map's recent work.
         let v = gh(&[
-            noun,
-            "list",
-            "-R",
-            repo,
-            "--state",
-            "all",
-            "--search",
-            "sort:updated-desc",
-            "--limit",
-            &limit,
-            "--json",
-            fields,
+            noun, "list", "-R", repo, "--state", "all", "--search", &search, "--limit", &limit,
+            "--json", fields,
         ])?;
         Ok(v.as_array().cloned().unwrap_or_default())
     };
@@ -182,7 +206,12 @@ fn fetch(repo: &str) -> Result<String> {
         })
     })
     .collect();
+    let cursor = json!({
+        "updated": newest(updated, &pulls.iter().chain(&issues).collect::<Vec<_>>(), "updated_at"),
+        "published": newest(published, &releases.iter().collect::<Vec<_>>(), "published_at"),
+    });
     Ok(json!({
+        "cursor": cursor,
         "repo": repo,
         "cite": {
             "pr": format!("gh-pr:{repo}#<number>"),
