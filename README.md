@@ -176,32 +176,6 @@ its config in its `rrecall.toml`. `rrecall import <outline>` seeds an empty map 
 outline; `rrecall status` prints the last run's summary, and `rrecall why` with a node id from
 `ls` or `find` tells when that node appeared and changed, and why.
 
-<details>
-<summary><b>Codex instead of Claude Code</b></summary>
-<br>
-
-`init` enables the user config's default runner, `claude` unless you set another. To run
-collectors and judges on Codex, set it in `~/.config/rrecall/config.toml`
-(`$XDG_CONFIG_HOME/rrecall/config.toml`) before `rrecall init`:
-
-```toml
-runner = "codex"
-```
-
-Codex reports tokens but no cost, so the `codex` instance in the store's `rrecall.toml` needs a
-price, in USD per 1M tokens, for each model it reports; a call whose model has none fails
-([spec §6.8](docs/SPEC.md#68-runner-contract-and-what-reaches-a-model)). Replace the example with
-your model's name and prices:
-
-```toml
-[[plugins]]
-id = "codex"
-
-[plugins.params]
-prices = { "your-model" = { input = 1.25, cached_input = 0.125, output = 10.0 } }
-```
-
-</details>
 
 | Exit | Meaning |
 |---|---|
@@ -249,6 +223,33 @@ params = { channels = ["eng-platform"], dms = [], lookback_days = 14 }
 ```
 
 It runs at most once a day while its setup is unchanged and its last run settled (`min_interval = "1d"`; `--force`, a changed setup or an unsettled run make it due sooner), reads from a day before its last settled run but never further back than `lookback_days` (the first run, and `--force`, read the last `lookback_days` days) and proposes decisions, people and blockers, each citing `slack:<channel-id>/<ts>`. `allowed_runners` keeps Slack text on these two runner instances; judges can stay on the plain `claude` one. `connectors = true` runs the agent in a fresh Claude Code config dir that keeps your login: your CLAUDE.md, settings, permission rules, hooks and local plugins stay out; what your account syncs from claude.ai (its connectors and synced plugins) still loads.
+
+</details>
+
+<details>
+<summary><b>Codex instead of Claude Code</b></summary>
+<br>
+
+`init` enables the user config's default runner, `claude` unless you set another. To run
+collectors and judges on Codex, set it in `~/.config/rrecall/config.toml`
+(`$XDG_CONFIG_HOME/rrecall/config.toml`) before `rrecall init`:
+
+```toml
+runner = "codex"
+```
+
+Codex reports tokens but no cost, so the `codex` instance in the store's `rrecall.toml` needs a
+price, in USD per 1M tokens, for each model it reports; a call whose model has none fails
+([spec §6.8](docs/SPEC.md#68-runner-contract-and-what-reaches-a-model)). Replace the example with
+your model's name and prices:
+
+```toml
+[[plugins]]
+id = "codex"
+
+[plugins.params]
+prices = { "your-model" = { input = 1.25, cached_input = 0.125, output = 10.0 } }
+```
 
 </details>
 
