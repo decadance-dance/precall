@@ -11,8 +11,8 @@ use crate::process::{self, Ctx};
 use crate::secrets;
 use crate::store::{self, Store};
 use crate::wire::{
-    self, CollectorInput, Event, FetchInput, JudgeInput, JudgeItem, PluginInput, Proposal, Rejection,
-    ResolveInput, RoundVerdict, RunnerInput, Verdict, VerdictKind,
+    self, CollectorInput, Event, FetchInput, JudgeInput, JudgeItem, PluginInput, Proposal,
+    Rejection, ResolveInput, RoundVerdict, RunnerInput, Verdict, VerdictKind,
 };
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
@@ -635,7 +635,10 @@ impl Run {
                 continue;
             }
             let cursor = self.cursor_of(&inst.id);
-            if cursor.as_ref().is_some_and(|c| secrets::find(&c.to_string()).is_some()) {
+            if cursor
+                .as_ref()
+                .is_some_and(|c| secrets::find(&c.to_string()).is_some())
+            {
                 // Redacting would corrupt it: the next run reads from the settled time alone.
                 self.warnings.push(format!(
                     "collector `{}`: its cursor looks like a credential and is not kept",

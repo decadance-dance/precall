@@ -2232,7 +2232,11 @@ fn the_cursor_of_a_settled_run_reaches_the_next_input_as_since() {
         with_cursor(&[], json!({"n": 2})),
     ]);
     w.run_code(&[], 0);
-    assert_eq!(w.input("repo", 1)["since"], Value::Null, "first run: full read");
+    assert_eq!(
+        w.input("repo", 1)["since"],
+        Value::Null,
+        "first run: full read"
+    );
     let lock = w.lock();
     let entry = &lock["collectors"]["repo"];
     assert_eq!(entry["cursor"], "c1");
@@ -2240,7 +2244,10 @@ fn the_cursor_of_a_settled_run_reaches_the_next_input_as_since() {
     let at = entry["settled_at"].as_str().unwrap().to_string();
     std::fs::write(w.fp(), "v2").unwrap();
     w.run_code(&[], 0);
-    assert_eq!(w.input("repo", 2)["since"], json!({"at": at, "cursor": "c1"}));
+    assert_eq!(
+        w.input("repo", 2)["since"],
+        json!({"at": at, "cursor": "c1"})
+    );
     assert_eq!(w.lock()["collectors"]["repo"]["cursor"], json!({"n": 2}));
 }
 
@@ -2255,7 +2262,10 @@ fn a_settled_run_without_a_cursor_clears_it_and_keeps_the_time() {
     let at = lock["collectors"]["repo"]["settled_at"].clone();
     std::fs::write(w.fp(), "v3").unwrap();
     w.run_code(&[], 0);
-    assert_eq!(w.input("repo", 3)["since"], json!({"at": at, "cursor": null}));
+    assert_eq!(
+        w.input("repo", 3)["since"],
+        json!({"at": at, "cursor": null})
+    );
 }
 
 #[test]
@@ -2370,7 +2380,11 @@ fn a_fetch_returns_the_cursor_and_gets_since() {
     let r = json!({"output": {"proposals": []}, "cost_usd": 0.0, "model": "fake-1"});
     w.config(&format!(
         "{}{}",
-        w.inst("writer", "fetching", "out = '{\"cursor\": {\"n\": 7}, \"pulls\": []}'"),
+        w.inst(
+            "writer",
+            "fetching",
+            "out = '{\"cursor\": {\"n\": 7}, \"pulls\": []}'"
+        ),
         w.inst("runner", "runner", &format!("out = {}", q(&r.to_string()))),
     ));
     w.run_code(&[], 0);

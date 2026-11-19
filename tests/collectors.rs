@@ -712,6 +712,71 @@ fn files_without_git_hashes_contents_and_cites_its_ref_kind() {
     assert!(o.stderr.contains("preset"), "{}", o.stderr);
 }
 
+fn since(cursor: Value) -> String {
+    json!({"since": {"at": "2026-11-01T00:00:00Z", "cursor": cursor}}).to_string()
+}
+
+#[test]
+fn files_with_git_returns_head_as_its_cursor_and_focuses_on_what_changed_since() {
+    let w = W::new();
+    w.commit_file("docs/a.md", "a\n", "a");
+    w.commit_file("docs/b.md", "b\n", "b");
+    w.commit_file("docs/gone.md", "gone\n", "gone");
+    w.commit_file("other/x.txt", "x\n", "unmatched");
+    let p = files_params(&w, true, &[("include", r#"["docs/**"]"#)]);
+    let fetch = |stdin: &str| -> Value {
+        let o = files(&w, "fetch", &p, stdin);
+        assert_eq!(o.code, 0, "{}", o.stderr);
+        serde_json::from_str(&o.stdout).unwrap()
+    };
+    let full = fetch(r#"{"since": null}"#);
+    let settled = w.git(&["rev-parse", "HEAD"]).trim().to_string();
+    assert_eq!(full["cursor"], settled.as_str(), "the full commit id");
+    assert!(full.get("focus").is_none(), "a full read has no focus");
+    w.commit_file("docs/a.md", "a v2\n", "a v2");
+    w.commit_file("docs/new.md", "new\n", "new");
+    w.git(&["rm", "-q", "docs/gone.md"]);
+    w.git(&["commit", "-q", "-m", "rm gone"]);
+    w.commit_file("other/x.txt", "x v2\n", "unmatched v2");
+    let f = fetch(&since(json!(settled)));
+    let head = w.git(&["rev-parse", "HEAD"]).trim().to_string();
+    assert_eq!(f["cursor"], head.as_str());
+    assert_eq!(
+        f["focus"],
+        json!({"since": &settled[..12], "changed": ["docs/a.md", "docs/new.md"], "deleted": ["docs/gone.md"]})
+    );
+    assert_eq!(
+        f["files"],
+        json!(["docs/a.md", "docs/b.md", "docs/new.md"]),
+        "every matched file stays for context"
+    );
+    // A cursor git does not know (rewritten history) or that is no commit id: a full read.
+    for bad in [
+        json!("0123456789abcdef0123456789abcdef01234567"),
+        json!("--all"),
+        json!(7),
+    ] {
+        let f = fetch(&since(bad.clone()));
+        assert!(f.get("focus").is_none(), "{bad}: {f}");
+        assert_eq!(f["cursor"], head.as_str());
+    }
+}
+
+#[test]
+fn files_without_git_returns_no_cursor() {
+    let w = W::new();
+    std::fs::write(w.repo().join("a.md"), "a\n").unwrap();
+    let o = files(
+        &w,
+        "fetch",
+        &files_params(&w, false, &[]),
+        &since(json!("x")),
+    );
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    let f: Value = serde_json::from_str(&o.stdout).unwrap();
+    assert!(f.get("cursor").is_none() && f.get("focus").is_none(), "{f}");
+}
+
 #[test]
 fn files_resolves_a_file_at_its_commit_and_only_inside_its_scope() {
     let w = W::new();

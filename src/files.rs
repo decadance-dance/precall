@@ -51,7 +51,7 @@ pub fn run(entry: &str, input: &str) -> Result<String> {
     let s = Scope::from_params()?;
     match entry {
         "fingerprint" => s.fingerprint(),
-        "fetch" => s.fetch(),
+        "fetch" => s.fetch(input),
         "resolve" => s.resolve(input),
         _ => Err(crate::error::usage(format!(
             "`files` has no entrypoint `{entry}`"
@@ -134,7 +134,7 @@ impl Scope {
     /// `HEAD` with git, else a hash of the file.
     fn matched(&self) -> Result<Vec<(String, String)>> {
         let mut out = if self.git {
-            self.matched_at_head()?
+            self.matched_at("HEAD")?
         } else {
             let mut out = Vec::new();
             self.walk(&self.root, &mut out)?;
@@ -144,8 +144,9 @@ impl Scope {
         Ok(out)
     }
 
-    fn matched_at_head(&self) -> Result<Vec<(String, String)>> {
-        let tree = git(&self.root, &["ls-tree", "-r", "-z", "HEAD"])?;
+    /// The matched text blobs at a commit, with git.
+    fn matched_at(&self, rev: &str) -> Result<Vec<(String, String)>> {
+        let tree = git(&self.root, &["ls-tree", "-r", "-z", rev])?;
         let mut out = Vec::new();
         for entry in tree.split('\0').filter(|e| !e.is_empty()) {
             let Some((meta, rel)) = entry.split_once('\t') else {
@@ -204,9 +205,11 @@ impl Scope {
     }
 
     /// What the agent reads: the folder, the files in scope, how to cite them, the preset's
-    /// branches.
-    fn fetch(&self) -> Result<String> {
-        let files: Vec<String> = self.matched()?.into_iter().map(|(rel, _)| rel).collect();
+    /// branches; with git, the commit as the cursor and, from a settled one, what changed since.
+    fn fetch(&self, input: &str) -> Result<String> {
+        let input: Value = serde_json::from_str(input).context("the fetch input is no JSON")?;
+        let matched = self.matched()?;
+        let files: Vec<&str> = matched.iter().map(|(rel, _)| rel.as_str()).collect();
         let mut f = json!({
             "root": self.root.to_string_lossy(),
             "files": files,
@@ -214,15 +217,44 @@ impl Scope {
             "branches": branches(&self.preset)?,
         });
         // limit: the agent reads the working tree, which may differ from the commit it cites.
+        // limit: without git there is no cursor, so every run reads all the files.
         let cite = if self.git {
             let c = self.commit()?;
             f["commit"] = json!(c);
+            f["cursor"] = json!(git(&self.root, &["rev-parse", "HEAD"])?.trim());
+            let settled = input["since"]["cursor"].as_str().filter(|c| {
+                is_sha(c)
+                    && git_bytes(&self.root, &["cat-file", "-e", &format!("{c}^{{commit}}")])
+                        .is_some()
+            });
+            if let Some(settled) = settled {
+                f["focus"] = self.focus(settled, &matched)?;
+            }
             format!("{}:<path>#L<first>-L<last>@{c}", self.kind)
         } else {
             format!("{}:<path>#L<first>-L<last>", self.kind)
         };
         f["cite"] = json!(cite);
         Ok(f.to_string())
+    }
+
+    /// The matched files changed or deleted between the settled commit and `HEAD` (`now`).
+    fn focus(&self, settled: &str, now: &[(String, String)]) -> Result<Value> {
+        let then: BTreeMap<String, String> = self.matched_at(settled)?.into_iter().collect();
+        let now_paths: BTreeSet<&str> = now.iter().map(|(rel, _)| rel.as_str()).collect();
+        let changed: Vec<&str> = now
+            .iter()
+            .filter(|(rel, id)| then.get(rel) != Some(id))
+            .map(|(rel, _)| rel.as_str())
+            .collect();
+        let deleted: Vec<&str> = then
+            .keys()
+            .map(String::as_str)
+            .filter(|rel| !now_paths.contains(rel))
+            .collect();
+        Ok(
+            json!({ "since": &settled[..settled.len().min(12)], "changed": changed, "deleted": deleted }),
+        )
     }
 
     fn resolve(&self, input: &str) -> Result<String> {
