@@ -29,3 +29,19 @@ pub const PROMPTS: [(&str, &str, &str); 2] = [
     ("slack", "collect.md", include_str!("slack/collect.md")),
     ("slack", "resolve.md", include_str!("slack/resolve.md")),
 ];
+
+/// A `slack` instance that names no channel and no DM would still pay for a model call that
+/// can only come back empty (spec §10): a config error instead.
+pub fn check_params(params: &toml::Table) -> Result<(), String> {
+    let named = |k: &str| {
+        params
+            .get(k)
+            .and_then(|v| v.as_array())
+            .is_some_and(|a| !a.is_empty())
+    };
+    if named("channels") || named("dms") {
+        Ok(())
+    } else {
+        Err("the built-in `slack` collector reads nothing: set `channels` or `dms`".into())
+    }
+}

@@ -884,6 +884,9 @@ fn instance(
     } else if e.allowed_runners.is_some() {
         return Err("`allowed_runners` applies only to a collector".into());
     }
+    if plugin.builtin && m.id == "slack" {
+        crate::slack::check_params(&params)?;
+    }
     Ok(Instance {
         id: e.id.clone(),
         timeout: e.timeout.unwrap_or_else(|| m.timeout()),
@@ -1532,6 +1535,28 @@ repo = ""
             instances(&cfg.plugins, &cat, &crate::config::default_branches()[..2]).unwrap_err()
         );
         assert!(e.contains("github") && e.contains("`done`"), "{e}");
+    }
+
+    #[test]
+    fn a_builtin_slack_instance_must_name_a_channel_or_a_dm() {
+        let plugins = builtin().unwrap();
+        let load = |params: &str| {
+            let cfg = entries(&format!(
+                "[[plugins]]\nid = \"slack\"\nparams = {{ {params} }}\n"
+            ));
+            instances(&cfg.plugins, &plugins, &cfg.branches().unwrap())
+                .map(|_| ())
+                .map_err(|e| format!("{e:#}"))
+        };
+        for empty in ["", "channels = [], dms = []"] {
+            let e = load(empty).unwrap_err();
+            assert!(
+                e.contains("`slack`") && e.contains("`channels` or `dms`"),
+                "{e}"
+            );
+        }
+        load("channels = [\"eng-platform\"]").unwrap();
+        load("dms = [\"U0123ABCDEF\"]").unwrap();
     }
 
     #[test]
