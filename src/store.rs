@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 pub const BRANCH_SOURCE: &str = "config:rrecall.toml";
 
+#[derive(Debug, Clone)]
 pub struct Store {
     pub root: PathBuf,
     pub branches: Vec<BranchDef>,
