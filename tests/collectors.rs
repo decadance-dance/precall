@@ -155,6 +155,13 @@ impl W {
         git_in(&self.store(), &["rev-parse", "HEAD"])
     }
 
+    /// Whether the store changed since `from` in nothing but the lock: a forced run over
+    /// unchanged sources moves only the settled times (spec §4.2), and none within one second.
+    fn only_the_lock_changed(&self, from: &str) -> bool {
+        let changed = git_in(&self.store(), &["diff", "--name-only", from.trim(), "HEAD"]);
+        changed.lines().all(|l| l == "rrecall.lock")
+    }
+
     /// `rrecall builtin <id> <entry>` with params as `RRECALL_PARAM_*`.
     fn builtin(&self, id: &str, entry: &str, params: &[(&str, &str)], stdin: &str) -> Out {
         let env: Vec<(String, &str)> = params
@@ -364,10 +371,9 @@ fn git_history_keeps_two_tags_of_one_commit_and_a_stream_tagged_on_its_merge_apa
     let o = w.raw(&["--project", "widget", "run", "--force"], None, &[]);
     assert_eq!(o.code, 0, "{}", o.stderr);
     assert_eq!(done_pairs(&w), first);
-    assert_eq!(
-        w.store_head(),
-        head,
-        "a forced run over unchanged history changes nothing"
+    assert!(
+        w.only_the_lock_changed(&head),
+        "a forced run over unchanged history changes no map file"
     );
 }
 
@@ -437,7 +443,7 @@ fn git_history_keeps_two_long_tags_with_one_cut_title_apart() {
     let o = w.raw(&["--project", "widget", "run", "--force"], None, &[]);
     assert_eq!(o.code, 0, "{}", o.stderr);
     assert_eq!(done_facts(&w), first);
-    assert_eq!(w.store_head(), head, "a forced run changes nothing");
+    assert!(w.only_the_lock_changed(&head), "no map file");
 }
 
 #[test]
@@ -706,6 +712,160 @@ fn files_without_git_hashes_contents_and_cites_its_ref_kind() {
     assert!(o.stderr.contains("preset"), "{}", o.stderr);
 }
 
+fn since(cursor: Value) -> String {
+    json!({"since": {"at": "2026-11-01T00:00:00Z", "cursor": cursor}}).to_string()
+}
+
+#[test]
+fn files_with_git_returns_head_as_its_cursor_and_focuses_on_what_changed_since() {
+    let w = W::new();
+    w.commit_file("docs/a.md", "a\n", "a");
+    w.commit_file("docs/b.md", "b\n", "b");
+    w.commit_file("docs/gone.md", "gone\n", "gone");
+    w.commit_file("other/x.txt", "x\n", "unmatched");
+    let p = files_params(&w, true, &[("include", r#"["docs/**"]"#)]);
+    let fetch = |stdin: &str| -> Value {
+        let o = files(&w, "fetch", &p, stdin);
+        assert_eq!(o.code, 0, "{}", o.stderr);
+        serde_json::from_str(&o.stdout).unwrap()
+    };
+    let full = fetch(r#"{"since": null}"#);
+    let settled = w.git(&["rev-parse", "HEAD"]).trim().to_string();
+    assert_eq!(full["cursor"], settled.as_str(), "the full commit id");
+    assert!(full.get("focus").is_none(), "a full read has no focus");
+    w.commit_file("docs/a.md", "a v2\n", "a v2");
+    w.commit_file("docs/new.md", "new\n", "new");
+    w.git(&["rm", "-q", "docs/gone.md"]);
+    w.git(&["commit", "-q", "-m", "rm gone"]);
+    w.commit_file("other/x.txt", "x v2\n", "unmatched v2");
+    let f = fetch(&since(json!(settled)));
+    let head = w.git(&["rev-parse", "HEAD"]).trim().to_string();
+    assert_eq!(f["cursor"], head.as_str());
+    assert_eq!(
+        f["focus"],
+        json!({"since": &settled[..12], "changed": ["docs/a.md", "docs/new.md"], "deleted": ["docs/gone.md"]})
+    );
+    assert_eq!(
+        f["files"],
+        json!(["docs/a.md", "docs/b.md", "docs/new.md"]),
+        "every matched file stays for context"
+    );
+    // A cursor git does not know (rewritten history) or that is no commit id: a full read.
+    for bad in [
+        json!("0123456789abcdef0123456789abcdef01234567"),
+        json!("--all"),
+        json!(7),
+    ] {
+        let f = fetch(&since(bad.clone()));
+        assert!(f.get("focus").is_none(), "{bad}: {f}");
+        assert_eq!(f["cursor"], head.as_str());
+    }
+}
+
+#[test]
+fn files_pins_one_commit_for_its_files_citations_and_cursor() {
+    // Review round 1, finding 3: HEAD moves while fetch runs.
+    let w = W::new();
+    w.commit_file("base.md", "base\n", "base");
+    let first = w.git(&["rev-parse", "HEAD"]).trim().to_string();
+    w.commit_file("middle.md", "middle\n", "middle");
+    let second = w.git(&["rev-parse", "HEAD"]).trim().to_string();
+    w.commit_file("late.md", "late\n", "late");
+    let third = w.git(&["rev-parse", "HEAD"]).trim().to_string();
+    w.git(&["reset", "-q", "--hard", &second]);
+    let real = std::env::var("PATH")
+        .unwrap()
+        .split(':')
+        .map(|d| Path::new(d).join("git"))
+        .find(|p| p.is_file())
+        .unwrap();
+    let wrap = w.root.join("gitwrap");
+    std::fs::create_dir_all(&wrap).unwrap();
+    let move_to = w.root.join("rec/move-to");
+    std::fs::write(&move_to, &third).unwrap();
+    // The first `ls-tree` moves HEAD to the third commit once it has listed the tree.
+    std::fs::write(
+        wrap.join("git"),
+        format!(
+            "#!/bin/sh\n{real} \"$@\"; rc=$?\nif [ \"$1\" = ls-tree ] && [ -f {m} ]; then {real} update-ref HEAD \"$(cat {m})\"; rm {m}; fi\nexit $rc\n",
+            real = q(&real.to_string_lossy()),
+            m = q(&move_to.to_string_lossy()),
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(wrap.join("git"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let env_path = format!("{}:{}", wrap.display(), w.path());
+    let mut env: Vec<(String, String)> = files_params(&w, true, &[])
+        .into_iter()
+        .map(|(k, v)| (format!("RRECALL_PARAM_{}", k.to_uppercase()), v))
+        .collect();
+    env.push(("PATH".into(), env_path));
+    let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let o = w.raw(
+        &["builtin", "files", "fetch"],
+        Some(&since(json!(first))),
+        &env,
+    );
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    assert!(!move_to.exists(), "HEAD moved during the fetch");
+    let f: Value = serde_json::from_str(&o.stdout).unwrap();
+    assert_eq!(f["files"], json!(["base.md", "middle.md"]));
+    assert_eq!(f["focus"]["changed"], json!(["middle.md"]));
+    assert_eq!(
+        f["cursor"],
+        second.as_str(),
+        "the commit it read, not the moved HEAD"
+    );
+    assert_eq!(f["commit"], &second[..12]);
+}
+
+#[test]
+fn files_takes_its_own_cursor_in_a_sha256_repository() {
+    // Review round 1, finding 5: 64-character object ids.
+    let w = W::bare();
+    w.git(&["init", "-q", "-b", "main", "--object-format=sha256"]);
+    w.commit_file("base.md", "base\n", "base");
+    let settled = w.git(&["rev-parse", "HEAD"]).trim().to_string();
+    assert_eq!(settled.len(), 64);
+    w.commit_file("base.md", "base v2\n", "base v2");
+    let o = files(
+        &w,
+        "fetch",
+        &files_params(&w, true, &[]),
+        &since(json!(settled)),
+    );
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    let f: Value = serde_json::from_str(&o.stdout).unwrap();
+    assert_eq!(f["focus"]["changed"], json!(["base.md"]), "{f}");
+    let head = w.git(&["rev-parse", "HEAD"]).trim().to_string();
+    assert_eq!(f["cursor"], head.as_str());
+    // A citation at a 64-character commit id resolves too.
+    let r = format!("file:base.md@{head}");
+    let t = texts(&files(
+        &w,
+        "resolve",
+        &files_params(&w, true, &[]),
+        &json!({ "refs": [r] }).to_string(),
+    ));
+    assert_eq!(t[&r], "base v2\n");
+}
+
+#[test]
+fn files_without_git_returns_no_cursor() {
+    let w = W::new();
+    std::fs::write(w.repo().join("a.md"), "a\n").unwrap();
+    let o = files(
+        &w,
+        "fetch",
+        &files_params(&w, false, &[]),
+        &since(json!("x")),
+    );
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    let f: Value = serde_json::from_str(&o.stdout).unwrap();
+    assert!(f.get("cursor").is_none() && f.get("focus").is_none(), "{f}");
+}
+
 #[test]
 fn files_resolves_a_file_at_its_commit_and_only_inside_its_scope() {
     let w = W::new();
@@ -844,6 +1004,66 @@ fn github_fetches_prs_issues_and_releases_through_gh_with_bodies_cut() {
         argv.contains("api repos/acme/widget/releases?per_page=50&page=1"),
         "{argv}"
     );
+}
+
+#[test]
+fn github_returns_its_newest_times_as_the_cursor_and_fetches_only_what_is_newer() {
+    let w = W::new();
+    canned(&w);
+    let fetch = |stdin: &str| -> Value {
+        let o = w.builtin("github", "fetch", &gh_params(), stdin);
+        assert_eq!(o.code, 0, "{}", o.stderr);
+        serde_json::from_str(&o.stdout).unwrap()
+    };
+    let full = fetch(r#"{"since": null}"#);
+    // One time per list: each advances only by its own results (review round 1, finding 1).
+    let newest = json!({"pulls": "2026-03-01T10:00:00Z", "issues": "2026-03-02T10:00:00Z", "published": "2026-03-03T10:00:00Z"});
+    assert_eq!(full["cursor"], newest);
+    assert!(!gh_argv(&w).contains("updated:>="), "{}", gh_argv(&w));
+    std::fs::remove_file(w.root.join("rec/gh.argv")).unwrap();
+    let older = json!({"pulls": "2026-02-01T10:00:00Z", "issues": "2026-03-01T10:00:00Z", "published": "2026-03-03T10:00:00Z"});
+    let f = fetch(&since(older));
+    let argv = gh_argv(&w);
+    for (noun, t) in [
+        ("pr", "2026-02-01T10:00:00Z"),
+        ("issue", "2026-03-01T10:00:00Z"),
+    ] {
+        assert!(
+            argv.contains(&format!(
+                "{noun} list -R acme/widget --state all --search sort:updated-desc updated:>={t} --limit 50"
+            )),
+            "{argv}"
+        );
+    }
+    assert_eq!(
+        f["releases"],
+        json!([]),
+        "no release published after the cursor"
+    );
+    assert_eq!(f["cursor"], newest);
+    // A pull request updated between the two list calls: the issue list's newer time does not
+    // carry the pull requests' cursor past it.
+    gh(&w, "pr-list", &json!([]));
+    let f = fetch(&since(
+        json!({"pulls": "2026-02-01T10:00:00Z", "issues": "2026-03-01T10:00:00Z"}),
+    ));
+    assert_eq!(f["cursor"]["pulls"], "2026-02-01T10:00:00Z", "{f}");
+    assert_eq!(f["cursor"]["issues"], "2026-03-02T10:00:00Z", "{f}");
+    // Nothing new: the cursor stays where it was.
+    for key in ["pr-list", "issue-list", "api.releases"] {
+        gh(&w, key, &json!([]));
+    }
+    let later = json!({"pulls": "2026-04-01T00:00:00Z", "issues": "2026-04-02T00:00:00Z", "published": "2026-04-01T00:00:00Z"});
+    assert_eq!(fetch(&since(later.clone()))["cursor"], later);
+    // A cursor that is not two times is not used.
+    let o = w.builtin(
+        "github",
+        "fetch",
+        &gh_params(),
+        &since(json!({"pulls": "x sort:created", "issues": "x sort:created"})),
+    );
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    assert!(!gh_argv(&w).contains("x sort:created"), "{}", gh_argv(&w));
 }
 
 #[test]

@@ -8,6 +8,8 @@ You keep part of a project map up to date from a GitHub repository's pull reques
 - `pulls` and `issues`: the most recently updated of each, newest first, with state, author, labels and dates; issues also with `assignees`.
 - `releases`: the most recent published releases, newest first, with tag, name, date and release notes.
 
+When `since` in the input is not `null`, the lists hold only what was updated (pull requests, issues) or published (releases) since your last completed run: propose from these changes, and use `nodes` to see what the map already says about them.
+
 That is all you get: no comments, no reviews, no discussions, and nothing older than these lists. Do not look for anything else. An item not in the lists may still exist; its absence is not evidence. `cite` says how to cite each: `gh-pr:<repo>#<number>`, `gh-issue:<repo>#<number>`, `gh-release:<repo>@<tag>`.
 
 `scope` in the input gives each branch you fill, with its question and granularity; follow the granularity exactly:

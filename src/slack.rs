@@ -3,6 +3,9 @@
 //! Slack access (§12) and proposes decisions, people and blockers; `resolve.md` fetches the
 //! messages its references name. No cheap fingerprint exists, so it runs on `min_interval`.
 
+// limit: an incremental read starts at the later of one day before `since.at` and
+// `lookback_days` before the run (`collect.md`), so a gap between runs longer than
+// `lookback_days` loses what came before it, as a full read does.
 /// The built-in manifest. It names no runner, so the instance's or the user config's applies
 /// (§6.8); that runner must have Slack access.
 pub const MANIFESTS: [&str; 1] = [r#"id = "slack"

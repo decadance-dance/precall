@@ -22,6 +22,10 @@ pub struct LockFile {
 pub struct CollectorLock {
     /// The combined fingerprint of the last settled run (`sha256:<hex>`).
     pub fingerprint: String,
+    /// `sha256:<hex>` over the non-source parts of the fingerprint (plugin hash, params, runner,
+    /// model): when they change, the cursor no longer applies and the next read is full.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<String>,
     /// The plugin directory: relative to the store when inside it, else absolute.
     pub plugin: String,
     pub hash: String,
@@ -29,9 +33,12 @@ pub struct CollectorLock {
     pub runner: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Only for a `min_interval` collector, so a fingerprinted one rewrites nothing when it re-settles.
+    /// The start of the last settled run: `since.at` of the next one (spec §4.2, §6.4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settled_at: Option<String>,
+    /// What the last settled run returned as where it stopped, opaque to the core.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<serde_json::Value>,
     /// The latest attempt did not settle (spec §4.2, I10): the collector is due on the next run
     /// whatever its fingerprint or interval, while the fields above keep the last settled run.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -205,11 +212,13 @@ mod tests {
             "repo".into(),
             CollectorLock {
                 fingerprint: "sha256:aa".into(),
+                setup: Some("sha256:dd".into()),
                 plugin: "plugins/files".into(),
                 hash: "sha256:bb".into(),
                 runner: None,
                 model: Some("m".into()),
-                settled_at: None,
+                settled_at: Some("2026-11-25T09:14:00Z".into()),
+                cursor: Some(serde_json::json!({"b": 1, "a": "x"})),
                 unsettled: false,
             },
         );
@@ -223,7 +232,7 @@ mod tests {
         let text = l.render();
         assert_eq!(
             text,
-            "{\n  \"collectors\": {\n    \"repo\": {\n      \"fingerprint\": \"sha256:aa\",\n      \"plugin\": \"plugins/files\",\n      \"hash\": \"sha256:bb\",\n      \"model\": \"m\"\n    }\n  },\n  \"plugins\": {\n    \"no-op\": {\n      \"plugin\": \"/p/no-op\",\n      \"hash\": \"sha256:cc\"\n    }\n  }\n}\n"
+            "{\n  \"collectors\": {\n    \"repo\": {\n      \"fingerprint\": \"sha256:aa\",\n      \"setup\": \"sha256:dd\",\n      \"plugin\": \"plugins/files\",\n      \"hash\": \"sha256:bb\",\n      \"model\": \"m\",\n      \"settled_at\": \"2026-11-25T09:14:00Z\",\n      \"cursor\": {\n        \"a\": \"x\",\n        \"b\": 1\n      }\n    }\n  },\n  \"plugins\": {\n    \"no-op\": {\n      \"plugin\": \"/p/no-op\",\n      \"hash\": \"sha256:cc\"\n    }\n  }\n}\n"
         );
         std::fs::write(t.0.join(LOCK_FILE), &text).unwrap();
         assert_eq!(LockFile::load(&t.0).unwrap(), l);

@@ -5,7 +5,9 @@ You keep part of a project map up to date from Slack. Read Slack through your Sl
 What to read, from `params` in the input:
 - `channels`: channel names or ids. Read each one.
 - `dms`: people (names, handles or user ids); read the direct messages between them and the Slack user you are logged in as.
-- `lookback_days`: read messages from the last this many days, with the threads under them.
+- `lookback_days`: when `since` in the input is `null`, read messages from the last this many days before the run (its time is `run_id`, `YYYY-MM-DDTHHMMSSZ` in UTC), with the threads under them.
+
+When `since` is not `null`, your last completed run read up to `since.at`: start one day before `since.at`, so a late message or a fresh edit near that time is not missed, but never earlier than `lookback_days` days before the run. Read the messages from that start on, and also every thread that got a new reply in that window though it started earlier. Propose from what is new; the map already holds what came before.
 
 Skip a channel or person you cannot find or read; never guess what it holds.
 
