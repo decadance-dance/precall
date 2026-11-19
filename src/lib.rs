@@ -18,6 +18,7 @@ pub mod query;
 pub mod run;
 pub mod runner;
 pub mod secrets;
+pub mod slack;
 pub mod sources;
 pub mod store;
 pub mod wire;

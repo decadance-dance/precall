@@ -272,6 +272,7 @@ fn builtin_manifests() -> impl Iterator<Item = &'static str> {
             crate::git_history::MANIFEST,
             crate::github::MANIFEST,
         ])
+        .chain(crate::slack::MANIFESTS)
 }
 
 /// The prompt files of the plugins inside the binary, as (plugin id, file name, text): a
@@ -281,6 +282,7 @@ fn builtin_prompts() -> impl Iterator<Item = (&'static str, &'static str, &'stat
         .into_iter()
         .chain(crate::files::PROMPTS)
         .chain(crate::github::PROMPTS)
+        .chain(crate::slack::PROMPTS)
 }
 
 /// The text of built-in plugin `id`'s prompt file `file`, with LF line ends whatever the
@@ -908,6 +910,9 @@ fn instance(
         }
     } else if e.allowed_runners.is_some() {
         return Err("`allowed_runners` applies only to a collector".into());
+    }
+    if plugin.builtin && m.id == "slack" {
+        crate::slack::check_params(&params)?;
     }
     Ok(Instance {
         id: e.id.clone(),
@@ -1563,6 +1568,42 @@ repo = ""
             instances(&cfg.plugins, &cat, &crate::config::default_branches()[..2]).unwrap_err()
         );
         assert!(e.contains("github") && e.contains("`done`"), "{e}");
+    }
+
+    #[test]
+    fn a_builtin_slack_instance_must_name_a_channel_or_a_dm() {
+        let plugins = builtin().unwrap();
+        let load = |params: &str| {
+            let cfg = entries(&format!(
+                "[[plugins]]\nid = \"slack\"\nparams = {{ {params} }}\n"
+            ));
+            instances(&cfg.plugins, &plugins, &cfg.branches().unwrap())
+                .map(|_| ())
+                .map_err(|e| format!("{e:#}"))
+        };
+        for empty in [
+            "",
+            "channels = [], dms = []",
+            "channels = [\"\"]",
+            "channels = [\"  \"]",
+            "dms = [42]",
+            "channels = [\"eng\"], dms = [42]",
+        ] {
+            let e = load(empty).unwrap_err();
+            assert!(
+                e.contains("`slack`") && (e.contains("`channels") || e.contains("`dms")),
+                "{empty}: {e}"
+            );
+        }
+        // The entry may hold private text: the error names the field and index, not the value.
+        let e = load("channels = [\"eng\"], dms = [\"U1\", { note = \"fixture-private-value\" }]")
+            .unwrap_err();
+        assert!(
+            e.contains("`dms[1]`") && !e.contains("fixture-private-value"),
+            "{e}"
+        );
+        load("channels = [\"eng-platform\"]").unwrap();
+        load("dms = [\"U0123ABCDEF\"]").unwrap();
     }
 
     #[test]

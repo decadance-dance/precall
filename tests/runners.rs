@@ -55,6 +55,26 @@ impl T {
         prices: Option<&str>,
         env: &[(&str, String)],
     ) -> Out {
+        let o = self
+            .spawn_with(id, model, timeout, prices, env)
+            .wait_with_output()
+            .unwrap();
+        Out {
+            ok: o.status.success(),
+            stdout: String::from_utf8(o.stdout).unwrap(),
+            stderr: String::from_utf8(o.stderr).unwrap(),
+        }
+    }
+
+    /// `call_with` without waiting for the runner, which is the returned child itself.
+    fn spawn_with(
+        &self,
+        id: &str,
+        model: &str,
+        timeout: u64,
+        prices: Option<&str>,
+        env: &[(&str, String)],
+    ) -> std::process::Child {
         let path = format!(
             "{}/tests/fixtures/bin:{}",
             env!("CARGO_MANIFEST_DIR"),
@@ -96,12 +116,23 @@ impl T {
             .unwrap()
             .write_all(input.to_string().as_bytes())
             .unwrap();
-        let o = child.wait_with_output().unwrap();
-        Out {
-            ok: o.status.success(),
-            stdout: String::from_utf8(o.stdout).unwrap(),
-            stderr: String::from_utf8(o.stderr).unwrap(),
-        }
+        child
+    }
+
+    /// Gives the temp dir an ACL that every dir and file created in it inherits, readable by
+    /// everyone (macOS ACLs are independent of the mode).
+    #[cfg(target_os = "macos")]
+    fn inheritable_acl(&self) {
+        let ok = Command::new("/bin/chmod")
+            .args([
+                "+a",
+                "group:everyone allow list,search,readattr,read,file_inherit,directory_inherit",
+            ])
+            .arg(self.root.join("tmp"))
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
     }
 
     fn rec(&self, name: &str) -> String {
@@ -113,13 +144,21 @@ impl T {
         self.rec(name).lines().map(String::from).collect()
     }
 
-    /// The scratch dir of each call (in `TMPDIR`) is gone after it.
+    /// The runners' private dir in `TMPDIR`.
+    fn private(&self) -> PathBuf {
+        let uid = std::os::unix::fs::MetadataExt::uid(&std::fs::metadata(&self.root).unwrap());
+        self.root.join(format!("tmp/rrecall-{uid}"))
+    }
+
+    /// The scratch dir of each call (in the private dir in `TMPDIR`) is gone after it.
     fn no_scratch_left(&self) {
-        let left: Vec<_> = std::fs::read_dir(self.root.join("tmp"))
-            .unwrap()
-            .flatten()
-            .map(|e| e.file_name())
-            .collect();
+        let names = |p: PathBuf| -> Vec<_> {
+            let names = std::fs::read_dir(p).unwrap().flatten();
+            names.map(|e| e.file_name()).collect()
+        };
+        let private = self.private();
+        assert_eq!(names(self.root.join("tmp")), [private.file_name().unwrap()]);
+        let left = names(private);
         assert!(left.is_empty(), "{left:?}");
     }
 }
@@ -467,8 +506,97 @@ fn a_record_torn_by_the_kill_does_not_lose_the_wrap_up() {
 #[test]
 fn the_scratch_dir_and_its_files_are_owner_only() {
     let t = T::new("perms", r#"{"texts":{}}"#);
+    #[cfg(target_os = "macos")]
+    t.inheritable_acl();
     json_of(&t.call("claude", "m", 60, None));
-    assert_eq!(t.rec("claude.perms"), "drwx------\n-rw-------\n");
+    // The private dir and the scratch dir in it: no ACL flag and no ACL entry, also under a temp
+    // dir whose ACL everything inherits.
+    assert_eq!(
+        t.rec("claude.perms"),
+        "drwx------\ndrwx------\n-rw-------\nacl=0\n"
+    );
+}
+
+#[test]
+fn a_call_removes_only_the_scratch_dirs_of_calls_whose_runner_is_gone() {
+    // Call 1 hangs in its agent; calls 2 and 3 share its TMPDIR.
+    let t = T::new("sleep-always", "{}");
+    let mut first = t.spawn_with("claude", "m", 60, None, &[]);
+    let cwd = t.root.join("home/agent/claude.cwd.1");
+    for _ in 0..200 {
+        if cwd.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let running = PathBuf::from(std::fs::read_to_string(&cwd).unwrap().trim());
+    let private = std::fs::canonicalize(t.private()).unwrap();
+    assert_eq!(running.parent(), Some(private.as_path()));
+    // Look-alikes with a dead pid, in TMPDIR and in the private dir, and a link with the exact
+    // name form.
+    let mut done = Command::new("true").spawn().unwrap();
+    done.wait().unwrap();
+    let dead = done.id();
+    let tmp = t.root.join("tmp");
+    let looks = [
+        tmp.join(format!("rrecall-agent-{dead}-project-notes")),
+        private.join(format!("agent-{dead}-project-notes")),
+        private.join(format!("agent-{dead}-0a1b2c3d-0000-4000-8000-00000000000g")),
+    ];
+    for d in &looks {
+        std::fs::create_dir_all(d).unwrap();
+        std::fs::write(d.join("note"), "keep").unwrap();
+    }
+    let target = t.root.join("keep");
+    std::fs::create_dir_all(&target).unwrap();
+    let link = private.join(format!("agent-{dead}-0a1b2c3d-0000-4000-8000-000000000000"));
+    std::os::unix::fs::symlink(&target, link).unwrap();
+    let other = T::new("ok", r#"{"texts":{}}"#);
+    let shared = [("TMPDIR", tmp.to_string_lossy().into())];
+    assert!(other.call_with("claude", "m", 60, None, &shared).ok);
+    assert!(running.exists());
+    // Killed, the runner leaves its dir behind; the next call removes it, and nothing else.
+    first.kill().unwrap();
+    first.wait().unwrap();
+    if let Ok(p) = std::fs::read_to_string(t.root.join("home/agent/claude.pid.1")) {
+        let _ = Command::new("kill").arg(p.trim()).status();
+    }
+    assert!(running.exists());
+    assert!(other.call_with("claude", "m", 60, None, &shared).ok);
+    assert!(!running.exists());
+    for d in &looks {
+        assert!(d.join("note").exists(), "{}", d.display());
+    }
+    assert!(target.exists());
+}
+
+#[test]
+fn a_private_runner_dir_that_others_could_reach_is_refused() {
+    let t = T::new("ok", r#"{"texts":{}}"#);
+    let private = t.private();
+    std::fs::create_dir(&private).unwrap();
+    std::fs::set_permissions(
+        &private,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let o = t.call("claude", "m", 60, None);
+    assert!(
+        !o.ok && o.stderr.contains(&private.display().to_string()),
+        "{}",
+        o.stderr
+    );
+    assert!(!t.root.join("home/agent/claude.calls").exists());
+    // Nor a link in its place.
+    std::fs::remove_dir(&private).unwrap();
+    std::os::unix::fs::symlink(t.root.join("home"), &private).unwrap();
+    let o = t.call("claude", "m", 60, None);
+    assert!(
+        !o.ok && o.stderr.contains(&private.display().to_string()),
+        "{}",
+        o.stderr
+    );
+    assert!(!t.root.join("home/agent/claude.calls").exists());
 }
 
 #[test]
@@ -477,4 +605,143 @@ fn a_key_twice_in_codex_usage_fails_the_call() {
     let prices = r#"{"m":{"input":1,"cached_input":0,"output":0}}"#;
     let o = t.call("codex", "m", 60, Some(prices));
     assert!(!o.ok && o.stderr.contains("duplicate key"), "{}", o.stderr);
+}
+
+#[test]
+fn claude_with_connectors_runs_in_a_fresh_config_dir_without_hooks_and_allows_only_named_tools() {
+    let t = T::new("config", r#"{"texts":{"note:a":"A"}}"#);
+    let tools =
+        r#"["mcp__claude_ai_Slack__slack_read_channel","mcp__claude_ai_Slack__slack_read_thread"]"#;
+    // The user's own config dir, with a login file and a CLAUDE.md that must not load.
+    let real = t.root.join("home/real-config");
+    std::fs::create_dir_all(&real).unwrap();
+    std::fs::write(real.join(".credentials.json"), r#"{"token":"t1"}"#).unwrap();
+    std::fs::write(real.join("CLAUDE.md"), "user instructions").unwrap();
+    #[cfg(target_os = "macos")]
+    t.inheritable_acl();
+    let o = t.call_with(
+        "claude",
+        "default",
+        60,
+        None,
+        &[
+            ("RRECALL_PARAM_CONNECTORS", "true".into()),
+            ("RRECALL_PARAM_TOOLS", tools.into()),
+            ("CLAUDE_CONFIG_DIR", real.to_string_lossy().into()),
+        ],
+    );
+    assert!(o.ok, "{}", o.stderr);
+    let argv = t.argv("claude.argv.1");
+    assert!(!argv.iter().any(|a| a == "--safe-mode"), "{argv:?}");
+    assert_eq!(after(&argv, "--setting-sources"), "user");
+    assert!(argv.iter().any(|a| a == "--disable-slash-commands"));
+    assert_eq!(after(&argv, "--settings"), r#"{"disableAllHooks":true}"#);
+    // ToolSearch loads the deferred schemas of the connectors' tools.
+    assert_eq!(after(&argv, "--tools"), "Read,Grep,Glob,ToolSearch");
+    assert_eq!(
+        after(&argv, "--allowedTools"),
+        "Read,Grep,Glob,ToolSearch,mcp__claude_ai_Slack__slack_read_channel,mcp__claude_ai_Slack__slack_read_thread"
+    );
+    assert_eq!(after(&argv, "--permission-mode"), "dontAsk");
+    let env = t.rec("claude.env.1");
+    for want in [
+        "ENABLE_TOOL_SEARCH=true",
+        "MCP_CONNECTION_NONBLOCKING=false",
+        "CLAUDE_CODE_MCP_STARTUP_WAIT_MS=30000",
+        "CLAUDE_CODE_DISABLE_CLAUDE_MDS=1",
+    ] {
+        assert!(env.lines().any(|l| l == want), "{want}: {env}");
+    }
+    // A fresh owner-only config dir in the call's scratch dir; the login stays the user's.
+    let cwd = t.rec("claude.cwd.1");
+    let config = env
+        .lines()
+        .find_map(|l| l.strip_prefix("CLAUDE_CONFIG_DIR="))
+        .unwrap();
+    assert_eq!(config, format!("{}/claude-config", cwd.trim()), "{env}");
+    let secure = format!("CLAUDE_SECURESTORAGE_CONFIG_DIR={}", real.display());
+    assert!(env.lines().any(|l| l == secure), "{env}");
+    // Owner-only with no ACL, and empty: Claude Code reads (and refreshes) the login in
+    // CLAUDE_SECURESTORAGE_CONFIG_DIR, so nothing is copied or linked into it.
+    assert_eq!(t.rec("claude.config"), "drwx------\nacl=0\n");
+    t.no_scratch_left();
+    assert_eq!(
+        std::fs::read_to_string(real.join(".credentials.json")).unwrap(),
+        r#"{"token":"t1"}"#
+    );
+}
+
+#[test]
+fn claude_without_connectors_keeps_safe_mode_and_no_tool_search() {
+    let t = T::new("ok", r#"{"texts":{"note:a":"A"}}"#);
+    let o = t.call_with(
+        "claude",
+        "default",
+        60,
+        None,
+        &[
+            ("RRECALL_PARAM_CONNECTORS", "false".into()),
+            ("ENABLE_TOOL_SEARCH", "true".into()),
+        ],
+    );
+    assert!(o.ok, "{}", o.stderr);
+    let argv = t.argv("claude.argv.1");
+    assert!(argv.iter().any(|a| a == "--safe-mode"), "{argv:?}");
+    assert!(
+        !argv
+            .iter()
+            .any(|a| a == "--setting-sources" || a == "--settings")
+    );
+    assert!(!t.rec("claude.env.1").contains("ENABLE_TOOL_SEARCH"));
+}
+
+#[test]
+fn claude_tools_must_be_exact_mcp_tool_names_and_need_connectors() {
+    for (connectors, tools) in [
+        ("true", r#"["mcp__claude_ai_Slack"]"#),
+        ("true", r#"["mcp__claude_ai_Slack__*"]"#),
+        ("true", r#"["Bash"]"#),
+        ("true", r#"["mcp__a__b,Bash"]"#),
+        ("true", r#"["mcp__a__b(x)"]"#),
+        ("true", r#"["mcp____b"]"#),
+        ("true", r#""mcp__a__b""#),
+        ("false", r#"["mcp__claude_ai_Slack__slack_read_channel"]"#),
+    ] {
+        let t = T::new("ok", "{}");
+        let o = t.call_with(
+            "claude",
+            "default",
+            60,
+            None,
+            &[
+                ("RRECALL_PARAM_CONNECTORS", connectors.into()),
+                ("RRECALL_PARAM_TOOLS", tools.into()),
+            ],
+        );
+        assert!(!o.ok, "{connectors} {tools}");
+        assert!(o.stderr.contains("param `"), "{tools}: {}", o.stderr);
+        assert!(!t.root.join("home/agent/claude.calls").exists(), "{tools}");
+    }
+}
+
+#[test]
+fn a_relative_claude_config_dir_reaches_the_agent_as_an_absolute_path() {
+    let t = T::new("ok", r#"{"texts":{}}"#);
+    let o = t.call_with(
+        "claude",
+        "m",
+        60,
+        None,
+        &[
+            ("RRECALL_PARAM_CONNECTORS", "true".into()),
+            ("CLAUDE_CONFIG_DIR", "rel/config".into()),
+        ],
+    );
+    assert!(o.ok, "{}", o.stderr);
+    // The runner runs in the test's working dir, the crate root.
+    let want = format!(
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR={}/rel/config",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    assert!(t.rec("claude.env.1").lines().any(|l| l == want));
 }

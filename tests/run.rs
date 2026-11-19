@@ -180,8 +180,13 @@ impl W {
     }
 
     fn raw(&self, args: &[&str]) -> Out {
+        self.raw_env(args, &[])
+    }
+
+    fn raw_env(&self, args: &[&str], envs: &[(&str, &str)]) -> Out {
         let o = Command::new(env!("CARGO_BIN_EXE_rrecall"))
             .args(args)
+            .envs(envs.iter().copied())
             .current_dir(self.root.join("work"))
             .env("HOME", self.root.join("home"))
             .env("XDG_DATA_HOME", self.root.join("data"))
@@ -1718,6 +1723,92 @@ fn a_proposal_is_validated_before_its_fields_are_redacted() {
     w.run(&[]);
     assert!(!w.map("layout").contains("redacted"), "{}", w.map("layout"));
     assert!(w.report().contains("rejected"), "{}", w.report());
+}
+
+/// The built-in `slack` collector (spec §10) configured as the README shows: on a `claude`
+/// instance with `connectors`, which the fake `claude` answers for the collect call, then the
+/// resolve call. Invented project, invented messages.
+#[test]
+fn the_builtin_slack_collector_reads_through_a_connector_runner_once_a_day() {
+    let w = W::new();
+    let r = "slack:C0123ABCDEF/1795033170.000100";
+    let add = json!({"key": "pg", "op": "add", "parent": "decisions", "title": "Ledger on Postgres",
+        "body": "The ledger moves to Postgres for its row locks.", "sources": [r], "date": "2026-11-02",
+        "reason": "decided in a channel"});
+    agent(&w, "ok", &json!({"proposals": [add]}));
+    let texts = json!({"texts": {r: "Ana: we go with Postgres for the ledger, it has row locks"}});
+    std::fs::write(w.root.join("home/agent/out.2"), texts.to_string()).unwrap();
+    let readme = include_str!("../README.md");
+    let snippet = readme
+        .split("```toml\n")
+        .nth(1)
+        .and_then(|s| s.split("```").next())
+        .unwrap();
+    let judge = w.inst("judge", "judge", "scenario = \"all\", out = \"accept\"");
+    // The `claude` instance init enables, then the snippet.
+    let plain = "[[plugins]]\nid = \"claude\"\n\n";
+    w.config(&format!("{plain}{snippet}{judge}"));
+    w.run_code(&[], 0);
+    assert!(w.map("decisions").contains(r), "{}", w.map("decisions"));
+    let agent_rec =
+        |name: &str| std::fs::read_to_string(w.root.join("home/agent").join(name)).unwrap();
+    let argv = agent_rec("claude.argv.1");
+    assert!(
+        argv.contains("\n--setting-sources\nuser\n") && !argv.contains("--safe-mode"),
+        "{argv}"
+    );
+    assert!(
+        argv.contains(",mcp__claude_ai_Slack__slack_read_channel,"),
+        "{argv}"
+    );
+    let collect = agent_rec("claude.stdin.1");
+    assert!(collect.contains("# Collector: slack") && collect.contains("eng-platform"));
+    assert!(collect.contains("\"lookback_days\": 14"), "{collect}");
+    let resolve = agent_rec("claude.stdin.2");
+    assert!(resolve.contains("# Resolve: slack") && resolve.contains(r));
+    assert!(w.input("judge", 1).to_string().contains("it has row locks"));
+    assert_eq!(w.lock()["collectors"]["slack"]["runner"], "claude-slack");
+    // Due once a day: a second run calls no agent.
+    w.run_code(&[], 0);
+    assert_eq!(agent_rec("claude.calls").lines().count(), 2);
+    // Slack text may not reach a runner its list leaves out.
+    let only_plain = snippet.replace(
+        "allowed_runners = [\"claude-slack\", \"claude\"]",
+        "allowed_runners = [\"claude\"]",
+    );
+    assert_ne!(only_plain, snippet);
+    w.config(&format!("{plain}{only_plain}{judge}"));
+    w.run_code(&[], 4);
+}
+
+#[test]
+fn a_relative_claude_config_dir_is_resolved_against_the_dir_rrecall_runs_in() {
+    let w = W::new();
+    agent(&w, "ok", &json!({"proposals": []}));
+    let readme = include_str!("../README.md");
+    let snippet = readme
+        .split("```toml\n")
+        .nth(1)
+        .unwrap()
+        .split("```")
+        .next()
+        .unwrap();
+    w.config(&format!("[[plugins]]\nid = \"claude\"\n\n{snippet}"));
+    let o = w.raw_env(
+        &["--project", "kiln", "run", "--force"],
+        &[("CLAUDE_CONFIG_DIR", "login")],
+    );
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    // Plugins run in their own dir; the login is the one next to where rrecall was started.
+    let env = std::fs::read_to_string(w.root.join("home/agent/claude.env.1")).unwrap();
+    let want = format!(
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR={}",
+        std::fs::canonicalize(w.root.join("work"))
+            .unwrap()
+            .join("login")
+            .display()
+    );
+    assert!(env.lines().any(|l| l == want), "{env}");
 }
 
 // ---- Built-in judges (spec §10, §6.5) ----

@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -32,6 +32,8 @@ command = ["rrecall", "builtin", "claude"]
 
 [params]
 prices = {}
+connectors = false
+tools = []
 "#,
     r#"id = "codex"
 name = "Codex, headless and read-only (codex exec)"
@@ -110,10 +112,14 @@ pub fn run(id: &str, stdin: &str) -> Result<String> {
         bail!("the built-in runners run read-only only");
     }
     let prices = prices_from_env()?;
+    let access = match agent {
+        Agent::Claude => access_from_env()?,
+        Agent::Codex => Access::default(),
+    };
     let scratch = Scratch::create()?;
     let dir = &scratch.0;
     let launch = match agent {
-        Agent::Claude => claude_launch(&input, dir)?,
+        Agent::Claude => claude_launch(&input, dir, &access)?,
         Agent::Codex => codex_launch(&input, dir)?,
     };
     let session = uuid_v4();
@@ -249,34 +255,144 @@ fn model_args(flag: &str, model: &str) -> Result<Vec<String>> {
     Ok(vec![flag.into(), model.into()])
 }
 
+/// The `claude` runner's params `connectors` and `tools` (spec §6.8): whether the call loads
+/// the user's claude.ai connectors, and which of their tools, by exact name, it may use.
+#[derive(Default, Debug)]
+struct Access {
+    connectors: bool,
+    tools: Vec<String>,
+}
+
+fn access_from_env() -> Result<Access> {
+    let param = |name: &str| std::env::var(format!("RRECALL_PARAM_{}", name.to_uppercase())).ok();
+    let connectors = match param("connectors").as_deref() {
+        None | Some("false") => false,
+        Some("true") => true,
+        Some(_) => bail!("param `connectors` must be true or false"),
+    };
+    let tools: Vec<String> = match param("tools") {
+        None => vec![],
+        Some(t) => serde_json::from_str(&t)
+            .map_err(|_| anyhow!("param `tools` must be a list of tool names"))?,
+    };
+    for t in &tools {
+        if !is_mcp_tool(t) {
+            bail!(
+                "param `tools`: `{t}` is not one exact MCP tool name `mcp__<server>__<tool>` \
+                 (no wildcard, no server-wide name)"
+            );
+        }
+    }
+    if !tools.is_empty() && !connectors {
+        bail!("param `tools` needs `connectors = true`: without it no MCP tool loads");
+    }
+    Ok(Access { connectors, tools })
+}
+
+/// `mcp__<server>__<tool>`, each part letters, digits, `_` or `-`: one tool, so a server-wide
+/// name, a wildcard or a list can never allow a write tool nobody named.
+fn is_mcp_tool(name: &str) -> bool {
+    let part = |p: &str| {
+        !p.is_empty()
+            && p.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    };
+    name.strip_prefix("mcp__")
+        .and_then(|rest| rest.split_once("__"))
+        .is_some_and(|(server, tool)| part(server) && part(tool))
+}
+
+/// A fresh owner-only config dir in the scratch dir, so none of the user's CLAUDE.md, settings,
+/// permission rules, hooks or local plugins and MCP servers load. The login stays the user's:
+/// Claude Code reads it (the macOS keychain entry, or `.credentials.json` elsewhere) from
+/// `CLAUDE_SECURESTORAGE_CONFIG_DIR`, set to the user's own config dir (empty for the default
+/// `~/.claude`), and refreshes it there in place as any session does; nothing is copied or linked.
+// limit: `main` makes a relative `CLAUDE_CONFIG_DIR` absolute against the dir rrecall started in;
+// if Claude Code names a keychain entry after the relative text, the call fails as not logged in.
+fn claude_config(dir: &Path) -> Result<Vec<(String, String)>> {
+    let user = match std::env::var_os("CLAUDE_CONFIG_DIR").filter(|d| !d.is_empty()) {
+        Some(d) => utf8(Path::new(&d))?.to_string(),
+        None => String::new(),
+    };
+    let config = dir.join("claude-config");
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&config)
+        .with_context(|| format!("{}", config.display()))?;
+    Ok(vec![
+        ("CLAUDE_CONFIG_DIR".into(), utf8(&config)?.into()),
+        ("CLAUDE_SECURESTORAGE_CONFIG_DIR".into(), user),
+    ])
+}
+
 /// `claude -p --safe-mode --output-format stream-json`, tools limited to reading, every other
 /// permission refused without a prompt nobody would answer, and the output schema enforced.
 /// `--safe-mode` drops the user's CLAUDE.md, skills, plugins, hooks and MCP servers.
-fn claude_launch(input: &RunnerInput, dir: &Path) -> Result<Launch> {
-    let mut args: Vec<String> = [
-        "-p",
-        "--safe-mode",
-        // Streamed, so a turn killed at its deadline still shows the usage it had.
-        "--output-format",
-        "stream-json",
-        "--verbose",
-        "--tools",
-        TOOLS,
-        "--allowedTools",
-        TOOLS,
-        "--permission-mode",
-        "dontAsk",
-        "--json-schema",
-    ]
-    .map(String::from)
-    .into();
+/// With `connectors` (spec §12): the claude.ai connectors load only from the user setting
+/// source, so that replaces `--safe-mode`, pointed at a fresh config dir ([`claude_config`]),
+/// with skills, slash commands, hooks and CLAUDE.md files off and tool search on (else every
+/// connector's tool schemas fill each call). What the account syncs still loads.
+fn claude_launch(input: &RunnerInput, dir: &Path, access: &Access) -> Result<Launch> {
+    let mut args: Vec<String> = vec!["-p".into()];
+    let mut env = vec![];
+    if access.connectors {
+        args.extend(
+            [
+                "--setting-sources",
+                "user",
+                "--disable-slash-commands",
+                "--settings",
+                r#"{"disableAllHooks":true}"#,
+            ]
+            .map(String::from),
+        );
+        env.extend(claude_config(dir)?);
+        for (k, v) in [
+            ("ENABLE_TOOL_SEARCH", "true"),
+            // A fresh config dir has no MCP discovery cache: wait for the connectors.
+            ("MCP_CONNECTION_NONBLOCKING", "false"),
+            ("CLAUDE_CODE_MCP_STARTUP_WAIT_MS", "30000"),
+            ("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1"),
+        ] {
+            env.push((k.into(), v.into()));
+        }
+    } else {
+        args.push("--safe-mode".into());
+    }
+    // With tool search the connectors' tool schemas are deferred: ToolSearch loads them.
+    let tools = if access.connectors {
+        format!("{TOOLS},ToolSearch")
+    } else {
+        TOOLS.to_string()
+    };
+    let allowed = [tools.clone()]
+        .into_iter()
+        .chain(access.tools.iter().cloned())
+        .collect::<Vec<_>>()
+        .join(",");
+    args.extend(
+        [
+            // Streamed, so a turn killed at its deadline still shows the usage it had.
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--tools",
+            &tools,
+            "--allowedTools",
+            &allowed,
+            "--permission-mode",
+            "dontAsk",
+            "--json-schema",
+        ]
+        .map(String::from),
+    );
     args.push(input.output_schema.to_string());
     args.extend(model_args("--model", &input.model)?);
     Ok(Launch {
         program: "claude",
         args,
         inherit: [INHERIT, CLAUDE_INHERIT].concat(),
-        env: vec![],
+        env,
         cwd: dir.to_path_buf(),
     })
 }
@@ -326,26 +442,30 @@ fn utf8(p: &Path) -> Result<&str> {
         .with_context(|| format!("path is not UTF-8: {}", p.display()))
 }
 
-/// A call's own working dir in the system temp dir, removed when the call ends: outside the
-/// map store, so the agent cannot read the map by a relative path, and outside any git
-/// repository, so it loads no project's instruction files. The agent's session log there holds
-/// source text, so the dir is the user's alone.
+/// A call's own working dir in the runners' private dir in the system temp dir, removed when
+/// the call ends: outside the map store, so the agent cannot read the map by a relative path,
+/// and outside any git repository, so it loads no project's instruction files. The agent's
+/// session log there holds source text, so the dir is the user's alone.
 struct Scratch(PathBuf);
+
+/// A scratch dir's name: the prefix, the pid of the runner that made it, and a random part.
+const SCRATCH_PREFIX: &str = "agent-";
 
 impl Scratch {
     fn create() -> Result<Scratch> {
-        let dir = std::env::temp_dir().join(format!(
-            "rrecall-runner-{}-{}",
-            std::process::id(),
-            uuid_v4()
-        ));
-        // Created with its mode in one step, and never an existing dir (the temp dir is shared).
+        let private = private_dir()?;
+        sweep(&private);
+        let name = format!("{SCRATCH_PREFIX}{}-{}", std::process::id(), uuid_v4());
+        let dir = private.join(name);
+        // Created with its mode in one step, and never an existing dir.
         fs::DirBuilder::new()
             .mode(0o700)
             .create(&dir)
             .with_context(|| format!("creating {}", dir.display()))?;
+        // Removed again by `Drop` when a step below fails.
+        let mut scratch = Scratch(dir);
         // The sandboxes match real paths (macOS `/var` is `/private/var`).
-        let scratch = Scratch(fs::canonicalize(&dir)?);
+        scratch.0 = fs::canonicalize(&scratch.0)?;
         if let Some(repo) = scratch.0.ancestors().find(|a| a.join(".git").exists()) {
             bail!(
                 "the runner's temp dir {} is inside the git repository {}: set TMPDIR outside it",
@@ -355,6 +475,92 @@ impl Scratch {
         }
         Ok(scratch)
     }
+}
+
+/// `rrecall-<uid>` in the temp dir, which every scratch dir lives in and the sweep looks in
+/// alone: made owner-only, and refused when it is not a dir of this user that only they reach,
+/// since the temp dir is shared.
+fn private_dir() -> Result<PathBuf> {
+    let uid = unsafe { libc::getuid() };
+    let dir = std::env::temp_dir().join(format!("rrecall-{uid}"));
+    match fs::DirBuilder::new().mode(0o700).create(&dir) {
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => {
+            return Err(e).with_context(|| format!("creating {}", dir.display()));
+        }
+        _ => {}
+    }
+    let m = fs::symlink_metadata(&dir).with_context(|| format!("{}", dir.display()))?;
+    if !m.is_dir() || m.uid() != uid || m.mode() & 0o077 != 0 {
+        bail!(
+            "{} must be a dir that only this user owns and reaches (mode 0700): remove it",
+            dir.display()
+        );
+    }
+    strip_acl(&dir)?;
+    Ok(dir)
+}
+
+/// On macOS an ACL the temp dir passes on is independent of the mode and could let other users
+/// read the call's files: the private dir drops it before a scratch dir is created inside, so
+/// nothing inside inherits one.
+#[cfg(target_os = "macos")]
+fn strip_acl(dir: &Path) -> Result<()> {
+    let ok = Command::new("/bin/chmod")
+        .arg("-N")
+        .arg(dir)
+        .stdin(Stdio::null())
+        .status()
+        .with_context(|| format!("removing the ACL of {}", dir.display()))?
+        .success();
+    if !ok {
+        bail!("could not remove the ACL of {}", dir.display());
+    }
+    Ok(())
+}
+
+// Linux: a default (inherited) POSIX ACL's entries are masked by the mode's group bits, which
+// 0700 and 0600 clear.
+#[cfg(not(target_os = "macos"))]
+fn strip_acl(_: &Path) -> Result<()> {
+    Ok(())
+}
+
+/// Removes the scratch dirs of runners killed before their own cleanup ran (`Drop` never runs
+/// on SIGKILL): only entries with the exact name form whose runner pid no longer exists. Only
+/// this user can add one to the private dir, and `remove_dir_all` never follows a link.
+// limit: a dead runner's pid reused by a live process keeps its dir until that process ends;
+// a dir whose runner was killed while its agent lives on is removed under that agent, whose
+// answer nobody reads any more; runners in different pid namespaces (containers) sharing one
+// temp dir as the same user see each other's runners as gone.
+fn sweep(private: &Path) {
+    let Ok(entries) = fs::read_dir(private) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let Some(pid) = e.file_name().to_str().and_then(scratch_pid) else {
+            continue;
+        };
+        // SAFETY: signal 0 only checks that the process exists.
+        let gone = unsafe { libc::kill(pid, 0) } == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        if gone {
+            let _ = fs::remove_dir_all(e.path());
+        }
+    }
+}
+
+/// The runner pid of a name made by `Scratch::create`, `None` for any other name.
+fn scratch_pid(name: &str) -> Option<libc::pid_t> {
+    let (pid, id) = name.strip_prefix(SCRATCH_PREFIX)?.split_once('-')?;
+    let hex =
+        |s: &str, n| s.len() == n && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    let parts: Vec<&str> = id.split('-').collect();
+    let uuid = parts.len() == 5 && parts.iter().zip([8, 4, 4, 4, 12]).all(|(p, n)| hex(p, n));
+    let pid = pid
+        .parse::<libc::pid_t>()
+        .ok()
+        .filter(|p| *p > 0 && p.to_string() == pid)?;
+    uuid.then_some(pid)
 }
 
 impl Drop for Scratch {
@@ -755,6 +961,23 @@ mod tests {
     }
 
     #[test]
+    fn only_a_generated_scratch_name_yields_a_pid() {
+        let id = uuid_v4();
+        assert_eq!(scratch_pid(&format!("agent-42-{id}")), Some(42));
+        for other in [
+            "agent-1-project-notes".to_string(),
+            format!("agent-042-{id}"),
+            format!("agent-0-{id}"),
+            format!("agent--1-{id}"),
+            format!("agent-1-{id}-x"),
+            format!("agent-1-{}", id.to_uppercase()),
+            format!("rrecall-agent-1-{id}"),
+        ] {
+            assert_eq!(scratch_pid(&other), None, "{other}");
+        }
+    }
+
+    #[test]
     fn codex_usage_comes_from_its_session_log_else_its_events() {
         let home = std::env::temp_dir().join(format!("rrecall-codex-usage-{}", std::process::id()));
         let day = home.join("sessions/2026/11/19");
@@ -811,7 +1034,7 @@ mod tests {
             read_only: true,
         };
         let dir = Path::new("/tmp/x");
-        let c = claude_launch(&input, dir).unwrap();
+        let c = claude_launch(&input, dir, &Access::default()).unwrap();
         let args = c.args.join(" ");
         assert!(args.starts_with("-p --safe-mode --output-format stream-json --verbose --tools Read,Grep,Glob --allowedTools Read,Grep,Glob --permission-mode dontAsk --json-schema {\"type\":\"object\"} --model m1"), "{args}");
         assert!(!args.contains("SECRET"));
@@ -820,6 +1043,6 @@ mod tests {
             model: "--dangerously-skip-permissions".into(),
             ..input
         };
-        assert!(claude_launch(&bad, dir).is_err());
+        assert!(claude_launch(&bad, dir, &Access::default()).is_err());
     }
 }

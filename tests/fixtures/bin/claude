@@ -4,9 +4,11 @@
 # nocost, nousage, malformed, error, sleep: prints the usage of one message, then never
 # answers the first turn, answers a `--resume` turn; result-sleep: answers, then hangs until
 # killed, answers a `--resume` turn; torn: prints one message's usage and half of the next
-# record, then hangs, answers a `--resume` turn; perms: records the modes of its working dir
-# and its stdout file to claude.perms, then answers; sleep-always: never answers) and `out`
-# (the structured output to print). Each call N records its argv to claude.argv.N,
+# record, then hangs, answers a `--resume` turn; perms: records the modes of its working dir, its parent
+# and its stdout file (with the ACL flag) and their ACL entry count to claude.perms, then
+# answers; config: the same for $CLAUDE_CONFIG_DIR plus its entries to claude.config, then answers;
+# sleep-always: never answers) and `out`
+# (the structured output to print; `out.N`, when present, for call N). Each call N records its argv to claude.argv.N,
 # its stdin to claude.stdin.N, its environment to claude.env.N and its cwd to claude.cwd.N.
 d="$HOME/agent"
 echo call >> "$d/claude.calls"
@@ -17,8 +19,15 @@ printf '%s\n' "$@" > "$d/claude.argv.$n"
 cat > "$d/claude.stdin.$n"
 env | sort > "$d/claude.env.$n"
 pwd -P > "$d/claude.cwd.$n"
-out=$(cat "$d/out" 2>/dev/null || echo '{}')
+out=$(cat "$d/out.$n" 2>/dev/null || cat "$d/out" 2>/dev/null || echo '{}')
 resume=no
+modes() { ls -ld "$@" | cut -c1-10; }
+# ACL flags (`+`) plus macOS ACL entries (`ls -e`; GNU ls has no `-e`).
+acls() {
+    n=$(ls -ld "$@" | cut -c11 | grep -c '+')
+    e=$(ls -lde "$@" 2>/dev/null | grep -c '^ [0-9]*: ')
+    echo "acl=$((n + e))"
+}
 for a in "$@"; do [ "$a" = --resume ] && resume=yes; done
 answer() {
     printf '{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"s","structured_output":%s,"total_cost_usd":%s,"usage":{"input_tokens":1,"output_tokens":2},"modelUsage":{"claude-fake-small":{"outputTokens":1},"claude-fake-1":{"outputTokens":2}}}\n' "$out" "$1"
@@ -45,7 +54,8 @@ case "$(cat "$d/scenario")" in
             printf '{"type":"assistant"'
             sleep 30 & wait
         fi ;;
-    perms) ls -ld . turn1.stdout | cut -c1-10 > "$d/claude.perms"; answer 0.25 ;;
+    perms) { modes . .. turn1.stdout; acls . .. turn1.stdout; } > "$d/claude.perms"; answer 0.25 ;;
+    config) { modes "$CLAUDE_CONFIG_DIR"; acls "$CLAUDE_CONFIG_DIR"; ls -A "$CLAUDE_CONFIG_DIR"; } > "$d/claude.config"; answer 0.25 ;;
     sleep-always) sleep 30 & echo $! > "$d/claude.pid.$n"; wait ;;
     *) echo "fake claude: unknown scenario" >&2; exit 64 ;;
 esac
