@@ -1,6 +1,7 @@
 pub mod checks;
 pub mod commands;
 pub mod config;
+pub mod doctor;
 pub mod error;
 pub mod files;
 pub mod git_history;
@@ -13,6 +14,7 @@ pub mod merge;
 pub mod node;
 pub mod outline;
 pub mod plugin;
+pub mod plugin_cmd;
 pub mod process;
 pub mod query;
 pub mod run;

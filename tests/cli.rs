@@ -318,15 +318,15 @@ fn help_lists_the_built_commands_only() {
         "rm",
         "agent-instructions",
         "run",
+        "doctor",
+        "plugin",
     ] {
         assert!(
             help.contains(&format!("  {c} ")) || help.contains(&format!("  {c}\n")),
             "{c} missing:\n{help}"
         );
     }
-    for later in ["  open", "  doctor", "  plugin"] {
-        assert!(!help.contains(later), "{later} listed:\n{help}");
-    }
+    assert!(!help.contains("  open"), "open listed:\n{help}");
 }
 
 // ---- import (spec §2) ----

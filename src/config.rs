@@ -200,11 +200,10 @@ pub fn branch_toml(b: &BranchDef) -> String {
     )
 }
 
-/// The user config `$XDG_CONFIG_HOME/rrecall/config.toml` (spec §9), the parts M1 reads.
+/// The user config `$XDG_CONFIG_HOME/rrecall/config.toml` (spec §9).
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UserConfig {
-    // limit: installed plugins (`plugin add`, spec §6.7) add their record in M4; until then that key is unknown.
     #[serde(default)]
     pub projects: Vec<ProjectEntry>,
     /// Default runner and model for declarative plugins (spec §9).
@@ -215,6 +214,25 @@ pub struct UserConfig {
     /// Trusted project plugin directories (spec §6.7).
     #[serde(default)]
     pub trusted: Vec<Trusted>,
+    /// Plugins `rrecall plugin add` installed into the user plugin directory (spec §6.7).
+    #[serde(default)]
+    pub installed: Vec<Installed>,
+}
+
+/// Where an installed plugin came from, and its content hash when it was installed. A record
+/// only: the loader does not check it.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Installed {
+    pub id: String,
+    /// The git URL as given, or the absolute path of a local directory.
+    pub source: String,
+    #[serde(default, rename = "ref")]
+    pub git_ref: Option<String>,
+    /// The commit a git source was installed at.
+    #[serde(default)]
+    pub commit: Option<String>,
+    pub hash: String,
 }
 
 /// A project's `.rrecall/plugins/` directory the user trusts at this content hash.
@@ -247,6 +265,30 @@ fn xdg_dir(var: &str, fallback: &str) -> Result<PathBuf> {
 
 pub fn user_config_path() -> Result<PathBuf> {
     Ok(xdg_dir("XDG_CONFIG_HOME", ".config")?.join("rrecall/config.toml"))
+}
+
+/// The user plugin directory, the second place of spec §6.2.
+pub fn user_plugins_dir() -> Result<PathBuf> {
+    Ok(xdg_dir("XDG_CONFIG_HOME", ".config")?.join("rrecall/plugins"))
+}
+
+/// Appends `entry` (whole TOML tables) to the user config, after checking that the result
+/// still parses, so a failed append leaves the file as it was.
+pub fn append_user_config(entry: &str) -> Result<()> {
+    let path = user_config_path()?;
+    let mut text = match std::fs::read_to_string(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        r => r.with_context(|| format!("reading {}", path.display()))?,
+    };
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text = format!("{text}\n{entry}");
+    toml::from_str::<UserConfig>(&text).with_context(|| format!("updating {}", path.display()))?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
 }
 
 pub fn load_user_config() -> Result<UserConfig> {
@@ -353,6 +395,20 @@ pub fn toml_str(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::testutil::TempDir;
+
+    #[test]
+    fn installed_records_parse_and_reject_unknown_keys() {
+        let u: UserConfig = toml::from_str(
+            "[[installed]]\nid = \"lid\"\nsource = \"https://example.com/lid.git\"\nref = \"v1\"\ncommit = \"abc\"\nhash = \"sha256:00\"\n",
+        )
+        .unwrap();
+        assert_eq!(u.installed[0].git_ref.as_deref(), Some("v1"));
+        assert_eq!(u.installed[0].commit.as_deref(), Some("abc"));
+        let bad = toml::from_str::<UserConfig>(
+            "[[installed]]\nid = \"lid\"\nsource = \"/x\"\nhash = \"h\"\npinned = true\n",
+        );
+        assert!(format!("{}", bad.unwrap_err()).contains("pinned"));
+    }
 
     #[test]
     fn defaults_then_config_branches() {

@@ -167,7 +167,7 @@ impl Manifest {
     }
 
     /// Every argv the manifest declares, with its key.
-    fn argvs(&self) -> Vec<(&'static str, &[String])> {
+    pub fn argvs(&self) -> Vec<(&'static str, &[String])> {
         let all: Vec<(&'static str, Option<&Vec<String>>)> = match &self.spec {
             Spec::Collector(c) => vec![
                 ("fingerprint", c.fingerprint.as_ref()),
@@ -800,6 +800,29 @@ impl Instance {
             .collect()
     }
 
+    /// The runner and model a declarative plugin is configured with: its instance, else its
+    /// manifest, else the user config (spec §6.1, §6.8, §9). `(None, None)` for any other.
+    pub fn configured(&self, user: &UserConfig) -> (Option<String>, Option<String>) {
+        if !self.plugin.manifest.declarative() {
+            return (None, None);
+        }
+        let (runner, model) = match &self.plugin.manifest.spec {
+            Spec::Collector(c) => (c.runner.clone(), c.model.clone()),
+            Spec::Judge(j) => (j.runner.clone(), j.model.clone()),
+            _ => (None, None),
+        };
+        (
+            self.runner.clone().or(runner).or(user.runner.clone()),
+            Some(
+                self.model
+                    .clone()
+                    .or(model)
+                    .or(user.model.clone())
+                    .unwrap_or_else(|| "default".into()),
+            ),
+        )
+    }
+
     pub fn params_json(&self) -> Params {
         self.params
             .iter()
@@ -941,10 +964,7 @@ pub fn finds_runner(
     store: &Path,
     id: &str,
 ) -> Result<bool> {
-    let user_plugins = config::user_config_path()?
-        .parent()
-        .map(|d| d.join("plugins"))
-        .context("the user config has no directory")?;
+    let user_plugins = config::user_plugins_dir()?;
     let cfg = StoreConfig {
         repo: repo.map(Path::to_path_buf),
         ..StoreConfig::default()
@@ -959,11 +979,7 @@ pub fn finds_runner(
 /// Step 1 of a run (spec §4.1): the store's enabled plugin instances. Any error exits 4.
 pub fn load(store: &Path) -> Result<Vec<Instance>> {
     let user = (|| -> Result<(UserConfig, PathBuf)> {
-        let plugins = config::user_config_path()?
-            .parent()
-            .map(|d| d.join("plugins"))
-            .context("the user config has no directory")?;
-        Ok((config::load_user_config()?, plugins))
+        Ok((config::load_user_config()?, config::user_plugins_dir()?))
     })();
     match user {
         Ok((user, plugins)) => load_with(store, &user, &plugins),
