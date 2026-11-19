@@ -2424,4 +2424,13 @@ fn a_fetch_returns_the_cursor_and_gets_since() {
     let since = json!({"at": at, "cursor": {"n": 7}});
     assert_eq!(w.input("writer", 2)["since"], since);
     assert_eq!(w.input("runner", 2)["input"]["since"], since);
+    // A prompt change makes the next read full.
+    std::fs::write(
+        w.store().join("plugins/fetching/p.md"),
+        "Propose changes, citing lines.\n",
+    )
+    .unwrap();
+    w.run_code(&[], 0);
+    assert_eq!(w.input("writer", 3)["since"], Value::Null, "prompt changed");
+    assert_eq!(w.input("runner", 3)["input"]["since"], Value::Null);
 }
