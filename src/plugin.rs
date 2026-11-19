@@ -245,7 +245,7 @@ pub fn builtin() -> Result<BTreeMap<String, Plugin>> {
 }
 
 /// The manifests of the plugins inside the binary.
-pub fn builtin_manifests() -> impl Iterator<Item = &'static str> {
+fn builtin_manifests() -> impl Iterator<Item = &'static str> {
     crate::checks::MANIFESTS
         .into_iter()
         .chain(crate::runner::MANIFESTS)
