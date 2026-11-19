@@ -685,9 +685,17 @@ impl Instance {
     /// it (a relative path against the plugin directory, a bare name on `PATH`).
     pub fn argv(&self, template: &[String]) -> Vec<String> {
         // Every placeholder was checked against the declared params when the manifest loaded.
+        // A built-in's program is the binary's path, set at run time, never a template.
         template
             .iter()
-            .map(|a| fill(a, &self.params).unwrap_or_else(|_| a.clone()))
+            .enumerate()
+            .map(|(i, a)| {
+                if i == 0 && self.plugin.builtin {
+                    a.clone()
+                } else {
+                    fill(a, &self.params).unwrap_or_else(|_| a.clone())
+                }
+            })
             .collect()
     }
 
@@ -1479,6 +1487,25 @@ repo = ""
             load_with(&store, &UserConfig::default(), &user)
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_builtin_program_path_is_never_expanded() {
+        let mut plugins = builtin().unwrap();
+        let p = plugins.get_mut("size-limits").unwrap();
+        // A binary installed under a directory whose name looks like a param.
+        let exe = "/opt/{title_max}/rrecall".to_string();
+        let Spec::Check(c) = &mut p.manifest.spec else {
+            panic!("not a check")
+        };
+        c.command[0] = exe.clone();
+        let command = c.command.clone();
+        let cfg: StoreConfig = toml::from_str("[[plugins]]\nid = \"size-limits\"\n").unwrap();
+        let ins = instances(&cfg.plugins, &plugins, &cfg.branches().unwrap()).unwrap();
+        assert_eq!(
+            ins[0].argv(&command),
+            [exe.as_str(), "builtin", "size-limits"]
         );
     }
 

@@ -1,9 +1,18 @@
 //! What the built-in `secrets` check looks for (spec §10): common token and key formats,
 //! private key blocks, passwords in URLs and high-entropy assignments. It names the pattern a
 //! text matches and never returns the matched text.
+//!
+//! Every scan reads a bounded window from each candidate position and skips candidates inside
+//! a token it already read, so the time is linear in the text: a check runs over every
+//! proposal of a run before it answers (spec §6.5).
+
+/// The most characters a value or token is read for; real credentials are shorter.
+const WINDOW: usize = 256;
 
 /// A token that starts with a fixed prefix at a word boundary and goes on with at least `min`
 /// characters of its alphabet (exactly `min` when `exact`, ended by a non-word character).
+/// A token of open length must also be credential-shaped: upper and lower case and a digit,
+/// which generated keys have and paths and words (`sk-learn-tests`) do not.
 struct Prefixed {
     name: &'static str,
     prefixes: &'static [&'static str],
@@ -23,6 +32,9 @@ fn word(b: u8) -> bool {
 }
 fn word_underscore(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
+}
+fn label_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.')
 }
 
 /// More specific prefixes first: `sk-ant-` before `sk-`.
@@ -99,10 +111,13 @@ const PREFIXED: &[Prefixed] = &[
     },
 ];
 
-/// Words that make the value after a `=` or `:` a credential when the value looks random.
+/// Labels that make the value after a `=` or `:` a credential when the value looks random.
 const SECRET_WORDS: [&str; 8] = [
     "password", "passwd", "pwd", "secret", "token", "api_key", "apikey", "api-key",
 ];
+
+/// Words between a label and its separator in prose: `the deploy token is: ...`.
+const LINKING_WORDS: [&str; 3] = ["is", "was", "are"];
 
 /// The name of the first pattern `text` matches.
 pub fn find(text: &str) -> Option<&'static str> {
@@ -114,11 +129,11 @@ pub fn find(text: &str) -> Option<&'static str> {
                     continue;
                 }
                 let start = i + prefix.len();
-                let n = run(b, start, p.alphabet);
+                let tok = &b[start..start + run(b, start, p.alphabet, WINDOW)];
                 let ok = if p.exact {
-                    n == p.min && b.get(start + n).is_none_or(|c| !word(*c))
+                    tok.len() == p.min && b.get(start + p.min).is_none_or(|c| !word(*c))
                 } else {
-                    n >= p.min
+                    tok.len() >= p.min && shaped(tok)
                 };
                 if ok {
                     return Some(p.name);
@@ -126,7 +141,7 @@ pub fn find(text: &str) -> Option<&'static str> {
             }
         }
     }
-    if text.contains("hooks.slack.com/services/T") {
+    if slack_webhook(text) {
         return Some("slack-webhook");
     }
     if jwt(text) {
@@ -147,10 +162,44 @@ pub fn find(text: &str) -> Option<&'static str> {
     None
 }
 
-/// How many bytes from `start` on belong to `alphabet`.
-fn run(b: &[u8], start: usize, alphabet: fn(u8) -> bool) -> usize {
-    b.get(start..)
-        .map_or(0, |rest| rest.iter().take_while(|c| alphabet(**c)).count())
+/// How many bytes from `start` on belong to `alphabet`, counting at most `cap`.
+fn run(b: &[u8], start: usize, alphabet: fn(u8) -> bool, cap: usize) -> usize {
+    b.get(start..).map_or(0, |rest| {
+        rest.iter().take(cap).take_while(|c| alphabet(**c)).count()
+    })
+}
+
+/// Upper case, lower case and a digit.
+fn shaped(tok: &[u8]) -> bool {
+    tok.iter().any(u8::is_ascii_uppercase)
+        && tok.iter().any(u8::is_ascii_lowercase)
+        && tok.iter().any(u8::is_ascii_digit)
+}
+
+/// `hooks.slack.com/services/T<team>/B<bot>/<secret>`, the whole path.
+fn slack_webhook(text: &str) -> bool {
+    let b = text.as_bytes();
+    text.match_indices("hooks.slack.com/services/")
+        .any(|(i, m)| {
+            let mut at = i + m.len();
+            for (lead, min) in [(Some(b'T'), 2), (Some(b'B'), 2), (None, 16)] {
+                if lead.is_some_and(|l| b.get(at) != Some(&l)) {
+                    return false;
+                }
+                let n = run(b, at, alnum, WINDOW);
+                if n < min {
+                    return false;
+                }
+                at += n;
+                if lead.is_some() {
+                    if b.get(at) != Some(&b'/') {
+                        return false;
+                    }
+                    at += 1;
+                }
+            }
+            true
+        })
 }
 
 /// Three dot-separated base64url segments, the first two starting with `eyJ` (a JSON object).
@@ -165,7 +214,7 @@ fn jwt(text: &str) -> bool {
             if seg == 1 && !b[at..].starts_with(b"eyJ") {
                 return false;
             }
-            let n = run(b, at, word);
+            let n = run(b, at, word, WINDOW);
             if n < 10 {
                 return false;
             }
@@ -184,14 +233,16 @@ fn jwt(text: &str) -> bool {
 /// A PEM or PGP armor line that opens a private key.
 fn private_key(text: &str) -> bool {
     text.match_indices("-----BEGIN ").any(|(i, m)| {
-        let rest = &text[i + m.len()..];
-        rest.split("-----")
+        let label: String = text[i + m.len()..].chars().take(64).collect();
+        label
+            .split("-----")
             .next()
-            .is_some_and(|label| label.contains("PRIVATE KEY") && !label.contains('\n'))
+            .is_some_and(|l| l.contains("PRIVATE KEY") && !l.contains('\n'))
     })
 }
 
-/// `scheme://user:password@host` with a password that is not a placeholder.
+/// `scheme://user:password@host` with a password that is not a placeholder. The authority
+/// ends at the next `/`, so two candidates never share a byte.
 fn password_in_url(text: &str) -> bool {
     text.match_indices("://").any(|(i, m)| {
         let authority = text[i + m.len()..]
@@ -207,8 +258,12 @@ fn password_in_url(text: &str) -> bool {
     })
 }
 
+/// Template syntax (`${X}`, `<x>`, `{x}`, `%X%`), a mask (`***`) or one repeated character.
+/// A URL escape such as `%74` is not a placeholder.
 fn placeholder(v: &str) -> bool {
-    v.starts_with(['$', '<', '{', '%', '*']) || v.bytes().all(|b| b == v.as_bytes()[0])
+    v.starts_with(['$', '<', '{', '*'])
+        || (v.len() > 2 && v.starts_with('%') && v.ends_with('%'))
+        || v.bytes().all(|b| b == v.as_bytes()[0])
 }
 
 /// `Bearer <token>` with a random-looking token.
@@ -218,28 +273,56 @@ fn bearer(text: &str) -> bool {
         .any(|(i, m)| value_at(text, i + m.len()).is_some_and(random))
 }
 
-/// A secret word shortly before a `=` or `:` on the same line, and a random-looking literal
-/// after it (`DB_PASSWORD=...`, `api_key: "..."`, `the deploy token is: ...`).
+/// A secret-named label right before a `=` or `:` (`DB_PASSWORD=...`, `api_key: "..."`, or in
+/// prose `the deploy token is: ...`) and a random-looking literal after it. Only the label
+/// counts: in `the token parser landed in commit: <sha>` the label is `commit`. The scan starts
+/// at each secret word, so separators with no label near them cost nothing.
 fn assignment(text: &str) -> bool {
-    text.match_indices(['=', ':']).any(|(i, _)| {
-        let line_start = text[..i].rfind('\n').map_or(0, |n| n + 1);
-        let mut from = i.saturating_sub(32).max(line_start);
-        while !text.is_char_boundary(from) {
-            from += 1;
-        }
-        let key = text[from..i].to_ascii_lowercase();
-        SECRET_WORDS.iter().any(|w| key.contains(w)) && value_at(text, i + 1).is_some_and(random)
+    let lower = text.to_ascii_lowercase();
+    let b = lower.as_bytes();
+    SECRET_WORDS.iter().any(|w| {
+        lower.match_indices(w).any(|(i, _)| {
+            // The rest of the label word, bounded: a longer word is no label.
+            let mut at = i + w.len();
+            let n = run(b, at, label_char, 33);
+            if n > 32 {
+                return false;
+            }
+            at += n;
+            at += run(b, at, |c| matches!(c, b' ' | b'\t' | b'"' | b'\''), 8);
+            let link = run(b, at, label_char, 4);
+            if link > 0 {
+                if !LINKING_WORDS
+                    .iter()
+                    .any(|l| l.as_bytes() == &b[at..at + link])
+                {
+                    return false;
+                }
+                at += link;
+                at += run(b, at, |c| matches!(c, b' ' | b'\t'), 8);
+            }
+            if !matches!(b.get(at), Some(b'=' | b':')) {
+                return false;
+            }
+            at += 1;
+            at += run(b, at, |c| matches!(c, b'=' | b'>'), 1);
+            value_at(text, at).is_some_and(random)
+        })
     })
 }
 
-/// The literal that starts at `at` after spaces and an optional quote, or `None` when what
-/// follows is code (a call or an index) rather than a literal.
+/// The literal that starts at `at` after spaces and an optional quote, read for at most
+/// [`WINDOW`] characters, or `None` when what follows is code (a call or an index).
 fn value_at(text: &str, at: usize) -> Option<&str> {
     let rest = text.get(at..)?.trim_start_matches([' ', '\t']);
     let rest = rest.strip_prefix(['"', '\'', '`']).unwrap_or(rest);
-    let end = rest
-        .find(|c: char| c.is_whitespace() || "\"'`,;()[]{}<>".contains(c))
-        .unwrap_or(rest.len());
+    let mut end = rest.len();
+    for (n, (i, c)) in rest.char_indices().enumerate() {
+        if n == WINDOW || c.is_whitespace() || "\"'`,;:=()[]{}<>".contains(c) {
+            end = i;
+            break;
+        }
+    }
     if rest[end..].starts_with(['(', '[']) {
         return None;
     }
@@ -383,6 +466,42 @@ mod tests {
     }
 
     #[test]
+    fn a_percent_encoded_url_password_is_a_password() {
+        assert_eq!(
+            find("https://app:%74est123@example.org/path"),
+            Some("password-in-url")
+        );
+    }
+
+    /// Every scan is linear: 1 MiB of separator- and prefix-heavy text finishes well within a
+    /// bound a quadratic scan (seconds per 256 KiB in a release build) cannot meet.
+    #[test]
+    fn scanning_is_linear_in_the_input() {
+        let mib = 1 << 20;
+        for (case, unit) in [
+            ("colons", ":"),
+            ("equals", "="),
+            ("labelled colons", "token:"),
+            ("labelled words", "password is: "),
+            ("bearer", "Bearer "),
+            ("urls", "://a:"),
+            ("aws prefix", "AKIA"),
+            ("sk prefix", " sk-"),
+            ("jwt", "eyJ."),
+            ("key header", "-----BEGIN "),
+        ] {
+            let text = unit.repeat(mib / unit.len());
+            let started = std::time::Instant::now();
+            let _ = find(&text);
+            let took = started.elapsed();
+            assert!(
+                took < std::time::Duration::from_secs(3),
+                "case `{case}` took {took:?}"
+            );
+        }
+    }
+
+    #[test]
     fn near_misses_are_not_secrets() {
         for (case, text) in [
             (
@@ -411,6 +530,21 @@ mod tests {
                 "task-scheduler-for-nightly-builds-and-reports",
             ),
             ("short sk", "uses sk-learn for ranking"),
+            // Review round 1: ordinary references and prose.
+            (
+                "sk path",
+                "file:crates/sk-learn-integration-tests/main.rs@a1",
+            ),
+            (
+                "sha after a non-secret label",
+                "The token parser landed in commit: 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b",
+            ),
+            (
+                "id after a non-secret label",
+                "The token parser tracks request ID: req-03fE8B2b6A7dD9c1a",
+            ),
+            ("webhook stub", "https://hooks.slack.com/services/TEST"),
+            ("env placeholder", "password = %DB_PASSWORD%"),
             ("aws too short", "AKIA1234"),
             ("aws inside word", "XAKIAZQ3VK9MW2XR7TY5PQ"),
             ("ghp short", "ghp_abc"),

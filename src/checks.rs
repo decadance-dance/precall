@@ -6,7 +6,7 @@ use crate::error;
 use crate::node::{BODY_MAX, TITLE_MAX};
 use crate::secrets;
 use crate::wire::{JudgeInput, JudgeItem, Op, Verdict, VerdictKind};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 
 /// The built-in manifests. `rrecall` as the program stands for the running binary.
 pub const MANIFESTS: [&str; 3] = [
@@ -49,10 +49,22 @@ pub fn run(id: &str, input: &str) -> Result<String> {
     if !matches!(id, "no-op" | "size-limits" | "secrets") {
         return Err(error::usage(format!("no built-in check `{id}`")));
     }
-    let input: JudgeInput =
-        serde_json::from_str(input).context("the check input does not decode")?;
-    let title_max = limit(&input, "title_max", TITLE_MAX)?;
-    let body_max = limit(&input, "body_max", BODY_MAX)?;
+    // serde's message can quote the offending value, which may be a credential: say where only.
+    let input: JudgeInput = serde_json::from_str(input).map_err(|e| {
+        anyhow!(
+            "the check input does not decode at line {} column {}",
+            e.line(),
+            e.column()
+        )
+    })?;
+    let (title_max, body_max) = if id == "size-limits" {
+        (
+            limit(&input, "title_max", TITLE_MAX)?,
+            limit(&input, "body_max", BODY_MAX)?,
+        )
+    } else {
+        (TITLE_MAX, BODY_MAX)
+    };
     let verdicts: Vec<Verdict> = input
         .proposals
         .iter()
@@ -74,13 +86,14 @@ pub fn run(id: &str, input: &str) -> Result<String> {
 }
 
 /// A limit param: a non-negative integer, else the §3.1 default when the core passes none.
+/// The error does not quote the value.
 fn limit(input: &JudgeInput, name: &str, default: usize) -> Result<usize> {
     match input.params.get(name) {
         None => Ok(default),
         Some(v) => v
             .as_u64()
             .and_then(|n| usize::try_from(n).ok())
-            .with_context(|| format!("param `{name}` must be a non-negative integer, not {v}")),
+            .with_context(|| format!("param `{name}` must be a non-negative integer")),
     }
 }
 
@@ -125,8 +138,12 @@ fn no_op(it: &JudgeItem) -> (VerdictKind, String) {
     (VerdictKind::Accept, "a real change".into())
 }
 
-/// Spec §3.1 limits, counted in characters as the node format counts them.
+/// Spec §3.1 limits on the text an `add` or `update` writes, counted in characters as the node
+/// format counts them.
 fn size_limits(it: &JudgeItem, title_max: usize, body_max: usize) -> (VerdictKind, String) {
+    if !matches!(it.proposal.op, Op::Add | Op::Update) {
+        return (VerdictKind::Accept, "writes no title or body".into());
+    }
     let over: Vec<String> = [
         ("title", &it.proposal.title, title_max),
         ("body", &it.proposal.body, body_max),
@@ -144,11 +161,12 @@ fn size_limits(it: &JudgeItem, title_max: usize, body_max: usize) -> (VerdictKin
     }
 }
 
-/// Every field a proposal could carry a credential in into the map or the commit message.
-/// The reason names the field and the pattern, never the text.
+/// Every field a proposal could carry a credential in into the map, the commit message or the
+/// report, its key included. The reason names the field and the pattern, never the text.
 fn secrets(it: &JudgeItem) -> (VerdictKind, String) {
     let p = &it.proposal;
     let fields = [
+        ("key", Some(it.key.as_str())),
         ("title", p.title.as_deref()),
         ("body", p.body.as_deref()),
         ("evidence", p.evidence.as_deref()),
@@ -349,6 +367,78 @@ mod tests {
             assert!(
                 !reason.contains(&secret[4..]),
                 "field `{field}`: the reason echoes the secret"
+            );
+        }
+    }
+
+    #[test]
+    fn secrets_scans_the_proposal_key_and_keeps_the_key_as_given() {
+        let secret = ["gh", "p_", "Zq3vK9mW2xR7tY5pL8nB4cD6fG1hJ0kAa2Ss"].concat();
+        let p = json!({"key": secret, "op": "add", "parent": "layout", "title": "Deploy",
+            "body": "Deploys.", "sources": ["file:a@b"], "reason": "r"});
+        let it = json!({"key": format!("repo/{secret}"), "proposal": p}).to_string();
+        let input = format!("{{\"proposals\":[{it}],\"map_ids\":[],\"params\":{{}}}}");
+        let out = run("secrets", &input).unwrap();
+        // §6.5: the verdict names the key exactly as given, or the core cannot match it.
+        let keys = [format!("repo/{secret}")];
+        let v = crate::wire::decode_verdicts("secrets", &out, &keys).unwrap();
+        assert_eq!(v[0].verdict, VerdictKind::Reject);
+        assert!(
+            v[0].reason
+                .contains("key matches the pattern `github-token`")
+        );
+        assert!(
+            !v[0].reason.contains(&secret[4..]),
+            "the reason echoes the secret"
+        );
+    }
+
+    #[test]
+    fn errors_never_echo_an_input_value() {
+        let secret = ["gh", "p_", "Zq3vK9mW2xR7tY5pL8nB4cD6fG1hJ0kAa2Ss"].concat();
+        let add = json!({"key": "p", "op": "add", "parent": "layout", "title": "t",
+            "body": "b", "sources": ["file:a@b"], "reason": "r"});
+        let with_params = |params: serde_json::Value| {
+            format!(
+                "{{\"proposals\":[{}],\"map_ids\":[],\"params\":{params}}}",
+                item(add.clone(), None)
+            )
+        };
+        // A size param is no business of the other checks.
+        assert!(run("secrets", &with_params(json!({"title_max": secret}))).is_ok());
+        let e = format!(
+            "{:#}",
+            run("size-limits", &with_params(json!({"title_max": secret}))).unwrap_err()
+        );
+        assert!(e.contains("title_max") && !e.contains(&secret[4..]), "{e}");
+        // A malformed input says where, not what.
+        let mut bad = node();
+        bad["order"] = json!(secret);
+        let e = format!(
+            "{:#}",
+            run(
+                "secrets",
+                &format!(
+                    "{{\"proposals\":[{}],\"map_ids\":[],\"params\":{{}}}}",
+                    item(update(json!({})), Some(bad))
+                )
+            )
+            .unwrap_err()
+        );
+        assert!(e.contains("line") && !e.contains(&secret[4..]), "{e}");
+    }
+
+    #[test]
+    fn size_limits_apply_only_to_add_and_update() {
+        let long = "é".repeat(81);
+        for op in ["remove", "move", "add_source"] {
+            let p = json!({"key": "p", "op": op, "id": "old", "parent": "layout",
+                "title": long, "body": long.repeat(8), "evidence": "file:src/main.rs@a1",
+                "sources": ["file:a@b"], "reason": "r"});
+            assert_eq!(
+                one("size-limits", item(p, Some(node())), json!({})).0,
+                "accept",
+                "{op}"
             );
         }
     }
