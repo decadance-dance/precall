@@ -382,7 +382,12 @@ impl Run {
                 }
             }
         }
-        if due.is_empty() {
+        // A newly failing fingerprint still needs its unsettled mark committed (§4.2).
+        let to_mark = self
+            .unreachable
+            .keys()
+            .any(|id| old_lock.collectors.get(id).is_some_and(|e| !e.unsettled));
+        if due.is_empty() && !to_mark {
             let code = if self.unreachable.is_empty() { 0 } else { 5 };
             return Ok(Done {
                 code,
@@ -564,9 +569,6 @@ impl Run {
             .unwrap_or_else(|_| self.ctx.store.clone());
         for (inst, fp) in &due {
             if self.unsettled.contains_key(&inst.id) {
-                if let Some(e) = lock.collectors.get_mut(&inst.id) {
-                    e.unsettled = true;
-                }
                 continue;
             }
             let interval = Self::collector_spec(inst)
@@ -588,6 +590,11 @@ impl Run {
                     unsettled: false,
                 },
             );
+        }
+        for id in self.unsettled.keys() {
+            if let Some(e) = lock.collectors.get_mut(id) {
+                e.unsettled = true;
+            }
         }
         let collector_ids: BTreeSet<String> = self
             .of_kind(Kind::Collector)
