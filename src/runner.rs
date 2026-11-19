@@ -32,6 +32,8 @@ command = ["rrecall", "builtin", "claude"]
 
 [params]
 prices = {}
+connectors = false
+tools = []
 "#,
     r#"id = "codex"
 name = "Codex, headless and read-only (codex exec)"
@@ -110,10 +112,14 @@ pub fn run(id: &str, stdin: &str) -> Result<String> {
         bail!("the built-in runners run read-only only");
     }
     let prices = prices_from_env()?;
+    let access = match agent {
+        Agent::Claude => access_from_env()?,
+        Agent::Codex => Access::default(),
+    };
     let scratch = Scratch::create()?;
     let dir = &scratch.0;
     let launch = match agent {
-        Agent::Claude => claude_launch(&input, dir)?,
+        Agent::Claude => claude_launch(&input, dir, &access)?,
         Agent::Codex => codex_launch(&input, dir)?,
     };
     let session = uuid_v4();
@@ -249,34 +255,106 @@ fn model_args(flag: &str, model: &str) -> Result<Vec<String>> {
     Ok(vec![flag.into(), model.into()])
 }
 
+/// The `claude` runner's params `connectors` and `tools` (spec §6.8): whether the call loads
+/// the user's claude.ai connectors, and which of their tools, by exact name, it may use.
+#[derive(Default, Debug)]
+struct Access {
+    connectors: bool,
+    tools: Vec<String>,
+}
+
+fn access_from_env() -> Result<Access> {
+    let param = |name: &str| std::env::var(format!("RRECALL_PARAM_{}", name.to_uppercase())).ok();
+    let connectors = match param("connectors").as_deref() {
+        None | Some("false") => false,
+        Some("true") => true,
+        Some(_) => bail!("param `connectors` must be true or false"),
+    };
+    let tools: Vec<String> = match param("tools") {
+        None => vec![],
+        Some(t) => serde_json::from_str(&t)
+            .map_err(|_| anyhow!("param `tools` must be a list of tool names"))?,
+    };
+    for t in &tools {
+        if !is_mcp_tool(t) {
+            bail!(
+                "param `tools`: `{t}` is not one exact MCP tool name `mcp__<server>__<tool>` \
+                 (no wildcard, no server-wide name)"
+            );
+        }
+    }
+    if !tools.is_empty() && !connectors {
+        bail!("param `tools` needs `connectors = true`: without it no MCP tool loads");
+    }
+    Ok(Access { connectors, tools })
+}
+
+/// `mcp__<server>__<tool>`, each part letters, digits, `_` or `-`: one tool, so a server-wide
+/// name, a wildcard or a list can never allow a write tool nobody named.
+fn is_mcp_tool(name: &str) -> bool {
+    let part = |p: &str| {
+        !p.is_empty()
+            && p.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    };
+    name.strip_prefix("mcp__")
+        .and_then(|rest| rest.split_once("__"))
+        .is_some_and(|(server, tool)| part(server) && part(tool))
+}
+
 /// `claude -p --safe-mode --output-format stream-json`, tools limited to reading, every other
 /// permission refused without a prompt nobody would answer, and the output schema enforced.
 /// `--safe-mode` drops the user's CLAUDE.md, skills, plugins, hooks and MCP servers.
-fn claude_launch(input: &RunnerInput, dir: &Path) -> Result<Launch> {
-    let mut args: Vec<String> = [
-        "-p",
-        "--safe-mode",
-        // Streamed, so a turn killed at its deadline still shows the usage it had.
-        "--output-format",
-        "stream-json",
-        "--verbose",
-        "--tools",
-        TOOLS,
-        "--allowedTools",
-        TOOLS,
-        "--permission-mode",
-        "dontAsk",
-        "--json-schema",
-    ]
-    .map(String::from)
-    .into();
+/// With `connectors` (spec §12): the claude.ai connectors load only from the user setting
+/// source, so that replaces `--safe-mode`, with skills, slash commands and hooks off and tool
+/// search on (else every connector's tool schemas fill each call); the user's CLAUDE.md,
+/// enabled plugins and their MCP servers load too.
+fn claude_launch(input: &RunnerInput, dir: &Path, access: &Access) -> Result<Launch> {
+    let mut args: Vec<String> = vec!["-p".into()];
+    let mut env = vec![];
+    if access.connectors {
+        args.extend(
+            [
+                "--setting-sources",
+                "user",
+                "--disable-slash-commands",
+                "--settings",
+                r#"{"disableAllHooks":true}"#,
+            ]
+            .map(String::from),
+        );
+        env.push(("ENABLE_TOOL_SEARCH".into(), "true".into()));
+    } else {
+        args.push("--safe-mode".into());
+    }
+    let allowed = [TOOLS.to_string()]
+        .into_iter()
+        .chain(access.tools.iter().cloned())
+        .collect::<Vec<_>>()
+        .join(",");
+    args.extend(
+        [
+            // Streamed, so a turn killed at its deadline still shows the usage it had.
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--tools",
+            TOOLS,
+            "--allowedTools",
+            &allowed,
+            "--permission-mode",
+            "dontAsk",
+            "--json-schema",
+        ]
+        .map(String::from),
+    );
     args.push(input.output_schema.to_string());
     args.extend(model_args("--model", &input.model)?);
     Ok(Launch {
         program: "claude",
         args,
         inherit: [INHERIT, CLAUDE_INHERIT].concat(),
-        env: vec![],
+        env,
         cwd: dir.to_path_buf(),
     })
 }
@@ -811,7 +889,7 @@ mod tests {
             read_only: true,
         };
         let dir = Path::new("/tmp/x");
-        let c = claude_launch(&input, dir).unwrap();
+        let c = claude_launch(&input, dir, &Access::default()).unwrap();
         let args = c.args.join(" ");
         assert!(args.starts_with("-p --safe-mode --output-format stream-json --verbose --tools Read,Grep,Glob --allowedTools Read,Grep,Glob --permission-mode dontAsk --json-schema {\"type\":\"object\"} --model m1"), "{args}");
         assert!(!args.contains("SECRET"));
@@ -820,6 +898,6 @@ mod tests {
             model: "--dangerously-skip-permissions".into(),
             ..input
         };
-        assert!(claude_launch(&bad, dir).is_err());
+        assert!(claude_launch(&bad, dir, &Access::default()).is_err());
     }
 }

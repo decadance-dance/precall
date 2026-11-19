@@ -470,3 +470,87 @@ fn a_key_twice_in_codex_usage_fails_the_call() {
     let o = t.call("codex", "m", 60, Some(prices));
     assert!(!o.ok && o.stderr.contains("duplicate key"), "{}", o.stderr);
 }
+
+#[test]
+fn claude_with_connectors_loads_the_user_source_without_hooks_and_allows_only_named_tools() {
+    let t = T::new("ok", r#"{"texts":{"note:a":"A"}}"#);
+    let tools =
+        r#"["mcp__claude_ai_Slack__slack_read_channel","mcp__claude_ai_Slack__slack_read_thread"]"#;
+    let o = t.call_with(
+        "claude",
+        "default",
+        60,
+        None,
+        &[
+            ("RRECALL_PARAM_CONNECTORS", "true".into()),
+            ("RRECALL_PARAM_TOOLS", tools.into()),
+        ],
+    );
+    assert!(o.ok, "{}", o.stderr);
+    let argv = t.argv("claude.argv.1");
+    assert!(!argv.iter().any(|a| a == "--safe-mode"), "{argv:?}");
+    assert_eq!(after(&argv, "--setting-sources"), "user");
+    assert!(argv.iter().any(|a| a == "--disable-slash-commands"));
+    assert_eq!(after(&argv, "--settings"), r#"{"disableAllHooks":true}"#);
+    assert_eq!(after(&argv, "--tools"), "Read,Grep,Glob");
+    assert_eq!(
+        after(&argv, "--allowedTools"),
+        "Read,Grep,Glob,mcp__claude_ai_Slack__slack_read_channel,mcp__claude_ai_Slack__slack_read_thread"
+    );
+    assert_eq!(after(&argv, "--permission-mode"), "dontAsk");
+    assert!(t.rec("claude.env.1").contains("ENABLE_TOOL_SEARCH=true\n"));
+    t.no_scratch_left();
+}
+
+#[test]
+fn claude_without_connectors_keeps_safe_mode_and_no_tool_search() {
+    let t = T::new("ok", r#"{"texts":{"note:a":"A"}}"#);
+    let o = t.call_with(
+        "claude",
+        "default",
+        60,
+        None,
+        &[
+            ("RRECALL_PARAM_CONNECTORS", "false".into()),
+            ("ENABLE_TOOL_SEARCH", "true".into()),
+        ],
+    );
+    assert!(o.ok, "{}", o.stderr);
+    let argv = t.argv("claude.argv.1");
+    assert!(argv.iter().any(|a| a == "--safe-mode"), "{argv:?}");
+    assert!(
+        !argv
+            .iter()
+            .any(|a| a == "--setting-sources" || a == "--settings")
+    );
+    assert!(!t.rec("claude.env.1").contains("ENABLE_TOOL_SEARCH"));
+}
+
+#[test]
+fn claude_tools_must_be_exact_mcp_tool_names_and_need_connectors() {
+    for (connectors, tools) in [
+        ("true", r#"["mcp__claude_ai_Slack"]"#),
+        ("true", r#"["mcp__claude_ai_Slack__*"]"#),
+        ("true", r#"["Bash"]"#),
+        ("true", r#"["mcp__a__b,Bash"]"#),
+        ("true", r#"["mcp__a__b(x)"]"#),
+        ("true", r#"["mcp____b"]"#),
+        ("true", r#""mcp__a__b""#),
+        ("false", r#"["mcp__claude_ai_Slack__slack_read_channel"]"#),
+    ] {
+        let t = T::new("ok", "{}");
+        let o = t.call_with(
+            "claude",
+            "default",
+            60,
+            None,
+            &[
+                ("RRECALL_PARAM_CONNECTORS", connectors.into()),
+                ("RRECALL_PARAM_TOOLS", tools.into()),
+            ],
+        );
+        assert!(!o.ok, "{connectors} {tools}");
+        assert!(o.stderr.contains("param `"), "{tools}: {}", o.stderr);
+        assert!(!t.root.join("home/agent/claude.calls").exists(), "{tools}");
+    }
+}
