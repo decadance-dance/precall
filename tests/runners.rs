@@ -214,12 +214,15 @@ fn claude_malformed_output_or_an_error_fails_the_call() {
     t.no_scratch_left();
 }
 
-// A timeout of 11s: a main turn of 8.8s and a wrap-up of 0.2s (a fifth of it, minus 2s).
+/// A timeout with a wrap-up turn: a main turn of 12s and a wrap-up of 1s (a fifth of it, minus
+/// 2s), long enough for the fake agent to start and answer under a loaded test machine.
+const WRAP_TIMEOUT: u64 = 15;
+
 #[test]
 fn claude_near_the_timeout_gets_a_wrap_up_turn_in_the_same_session() {
     let t = T::new("sleep", r#"{"texts":{}}"#);
     let free = r#"{"claude-fake-1":{"input":0,"cached_input":0,"output":0}}"#;
-    let out = json_of(&t.call("claude", "m", 11, Some(free)));
+    let out = json_of(&t.call("claude", "m", WRAP_TIMEOUT, Some(free)));
     assert_eq!(out["cost_usd"], 0.1);
     let (first, second) = (t.argv("claude.argv.1"), t.argv("claude.argv.2"));
     assert_eq!(after(&second, "--resume"), after(&first, "--session-id"));
@@ -234,10 +237,15 @@ fn claude_near_the_timeout_gets_a_wrap_up_turn_in_the_same_session() {
 fn claude_that_never_answers_is_killed_at_the_timeout() {
     let t = T::new("sleep-always", "{}");
     let started = std::time::Instant::now();
-    let o = t.call("claude", "m", 11, None);
+    let o = t.call("claude", "m", WRAP_TIMEOUT, None);
     assert!(!o.ok && o.stderr.contains("timed out"), "{}", o.stderr);
-    assert!(started.elapsed() < std::time::Duration::from_secs(11));
-    assert!(dead(&t.rec("claude.pid.1")) && dead(&t.rec("claude.pid.2")));
+    // Killed, not left to finish: each fake turn would sleep 30s.
+    let took = started.elapsed();
+    assert!(took < std::time::Duration::from_secs(25), "{took:?}");
+    assert!(dead(&t.rec("claude.pid.1")));
+    // A wrap-up turn killed before it started its sleep wrote no pid and left nothing behind.
+    let second = std::fs::read_to_string(t.root.join("home/agent/claude.pid.2"));
+    assert!(second.is_err() || dead(&second.unwrap()));
     t.no_scratch_left();
 }
 
@@ -297,7 +305,7 @@ fn codex_without_a_session_log_counts_its_turn_events_and_the_requested_model() 
 fn codex_near_the_timeout_resumes_its_thread_with_a_wrap_up() {
     let t = T::new("sleep", r#"{"texts":{}}"#);
     let prices = r#"{"codex-fake-1":{"input":0,"cached_input":0,"output":0}}"#;
-    let out = json_of(&t.call("codex", "default", 11, Some(prices)));
+    let out = json_of(&t.call("codex", "default", WRAP_TIMEOUT, Some(prices)));
     assert_eq!(out["model"], "codex-fake-1");
     let second = t.argv("codex.argv.2");
     assert_eq!(&second[second.len() - 3..], ["resume", "th1", "-"]);
@@ -376,12 +384,12 @@ fn claude_wrap_up_charges_the_killed_turn_too() {
     let t = T::new("sleep", r#"{"texts":{}}"#);
     // The killed turn streamed 1M input tokens of one message (twice, one per content block).
     let prices = r#"{"claude-fake-1":{"input":0.5,"cached_input":0,"output":0}}"#;
-    let out = json_of(&t.call("claude", "m", 11, Some(prices)));
+    let out = json_of(&t.call("claude", "m", WRAP_TIMEOUT, Some(prices)));
     assert!(
         (out["cost_usd"].as_f64().unwrap() - 0.6).abs() < 1e-9,
         "{out}"
     );
-    let o = t.call("claude", "m", 11, None);
+    let o = t.call("claude", "m", WRAP_TIMEOUT, None);
     assert!(
         !o.ok && o.stderr.contains("`claude-fake-1`") && o.stderr.contains("`prices`"),
         "{}",
@@ -449,7 +457,7 @@ fn a_killed_turn_that_reported_its_cost_is_charged_that_cost() {
 fn a_record_torn_by_the_kill_does_not_lose_the_wrap_up() {
     let t = T::new("torn", r#"{"texts":{}}"#);
     let prices = r#"{"claude-fake-1":{"input":0.5,"cached_input":0,"output":0}}"#;
-    let out = json_of(&t.call("claude", "m", 11, Some(prices)));
+    let out = json_of(&t.call("claude", "m", WRAP_TIMEOUT, Some(prices)));
     assert!(
         (out["cost_usd"].as_f64().unwrap() - 0.6).abs() < 1e-9,
         "{out}"

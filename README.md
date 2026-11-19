@@ -4,16 +4,13 @@
 
 A run sends collectors over the project's sources (the repo, its tracker, its chat, your notes), merges what they find into the current map, and lets checks and judges send rejected changes back for rework before anything is committed. The map lives in its own git repository, so every change shows in `git diff` and `git blame`. People read it as an HTML page; coding agents query one branch at a time (`rrecall show decisions`).
 
-Status: milestone 1: the map store and the query commands (`init`, `import`, `ls`, `show`, `find`, `why`, `recent`, `status`, `note`, `rm`, `agent-instructions`); milestone 2: the plugin protocol, `rrecall run` and the built-in checks; milestone 3 in progress: the built-in `claude` and `codex` runners and declarative plugins (a manifest and a prompt), with the built-in collectors and judges next. The product and the plan: [docs/VISION.md](docs/VISION.md) and [docs/SPEC.md](docs/SPEC.md). Contributing: [AGENTS.md](AGENTS.md).
+Status: milestone 1: the map store and the query commands (`init`, `import`, `ls`, `show`, `find`, `why`, `recent`, `status`, `note`, `rm`, `agent-instructions`); milestone 2: the plugin protocol, `rrecall run` and the built-in checks; milestone 3 in progress: the built-in `claude` and `codex` runners and declarative plugins (a manifest and a prompt), and the built-in judges `support`, `removal` and `duplicate`, with the built-in collectors next. The product and the plan: [docs/VISION.md](docs/VISION.md) and [docs/SPEC.md](docs/SPEC.md). Contributing: [AGENTS.md](AGENTS.md).
 
 ## Slack
 
-The built-in `slack` collector reads named channels and DMs through an agent that can reach Slack: the claude.ai Slack connector of your Claude login. Enable a second `claude` runner instance that loads the connector (`connectors = true`, which loads your user settings without hooks, skills or slash commands) and may use only the connector's read tools, and let the collector run on it. Add to the store's `rrecall.toml` (`init` does not):
+The built-in `slack` collector reads named channels and DMs through an agent that can reach Slack: the claude.ai Slack connector of your Claude login. Enable a second `claude` runner instance that loads the connector (`connectors = true`, which loads your user settings without hooks, skills or slash commands) and may use only the connector's read tools, and let the collector run on it. Add to the store's `rrecall.toml`, next to the `claude` instance `init` enables (`init` does not add these):
 
 ```toml
-[[plugins]]
-id = "claude"
-
 [[plugins]]
 id = "claude-slack"
 use = "claude"

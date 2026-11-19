@@ -141,9 +141,17 @@ fn init_creates_store_with_default_skeleton_and_found_sources() {
         cfg.contains("repo = \"lanternfish-dev/lanternfish\""),
         "{cfg}"
     );
-    // The built-in checks run after the sources, in this order.
+    // The built-in checks run after the sources, then the judges, in this order, then the
+    // runner the judges call.
     let checks = "[[plugins]]\nid = \"no-op\"\n\n[[plugins]]\nid = \"size-limits\"\n\n[[plugins]]\nid = \"secrets\"\n";
-    assert!(cfg.ends_with(checks), "{cfg}");
+    let judges = "[[plugins]]\nid = \"support\"\n\n[[plugins]]\nid = \"removal\"\n\n[[plugins]]\nid = \"duplicate\"\n";
+    let runner = "[[plugins]]\nid = \"claude\"\n";
+    let (c, j, r) = (
+        cfg.find(checks).expect(&cfg),
+        cfg.find(judges).expect(&cfg),
+        cfg.find(runner).expect(&cfg),
+    );
+    assert!(c < j && j < r && cfg.ends_with(runner), "{cfg}");
     assert_eq!(
         std::fs::read_to_string(store.join(".gitignore")).unwrap(),
         "cache/\nruns/\nviews/\nstate/\n"
@@ -165,6 +173,9 @@ fn init_creates_store_with_default_skeleton_and_found_sources() {
         user.contains("name = \"lanternfish\"") && user.contains(ORIGIN),
         "{user}"
     );
+    // The judges name no runner: the user config gets a default runner, before any table.
+    assert!(user.contains("\nrunner = \"claude\"\n"), "{user}");
+    assert!(user.find("runner =") < user.find("[[projects]]"), "{user}");
     // The origin now resolves the project from inside the repo.
     let ls = e.run_in(&repo, &["ls"]);
     assert_eq!(ls.code, 0, "{}", ls.stderr);
@@ -198,6 +209,12 @@ fn init_names_and_store_overrides() {
     .unwrap();
     e.ok(&["init", "kiln"]);
     assert!(custom.join("rrecall.toml").exists());
+    // A user config with tables but no default runner gets one at the top, and still loads.
+    let user = std::fs::read_to_string(e.user_config()).unwrap();
+    assert!(
+        user.contains("runner = \"claude\"\n") && user.find("runner =") < user.find("[[projects]]"),
+        "{user}"
+    );
     assert!(!e.store("kiln").exists());
     let cfg = std::fs::read_to_string(custom.join("rrecall.toml")).unwrap();
     assert!(
@@ -1152,6 +1169,10 @@ fn a_failed_init_in_an_existing_directory_keeps_the_directory_and_its_files() {
     )
     .unwrap();
     assert_eq!(e.run(&["init", "already"]).code, 1);
+    assert!(
+        !e.user_config().exists(),
+        "the user config init wrote is undone"
+    );
     let mut left: Vec<String> = std::fs::read_dir(&store)
         .unwrap()
         .map(|f| f.unwrap().file_name().to_string_lossy().into_owned())
@@ -1185,4 +1206,102 @@ fn max_tokens_prints_the_full_answer_when_it_fits() {
         assert_eq!(e.ok(&args), full, "json {json}");
     }
     assert_eq!(full.matches("## ").count(), 3);
+}
+
+#[test]
+fn init_keeps_the_users_default_runner_and_enables_it() {
+    let e = Env::new();
+    std::fs::create_dir_all(e.user_config().parent().unwrap()).unwrap();
+    std::fs::write(e.user_config(), "runner = \"codex\"\n").unwrap();
+    e.ok(&["init", "kiln"]);
+    assert_eq!(
+        std::fs::read_to_string(e.user_config()).unwrap(),
+        "runner = \"codex\"\n\n[[projects]]\nname = \"kiln\"\n"
+    );
+    let cfg = std::fs::read_to_string(e.store("kiln").join("rrecall.toml")).unwrap();
+    assert!(
+        cfg.ends_with("[[plugins]]\nid = \"codex\"\n") && !cfg.contains("\"claude\""),
+        "{cfg}"
+    );
+}
+
+#[test]
+fn init_keeps_a_bom_prefixed_user_config_valid() {
+    let e = Env::new();
+    std::fs::create_dir_all(e.user_config().parent().unwrap()).unwrap();
+    let before = "\u{feff}# mine\n[[projects]]\nname = \"kiln\"\n";
+    std::fs::write(e.user_config(), before).unwrap();
+    e.ok(&["init", "kiln"]);
+    let user = std::fs::read_to_string(e.user_config()).unwrap();
+    // The BOM stays first, the default runner goes before every table, the rest is kept.
+    assert!(user.starts_with('\u{feff}'), "{user:?}");
+    assert!(user.ends_with(&before['\u{feff}'.len_utf8()..]), "{user:?}");
+    assert!(user.contains("runner = \"claude\"\n"), "{user:?}");
+    e.ok(&["--project", "kiln", "ls"]);
+}
+
+#[test]
+fn init_refuses_a_default_runner_it_cannot_find_and_enables_one_it_finds() {
+    let e = Env::new();
+    let dir = e.user_config().parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(&dir).unwrap();
+    // `fast` is an instance id another store enabled (spec §9): no plugin of that id exists.
+    std::fs::write(e.user_config(), "runner = \"fast\"\n").unwrap();
+    let o = e.run(&["init", "kiln"]);
+    assert_eq!(o.code, 2, "{}", o.stderr);
+    assert!(o.stderr.contains("`fast`"), "{}", o.stderr);
+    assert!(!e.store("kiln").exists(), "nothing is created");
+    assert_eq!(
+        std::fs::read_to_string(e.user_config()).unwrap(),
+        "runner = \"fast\"\n"
+    );
+    // A runner plugin `fast` in the user plugin directory is enabled by its id.
+    let plugin = dir.join("plugins/fast");
+    std::fs::create_dir_all(&plugin).unwrap();
+    std::fs::write(
+        plugin.join("rrecall-plugin.toml"),
+        "id = \"fast\"\nname = \"Fast\"\nversion = \"0.1.0\"\nmin_rrecall = \"0.1.0\"\nkind = \"runner\"\n\n[runner]\ncommand = [\"/bin/cat\"]\n",
+    )
+    .unwrap();
+    e.ok(&["init", "kiln"]);
+    let cfg = std::fs::read_to_string(e.store("kiln").join("rrecall.toml")).unwrap();
+    assert!(cfg.ends_with("[[plugins]]\nid = \"fast\"\n"), "{cfg}");
+}
+
+#[test]
+fn init_refuses_a_default_runner_whose_id_another_instance_takes() {
+    let e = Env::new();
+    let dir = e.user_config().parent().unwrap().to_path_buf();
+    let plugin = dir.join("plugins/support");
+    std::fs::create_dir_all(&plugin).unwrap();
+    std::fs::write(
+        plugin.join("rrecall-plugin.toml"),
+        "id = \"support\"\nname = \"A runner\"\nversion = \"0.1.0\"\nmin_rrecall = \"0.1.0\"\nkind = \"runner\"\n\n[runner]\ncommand = [\"/bin/cat\"]\n",
+    )
+    .unwrap();
+    std::fs::write(e.user_config(), "runner = \"support\"\n").unwrap();
+    let o = e.run(&["init", "kiln"]);
+    assert_eq!(o.code, 2, "{}", o.stderr);
+    assert!(o.stderr.contains("`support`"), "{}", o.stderr);
+    assert!(!e.store("kiln").exists(), "nothing is created");
+}
+
+#[test]
+fn init_that_cannot_write_the_user_config_leaves_nothing_and_can_be_retried() {
+    use std::os::unix::fs::PermissionsExt;
+    let e = Env::new();
+    std::fs::create_dir_all(e.user_config().parent().unwrap()).unwrap();
+    std::fs::write(e.user_config(), "[[projects]]\nname = \"kiln\"\n").unwrap();
+    let mode = |m| std::fs::Permissions::from_mode(m);
+    std::fs::set_permissions(e.user_config(), mode(0o444)).unwrap();
+    let o = e.run(&["init", "kiln"]);
+    assert_eq!(o.code, 1, "{}", o.stderr);
+    assert!(!e.store("kiln").exists(), "nothing is created");
+    std::fs::set_permissions(e.user_config(), mode(0o644)).unwrap();
+    e.ok(&["init", "kiln"]);
+    assert!(
+        std::fs::read_to_string(e.user_config())
+            .unwrap()
+            .contains("runner = \"claude\"")
+    );
 }

@@ -1,0 +1,345 @@
+{
+  "judge": "removal",
+  "about": "removal: a closed issue; an issue still open; a commit that only edits the file; a reversing decision; unresolved evidence; a deleting commit; evidence about something else; an add it leaves to others",
+  "input": {
+    "proposals": [
+      {
+        "key": "github/arm-closed",
+        "proposal": {
+          "key": "arm-closed",
+          "op": "remove",
+          "id": "arm-builds",
+          "sources": [],
+          "evidence": "gh-issue:lanternfish-dev/lanternfish#88",
+          "reason": "issue closed"
+        },
+        "current": {
+          "id": "arm-builds",
+          "parent": "blocked",
+          "title": "ARM builds",
+          "body": "Release builds for ARM64 wait on a self-hosted CI runner (#88).",
+          "sources": [
+            "gh-issue:lanternfish-dev/lanternfish#88"
+          ],
+          "order": 0,
+          "state": "blocked"
+        },
+        "sources": {
+          "gh-issue:lanternfish-dev/lanternfish#88": "ARM64 release builds need a self-hosted runner\nstate: closed (completed) on 2026-10-02\nlast comment: The arm64 runner is live; v0.12 shipped arm64 binaries."
+        }
+      },
+      {
+        "key": "github/signing-open",
+        "proposal": {
+          "key": "signing-open",
+          "op": "remove",
+          "id": "windows-signing",
+          "sources": [],
+          "evidence": "gh-issue:lanternfish-dev/lanternfish#90",
+          "reason": "stale"
+        },
+        "current": {
+          "id": "windows-signing",
+          "parent": "blocked",
+          "title": "Windows signing",
+          "body": "Windows installers ship unsigned until the code signing certificate arrives (#90).",
+          "sources": [
+            "gh-issue:lanternfish-dev/lanternfish#90"
+          ],
+          "order": 1,
+          "state": "blocked"
+        },
+        "sources": {
+          "gh-issue:lanternfish-dev/lanternfish#90": "Sign the Windows installer\nstate: open\nlast comment (2026-10-30): Still waiting for the code signing certificate."
+        }
+      },
+      {
+        "key": "repo/dead-rename",
+        "proposal": {
+          "key": "dead-rename",
+          "op": "remove",
+          "id": "dead-feed-detector",
+          "sources": [],
+          "evidence": "commit:lanternfish-dev/lanternfish@9d0e417",
+          "reason": "dead.go changed"
+        },
+        "current": {
+          "id": "dead-feed-detector",
+          "parent": "fetcher",
+          "title": "Dead feed detector",
+          "body": "fetcher/dead.go marks a feed dead after 14 days of errors.",
+          "sources": [
+            "file:fetcher/dead.go#L1-L40@3c1f9a2"
+          ],
+          "order": 3
+        },
+        "sources": {
+          "commit:lanternfish-dev/lanternfish@9d0e417": "fetcher: rename firstErr to FirstErrorAt in dead.go\n\n fetcher/dead.go | 6 +++---"
+        }
+      },
+      {
+        "key": "notes/sqlite-reversed",
+        "proposal": {
+          "key": "sqlite-reversed",
+          "op": "remove",
+          "id": "sqlite-per-user",
+          "sources": [],
+          "evidence": "note:decisions/storage-v2.md",
+          "reason": "decision replaced"
+        },
+        "current": {
+          "id": "sqlite-per-user",
+          "parent": "decisions",
+          "title": "One SQLite file per user",
+          "body": "Each user gets their own SQLite file, so a user's data can be exported and deleted as one file.",
+          "sources": [
+            "note:decisions/storage.md"
+          ],
+          "order": 0,
+          "date": "2025-04-10"
+        },
+        "sources": {
+          "note:decisions/storage-v2.md": "2026-09-14: We move all users into one Postgres database and drop the per-user SQLite files. Export becomes a query per user."
+        }
+      },
+      {
+        "key": "github/flaky-unresolved",
+        "proposal": {
+          "key": "flaky-unresolved",
+          "op": "remove",
+          "id": "flaky-sync-test",
+          "sources": [],
+          "evidence": "gh-issue:lanternfish-dev/lanternfish#91",
+          "reason": "fixed"
+        },
+        "current": {
+          "id": "flaky-sync-test",
+          "parent": "blocked",
+          "title": "Flaky sync test",
+          "body": "tests/sync_cursor.rs fails about once in 20 CI runs (#91).",
+          "sources": [
+            "gh-issue:lanternfish-dev/lanternfish#91"
+          ],
+          "order": 2,
+          "state": "blocked"
+        },
+        "sources": {
+          "gh-issue:lanternfish-dev/lanternfish#91": null
+        }
+      },
+      {
+        "key": "repo/settings-deleted",
+        "proposal": {
+          "key": "settings-deleted",
+          "op": "remove",
+          "id": "settings-page",
+          "sources": [],
+          "evidence": "commit:lanternfish-dev/lanternfish@5a7c2b0",
+          "reason": "settings page deleted"
+        },
+        "current": {
+          "id": "settings-page",
+          "parent": "web-client",
+          "title": "Settings page",
+          "body": "web/src/settings/: theme, refresh interval, OPML import and export.",
+          "sources": [
+            "file:web/src/settings/index.svelte#L1-L40@3c1f9a2"
+          ],
+          "order": 3
+        },
+        "sources": {
+          "commit:lanternfish-dev/lanternfish@5a7c2b0": "web: delete web/src/settings/, settings move into the account menu\n\n web/src/settings/index.svelte | 212 ----------"
+        }
+      },
+      {
+        "key": "github/push-billing",
+        "proposal": {
+          "key": "push-billing",
+          "op": "remove",
+          "id": "web-push",
+          "sources": [],
+          "evidence": "gh-pr:lanternfish-dev/lanternfish#150",
+          "reason": "notifications changed"
+        },
+        "current": {
+          "id": "web-push",
+          "parent": "decisions",
+          "title": "Web push through the sync server",
+          "body": "The sync server sends web push notifications itself instead of a third-party service, to keep reader data in one place.",
+          "sources": [
+            "note:decisions/push.md"
+          ],
+          "order": 1,
+          "date": "2025-11-03"
+        },
+        "sources": {
+          "gh-pr:lanternfish-dev/lanternfish#150": "Billing: send invoice emails through the billing service's mail queue\n\nWeb push and the sync server are not touched."
+        }
+      },
+      {
+        "key": "repo/add-other",
+        "proposal": {
+          "key": "add-other",
+          "op": "add",
+          "parent": "fetcher",
+          "title": "Dead feed detector",
+          "body": "fetcher/dead.go marks a feed dead after 14 days of errors.",
+          "sources": [
+            "file:fetcher/dead.go#L1-L40@3c1f9a2"
+          ],
+          "reason": "found it"
+        },
+        "sources": {
+          "file:fetcher/dead.go#L1-L40@3c1f9a2": "// markDead flags a feed as dead once it has failed for 14 consecutive days.\nfunc markDead(f *Feed, now time.Time) bool {\n\treturn now.Sub(f.FirstErrorAt) >= 14*24*time.Hour\n}"
+        }
+      }
+    ],
+    "nodes": [
+      {
+        "id": "config-loader",
+        "parent": "sync-server",
+        "title": "Config loader",
+        "body": "server/src/config.rs reads lanternfish.toml and LF_* environment variables.",
+        "sources": [
+          "file:server/src/config.rs#L1-L40@3c1f9a2"
+        ],
+        "order": 3
+      },
+      {
+        "id": "connection-pool",
+        "parent": "storage-layer",
+        "title": "Connection pool",
+        "body": "At most 4 open files per worker thread.",
+        "sources": [
+          "file:server/src/db/pool.rs#L1-L40@3c1f9a2"
+        ],
+        "order": 0
+      },
+      {
+        "id": "dead-feed-detector",
+        "parent": "fetcher",
+        "title": "Dead feed detector",
+        "body": "fetcher/dead.go marks a feed dead after 14 days of errors.",
+        "sources": [
+          "file:fetcher/dead.go#L1-L40@3c1f9a2"
+        ],
+        "order": 3
+      },
+      {
+        "id": "fetcher",
+        "parent": "layout",
+        "title": "Fetcher",
+        "body": "Go worker under fetcher/ that polls feeds and writes new items to the queue.",
+        "sources": [
+          "file:fetcher/main.go#L1-L40@3c1f9a2"
+        ],
+        "order": 1
+      },
+      {
+        "id": "migrations",
+        "parent": "sync-server",
+        "title": "Migrations",
+        "body": "server/migrations/: numbered SQL files applied at startup.",
+        "sources": [
+          "file:server/src/db/migrate.rs#L1-L40@3c1f9a2"
+        ],
+        "order": 2
+      },
+      {
+        "id": "politeness",
+        "parent": "fetcher",
+        "title": "Politeness",
+        "body": "fetcher/http.go honours ETag, Last-Modified and Retry-After.",
+        "sources": [
+          "file:fetcher/http.go#L1-L40@3c1f9a2"
+        ],
+        "order": 2
+      },
+      {
+        "id": "scheduler",
+        "parent": "fetcher",
+        "title": "Scheduler",
+        "body": "fetcher/schedule.go spreads polls over the hour by feed hash.",
+        "sources": [
+          "file:fetcher/schedule.go#L1-L40@3c1f9a2"
+        ],
+        "order": 0
+      },
+      {
+        "id": "settings-page",
+        "parent": "web-client",
+        "title": "Settings page",
+        "body": "web/src/settings/: theme, refresh interval, OPML import and export.",
+        "sources": [
+          "file:web/src/settings/index.svelte#L1-L40@3c1f9a2"
+        ],
+        "order": 3
+      },
+      {
+        "id": "storage-layer",
+        "parent": "sync-server",
+        "title": "Storage layer",
+        "body": "server/src/db/: one SQLite file per user, opened through a small pool.",
+        "sources": [
+          "file:server/src/db/mod.rs#L1-L40@3c1f9a2"
+        ],
+        "order": 1
+      },
+      {
+        "id": "sync-server",
+        "parent": "layout",
+        "title": "Sync server",
+        "body": "Rust service under server/ that stores read state and subscriptions per user.",
+        "sources": [
+          "file:server/Cargo.toml#L1-L40@3c1f9a2"
+        ],
+        "order": 0
+      },
+      {
+        "id": "web-client",
+        "parent": "layout",
+        "title": "Web client",
+        "body": "Svelte app under web/ served as static files by the sync server.",
+        "sources": [
+          "file:web/package.json#L1-L40@3c1f9a2"
+        ],
+        "order": 2
+      }
+    ],
+    "map_ids": [
+      "arm-builds",
+      "blocked",
+      "config-loader",
+      "connection-pool",
+      "dead-feed-detector",
+      "decisions",
+      "done",
+      "fetcher",
+      "flaky-sync-test",
+      "how-it-works",
+      "layout",
+      "migrations",
+      "people",
+      "politeness",
+      "scheduler",
+      "settings-page",
+      "sqlite-per-user",
+      "storage-layer",
+      "sync-server",
+      "web-client",
+      "web-push",
+      "windows-signing"
+    ],
+    "params": {}
+  },
+  "expected": {
+    "github/arm-closed": "accept",
+    "github/signing-open": "reject",
+    "repo/dead-rename": "reject",
+    "notes/sqlite-reversed": "accept",
+    "github/flaky-unresolved": "reject",
+    "repo/settings-deleted": "accept",
+    "github/push-billing": "reject",
+    "repo/add-other": "accept"
+  }
+}

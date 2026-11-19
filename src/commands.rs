@@ -6,6 +6,7 @@ use crate::history;
 use crate::lock;
 use crate::node::{self, Node};
 use crate::outline;
+use crate::plugin;
 use crate::query;
 use crate::store::{self, Store};
 use anyhow::{Context, Result};
@@ -57,7 +58,17 @@ pub fn init(name_arg: Option<&str>, project_flag: Option<&str>) -> Result<String
         "# rrecall store config (spec §9). Add branches with [[skeleton.branch]] (id, title, question, granularity).\n",
     );
     let mut found = Vec::new();
+    // The instance ids this config enables, which the default runner's id must not take.
+    let mut ids = vec![
+        "no-op",
+        "size-limits",
+        "secrets",
+        "support",
+        "removal",
+        "duplicate",
+    ];
     if let Some(top) = &top {
+        ids.push("repo");
         // Top-level keys go before the first table.
         cfg += &format!(
             "\n# The project's repository: its .rrecall/plugins/ loads once trusted.\nrepo = {}\n",
@@ -71,6 +82,7 @@ pub fn init(name_arg: Option<&str>, project_flag: Option<&str>) -> Result<String
         found.push(format!("repo {top}"));
     }
     if let Some(repo) = origin.as_deref().and_then(github_repo) {
+        ids.push("github");
         cfg += &format!(
             "\n[[plugins]]\nid = \"github\"\nparams = {{ repo = {} }}\n",
             config::toml_str(&repo)
@@ -79,6 +91,63 @@ pub fn init(name_arg: Option<&str>, project_flag: Option<&str>) -> Result<String
     }
     cfg += "\n# The built-in checks (spec §10). Remove an entry to disable one; a plugin with its id replaces it.\n";
     cfg += "[[plugins]]\nid = \"no-op\"\n\n[[plugins]]\nid = \"size-limits\"\n\n[[plugins]]\nid = \"secrets\"\n";
+    cfg += "\n# The built-in judges (spec §10). They call the user config's default runner unless an entry sets `runner`.\n";
+    cfg += "[[plugins]]\nid = \"support\"\n\n[[plugins]]\nid = \"removal\"\n\n[[plugins]]\nid = \"duplicate\"\n";
+    // The user's default runner, or `claude`, which init makes the default below. The default
+    // is an instance id (spec §9): init enables it only as the plugin of that id.
+    let runner = user.runner.clone().unwrap_or_else(|| "claude".into());
+    if !plugin::finds_runner(&user, top.as_deref().map(Path::new), &path, &runner)? {
+        return Err(error::usage(format!(
+            "the user config's default runner `{runner}` is no runner plugin rrecall can find, so init cannot enable it: set `runner` in {} to a runner plugin id (`claude`, `codex`), or add the instance to the store's config after init",
+            config::user_config_path()?.display()
+        )));
+    }
+    if ids.contains(&runner.as_str()) {
+        return Err(error::usage(format!(
+            "the user config's default runner `{runner}` has the id of another instance init enables, so init cannot enable it: set `runner` in {} to another runner plugin id (`claude`, `codex`)",
+            config::user_config_path()?.display()
+        )));
+    }
+    cfg += &format!(
+        "\n# The runner the judges call (spec §6.8).\n[[plugins]]\nid = {}\n",
+        config::toml_str(&runner)
+    );
+    // The user config gains a default runner (the judges name none, spec §6.8) and the
+    // project's entry. It is written before the store and restored if the store fails, so a
+    // failure leaves nothing behind and init can run again.
+    let user_path = config::user_config_path()?;
+    let old = match std::fs::read_to_string(&user_path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        r => Some(r.with_context(|| format!("reading {}", user_path.display()))?),
+    };
+    let mut new = old.clone().unwrap_or_default();
+    if user.runner.is_none() {
+        // A top-level key goes before the first table, after a BOM, which must stay first.
+        let (bom, rest) = match new.strip_prefix('\u{feff}') {
+            Some(rest) => ("\u{feff}", rest),
+            None => ("", new.as_str()),
+        };
+        new = format!(
+            "{bom}# The default runner of declarative plugins (spec §9).\nrunner = \"claude\"\n{rest}"
+        );
+    }
+    if user.project(&name).is_none() {
+        new += &format!("\n[[projects]]\nname = {}\n", config::toml_str(&name));
+        if let Some(url) = &origin {
+            new += &format!("remotes = [{}]\n", config::toml_str(url));
+        }
+    }
+    let parsed: config::UserConfig =
+        toml::from_str(&new).with_context(|| format!("updating {}", user_path.display()))?;
+    anyhow::ensure!(
+        parsed.runner.is_some() && parsed.project(&name).is_some(),
+        "updating {} did not set the default runner and the project",
+        user_path.display()
+    );
+    if let Some(dir) = user_path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    std::fs::write(&user_path, &new).with_context(|| format!("writing {}", user_path.display()))?;
     let created = !path.exists();
     let made = std::fs::create_dir_all(&path)
         .with_context(|| format!("creating {}", path.display()))
@@ -104,27 +173,25 @@ pub fn init(name_arg: Option<&str>, project_flag: Option<&str>) -> Result<String
         } else {
             std::fs::remove_dir_all(path.join(".git"))
         };
+        let _ = match &old {
+            Some(old) => std::fs::write(&user_path, old),
+            None => std::fs::remove_file(&user_path),
+        };
         return Err(e);
     }
 
     let mut out = format!("Created the map of `{name}` at {}\n", path.display());
-    match user.project(&name) {
-        None => {
-            let mut entry = format!("\n[[projects]]\nname = {}\n", config::toml_str(&name));
-            if let Some(url) = &origin {
-                entry += &format!("remotes = [{}]\n", config::toml_str(url));
-            }
-            append(&config::user_config_path()?, &entry)?;
-        }
-        Some(p) => {
-            if let Some(url) = origin.as_ref().filter(|u| !p.remotes.contains(u)) {
-                // limit: rrecall appends whole entries only, so it does not edit an existing one.
-                out += &format!(
-                    "Add {url} to the remotes of project `{name}` in {} to resolve it from this repo.\n",
-                    config::user_config_path()?.display()
-                );
-            }
-        }
+    if user.runner.is_none() {
+        out += &format!("default runner: claude, in {}\n", user_path.display());
+    }
+    if let Some(p) = user.project(&name)
+        && let Some(url) = origin.as_ref().filter(|u| !p.remotes.contains(u))
+    {
+        // limit: rrecall appends whole entries only, so it does not edit an existing one.
+        out += &format!(
+            "Add {url} to the remotes of project `{name}` in {} to resolve it from this repo.\n",
+            user_path.display()
+        );
     }
     let ids: Vec<String> = config::default_branches()
         .into_iter()
@@ -141,20 +208,6 @@ pub fn init(name_arg: Option<&str>, project_flag: Option<&str>) -> Result<String
     );
     out += "Next: `rrecall import <outline>` to seed it, `rrecall ls` to read it.\n";
     Ok(out)
-}
-
-fn append(path: &Path, text: &str) -> Result<()> {
-    use std::io::Write;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .with_context(|| format!("opening {}", path.display()))?;
-    f.write_all(text.as_bytes())
-        .with_context(|| format!("writing {}", path.display()))
 }
 
 fn origin_basename(url: &str) -> String {
