@@ -766,12 +766,15 @@ fn an_initd_store_runs_its_repo_and_github_collectors_through_the_default_runner
         &json!([{"number": 7, "updated_at": "2026-03-02T10:00:00Z"}]),
     );
     agent_out(&w, &json!({"proposals": []}));
-    w.run(0);
+    let run = w.run(0);
     let calls = agent_stdins(&w);
     assert_eq!(
         calls.len(),
         2,
-        "one call per collector, no proposals to judge"
+        "one call per collector, no proposals to judge\ninit: {}\nrun: {}\nconfig: {}",
+        o.stdout,
+        run.stdout,
+        std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap()
     );
     let files = calls
         .iter()
