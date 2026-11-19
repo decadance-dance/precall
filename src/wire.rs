@@ -106,6 +106,32 @@ pub struct CollectorInput {
     /// The output of the collector's `fetch` entrypoint, when it has one (spec §6.1).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fetched: Option<serde_json::Value>,
+    /// Where the last settled run stopped, `null` for a full read (spec §4.2, §6.4).
+    pub since: serde_json::Value,
+}
+
+/// What a `fetch` entrypoint gets on stdin (spec §6.1).
+#[derive(Debug, Serialize)]
+pub struct FetchInput {
+    pub project: String,
+    pub run_id: String,
+    pub params: Params,
+    pub since: serde_json::Value,
+}
+
+/// The most a cursor may take, serialized (spec §4.2).
+pub const CURSOR_MAX: usize = 4096;
+
+/// A collector's cursor (spec §4.2): any JSON value but `null`, at most [`CURSOR_MAX`] bytes.
+pub fn check_cursor(plugin: &str, cursor: &serde_json::Value) -> Result<()> {
+    if cursor.is_null() {
+        bail!("plugin `{plugin}`: `cursor` is null; leave it out");
+    }
+    let n = cursor.to_string().len();
+    if n > CURSOR_MAX {
+        bail!("plugin `{plugin}`: `cursor` takes {n} bytes, more than {CURSOR_MAX}");
+    }
+    Ok(())
 }
 
 /// A proposal of the previous round that was not accepted, with every verdict on it.
@@ -469,7 +495,15 @@ fn only(
 /// The items under `field` of a `{ "<field>": [...] }` document, each an object decoded on its
 /// own so the error can name the item.
 fn decode_items<T: DeserializeOwned>(plugin: &str, stdout: &str, field: &str) -> Result<Vec<T>> {
-    let serde_json::Value::Array(items) = only(plugin, parse(plugin, stdout)?, field)? else {
+    items_in(plugin, parse(plugin, stdout)?, field)
+}
+
+fn items_in<T: DeserializeOwned>(
+    plugin: &str,
+    obj: serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<Vec<T>> {
+    let serde_json::Value::Array(items) = only(plugin, obj, field)? else {
         bail!("plugin `{plugin}`: output needs a `{field}` array");
     };
     let what = field.trim_end_matches('s');
@@ -490,9 +524,26 @@ fn decode_items<T: DeserializeOwned>(plugin: &str, stdout: &str, field: &str) ->
         .collect()
 }
 
-/// A collector's output (spec §6.4).
+/// A collector's output through a runner (spec §6.4).
 pub fn decode_proposals(plugin: &str, stdout: &str) -> Result<Vec<Proposal>> {
-    let props: Vec<Proposal> = decode_items(plugin, stdout, "proposals")?;
+    checked_proposals(plugin, decode_items(plugin, stdout, "proposals")?)
+}
+
+/// A command collector's output (spec §6.4): its proposals and the cursor it may return.
+pub fn decode_collect(
+    plugin: &str,
+    stdout: &str,
+) -> Result<(Vec<Proposal>, Option<serde_json::Value>)> {
+    let mut obj = parse(plugin, stdout)?;
+    let cursor = obj.remove("cursor");
+    if let Some(c) = &cursor {
+        check_cursor(plugin, c)?;
+    }
+    let props = checked_proposals(plugin, items_in(plugin, obj, "proposals")?)?;
+    Ok((props, cursor))
+}
+
+fn checked_proposals(plugin: &str, props: Vec<Proposal>) -> Result<Vec<Proposal>> {
     let mut seen = std::collections::BTreeSet::new();
     for (i, p) in props.iter().enumerate() {
         let n = i + 1;
@@ -931,6 +982,7 @@ mod tests {
             }],
             params: Params::from([("repo".into(), "o/r".into())]),
             fetched: None,
+            since: serde_json::Value::Null,
         };
         let v = serde_json::to_value(&input).unwrap();
         let keys: Vec<_> = v.as_object().unwrap().keys().cloned().collect();
@@ -943,7 +995,8 @@ mod tests {
                 "rejections",
                 "round",
                 "run_id",
-                "scope"
+                "scope",
+                "since"
             ]
         );
         assert_eq!(

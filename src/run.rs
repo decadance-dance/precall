@@ -11,7 +11,7 @@ use crate::process::{self, Ctx};
 use crate::secrets;
 use crate::store::{self, Store};
 use crate::wire::{
-    self, CollectorInput, Event, JudgeInput, JudgeItem, PluginInput, Proposal, Rejection,
+    self, CollectorInput, Event, FetchInput, JudgeInput, JudgeItem, PluginInput, Proposal, Rejection,
     ResolveInput, RoundVerdict, RunnerInput, Verdict, VerdictKind,
 };
 use anyhow::{Context, Result};
@@ -64,6 +64,8 @@ pub fn run(project: Option<&str>, opts: &Opts) -> Result<String> {
         commit: None,
         accepts: BTreeMap::new(),
         fetched: Default::default(),
+        since: BTreeMap::new(),
+        cursors: Default::default(),
     };
     let result = r.pipeline(opts);
     // Keys, titles, verdict reasons and error lines come from plugins (spec §4.4).
@@ -182,7 +184,8 @@ struct RoundRec {
 
 /// Whether a collector is collected this run.
 enum Due {
-    Yes(String),
+    /// The combined fingerprint, the setup hash and `since`.
+    Yes(String, String, Value),
     Skip(String),
     Unreachable(String),
 }
@@ -215,6 +218,10 @@ struct Run {
     accepts: BTreeMap<String, Vec<RoundVerdict>>,
     /// Collector instance to its `fetch` output: fetched once per run, sent every round.
     fetched: std::sync::Mutex<BTreeMap<String, Value>>,
+    /// Due collector instance to its `since` (spec §4.2, §6.4), `null` for a full read.
+    since: BTreeMap<String, Value>,
+    /// Collector instance to the cursor its fetch or first collect returned this run.
+    cursors: std::sync::Mutex<BTreeMap<String, Value>>,
 }
 
 /// `name`, and `name.N` from round 2 on (spec §6.3 log names).
@@ -424,10 +431,13 @@ impl Run {
             .filter(|i| opts.only.as_ref().is_none_or(|o| o == &i.id))
             .collect();
         let verdicts = par_map(&collectors, |inst| self.due(inst, &old_lock, opts.force));
-        let mut due: Vec<(Instance, String)> = Vec::new();
+        let mut due: Vec<(Instance, (String, String))> = Vec::new();
         for (inst, d) in collectors.into_iter().zip(verdicts) {
             match d {
-                Due::Yes(fp) => due.push((inst, fp)),
+                Due::Yes(fp, setup, since) => {
+                    self.since.insert(inst.id.clone(), since);
+                    due.push((inst, (fp, setup)));
+                }
                 Due::Skip(why) => self.skipped.push((inst.id, why)),
                 Due::Unreachable(e) => {
                     self.unsettled.insert(inst.id.clone(), "unreachable".into());
@@ -620,13 +630,18 @@ impl Run {
             .store
             .canonicalize()
             .unwrap_or_else(|_| self.ctx.store.clone());
-        for (inst, fp) in &due {
+        for (inst, (fp, setup)) in &due {
             if self.unsettled.contains_key(&inst.id) {
                 continue;
             }
-            let interval = Self::collector_spec(inst)
-                .and_then(|c| c.min_interval)
-                .is_some();
+            let cursor = self.cursor_of(&inst.id);
+            if cursor.as_ref().is_some_and(|c| secrets::find(&c.to_string()).is_some()) {
+                // Redacting would corrupt it: the next run reads from the settled time alone.
+                self.warnings.push(format!(
+                    "collector `{}`: its cursor looks like a credential and is not kept",
+                    inst.id
+                ));
+            }
             let (runner, model) = match self.models.get(&inst.id) {
                 Some((r, m)) => (Some(r.clone()), Some(m.clone())),
                 None => (None, None),
@@ -635,11 +650,13 @@ impl Run {
                 inst.id.clone(),
                 CollectorLock {
                     fingerprint: fp.clone(),
+                    setup: Some(setup.clone()),
                     plugin: plugin_label(&root, &inst.plugin),
                     hash: self.hashes.get(&inst.id).cloned().unwrap_or_default(),
                     runner,
                     model,
-                    settled_at: interval.then(|| lock::fmt_utc(self.t0)),
+                    settled_at: Some(lock::fmt_utc(self.t0)),
+                    cursor: cursor.filter(|c| secrets::find(&c.to_string()).is_none()),
                     unsettled: false,
                 },
             );
@@ -790,15 +807,31 @@ impl Run {
             .to_string()
             .as_bytes(),
         );
+        let setup = sha256(
+            json!({
+                "plugin": self.hashes.get(&inst.id),
+                "params": inst.params_json(),
+                "runner": runner,
+                "model": model,
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        let entry = old.collectors.get(&inst.id);
+        // Where the last settled run stopped, unless this run reads everything (spec §4.2).
+        let since = match entry {
+            Some(l) if !force && l.setup.as_ref() == Some(&setup) => match &l.settled_at {
+                Some(at) => json!({ "at": at, "cursor": l.cursor }),
+                None => Value::Null,
+            },
+            _ => Value::Null,
+        };
+        let yes = || Due::Yes(combined.clone(), setup.clone(), since.clone());
         if force {
-            return Due::Yes(combined);
+            return yes();
         }
-        let Some(last) = old
-            .collectors
-            .get(&inst.id)
-            .filter(|l| l.fingerprint == combined && !l.unsettled)
-        else {
-            return Due::Yes(combined);
+        let Some(last) = entry.filter(|l| l.fingerprint == combined && !l.unsettled) else {
+            return yes();
         };
         let Some(interval) = c.min_interval else {
             return Due::Skip("fingerprint unchanged".into());
@@ -808,7 +841,7 @@ impl Run {
                 "not due until {}",
                 lock::fmt_utc(at.saturating_add(interval.as_secs()))
             )),
-            _ => Due::Yes(combined),
+            _ => yes(),
         }
     }
 
@@ -878,12 +911,18 @@ impl Run {
             rejections,
             params: inst.params_json(),
             fetched,
+            since: self.since.get(&inst.id).cloned().unwrap_or(Value::Null),
         };
         let name = entry("collect", round);
         match (&c.command, &c.prompt) {
             (Some(cmd), _) => {
                 let out = process::call(&self.ctx, inst, &name, cmd, &input)?;
-                Ok((wire::decode_proposals(&inst.id, &out)?, None))
+                let (props, cursor) = wire::decode_collect(&inst.id, &out)?;
+                // Later rounds only answer verdicts; the first collect said where it read to.
+                if let Some(c) = cursor.filter(|_| round == 1) {
+                    self.set_cursor(&inst.id, c);
+                }
+                Ok((props, None))
             }
             (None, Some(prompt)) => {
                 let input = serde_json::to_value(&input).map_err(anyhow::Error::from)?;
@@ -905,10 +944,11 @@ impl Run {
         if let Some(v) = cache().get(&inst.id) {
             return Ok(v.clone());
         }
-        let input = PluginInput {
+        let input = FetchInput {
             project: self.ctx.project.clone(),
             run_id: self.ctx.run_id.clone(),
             params: inst.params_json(),
+            since: self.since.get(&inst.id).cloned().unwrap_or(Value::Null),
         };
         let out = process::call(&self.ctx, inst, "fetch", cmd, &input)?;
         // Say where it fails, not what: the output is source text (spec §6.3).
@@ -920,8 +960,22 @@ impl Run {
                 e.column()
             )
         })?;
+        if let Some(c) = v.get("cursor").filter(|c| !c.is_null()) {
+            wire::check_cursor(&inst.id, c)?;
+            self.set_cursor(&inst.id, c.clone());
+        }
         cache().insert(inst.id.clone(), v.clone());
         Ok(v)
+    }
+
+    fn set_cursor(&self, id: &str, cursor: Value) {
+        let mut all = self.cursors.lock().unwrap_or_else(|e| e.into_inner());
+        all.insert(id.to_string(), cursor);
+    }
+
+    fn cursor_of(&self, id: &str) -> Option<Value> {
+        let all = self.cursors.lock().unwrap_or_else(|e| e.into_inner());
+        all.get(id).cloned()
     }
 
     /// A declarative plugin's call through its runner (spec §6.8): the prompt rendered with the

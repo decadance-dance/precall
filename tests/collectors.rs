@@ -155,6 +155,12 @@ impl W {
         git_in(&self.store(), &["rev-parse", "HEAD"])
     }
 
+    /// The store files changed since `from`: a forced run over unchanged sources moves only
+    /// the lock's settled times (spec §4.2).
+    fn store_changes(&self, from: &str) -> String {
+        git_in(&self.store(), &["diff", "--name-only", from.trim(), "HEAD"])
+    }
+
     /// `rrecall builtin <id> <entry>` with params as `RRECALL_PARAM_*`.
     fn builtin(&self, id: &str, entry: &str, params: &[(&str, &str)], stdin: &str) -> Out {
         let env: Vec<(String, &str)> = params
@@ -365,9 +371,9 @@ fn git_history_keeps_two_tags_of_one_commit_and_a_stream_tagged_on_its_merge_apa
     assert_eq!(o.code, 0, "{}", o.stderr);
     assert_eq!(done_pairs(&w), first);
     assert_eq!(
-        w.store_head(),
-        head,
-        "a forced run over unchanged history changes nothing"
+        w.store_changes(&head).trim(),
+        "rrecall.lock",
+        "a forced run over unchanged history changes no map file"
     );
 }
 
@@ -437,7 +443,7 @@ fn git_history_keeps_two_long_tags_with_one_cut_title_apart() {
     let o = w.raw(&["--project", "widget", "run", "--force"], None, &[]);
     assert_eq!(o.code, 0, "{}", o.stderr);
     assert_eq!(done_facts(&w), first);
-    assert_eq!(w.store_head(), head, "a forced run changes nothing");
+    assert_eq!(w.store_changes(&head).trim(), "rrecall.lock", "no map file");
 }
 
 #[test]
