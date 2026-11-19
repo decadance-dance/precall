@@ -404,7 +404,7 @@ fn the_guides_steps_install_enable_and_run_the_example_plugin() {
     w.enable();
 
     // The fake `claude` answers each call in turn: the collector, its resolve_prompt, then
-    // the three judges `init` enabled.
+    // the judges `init` enabled that check an `add`: `support` and `duplicate`, not `removal`.
     let src = format!(
         "meeting:{}/2026-10-06-weekly-sync.md#L6",
         w.notes().display()
@@ -426,7 +426,7 @@ fn the_guides_steps_install_enable_and_run_the_example_plugin() {
         2,
         json!({"texts": {&src: "- Ship the lantern exporter as a separate binary."}}),
     );
-    for n in 3..=5 {
+    for n in 3..=4 {
         write(
             n,
             json!({"verdicts": [{"key": "meeting-notes/exporter", "verdict": "accept", "reason": "backed"}]}),
@@ -439,7 +439,7 @@ fn the_guides_steps_install_enable_and_run_the_example_plugin() {
         "doctor: {}",
         o.stdout
     );
-    assert_eq!(calls(&w.agent()), 5);
+    assert_eq!(calls(&w.agent()), 4);
     let prompt = std::fs::read_to_string(w.agent().join("claude.stdin.1")).unwrap();
     assert!(
         prompt.contains("# Collector: meeting-notes")
@@ -456,7 +456,7 @@ fn the_guides_steps_install_enable_and_run_the_example_plugin() {
 
     // `min_interval = "1d"`: the same steps again the same day find nothing due.
     w.step(&home, &steps["run"]);
-    assert_eq!(calls(&w.agent()), 5);
+    assert_eq!(calls(&w.agent()), 4);
 }
 
 /// A plugin directory under the store's `plugins/` with `manifest` and one script.
