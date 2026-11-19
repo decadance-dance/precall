@@ -895,7 +895,9 @@ fn the_budget_stops_runner_calls_and_leaves_the_collector_unsettled() {
 #[test]
 fn a_runner_reports_the_model_that_goes_into_the_lock() {
     let w = W::new();
-    let c = json!({"output": {"proposals": [note_add()]}, "cost_usd": 0.1, "model": "fake-1"});
+    // Review round 1: what the runner reports reaches the tracked lock only redacted.
+    let model = ["fake-1 api_key=", "Zq3vK9mW2xR7tY5pL8nB"].concat();
+    let c = json!({"output": {"proposals": [note_add()]}, "cost_usd": 0.1, "model": model});
     let j = json!({"output": {"verdicts": [{"key": "writer/a", "verdict": "accept", "reason": "ok"}]}, "cost_usd": 0.1, "model": "fake-2"});
     w.config(&format!(
         "max_cost_usd = 5.0\n{}{}{}",
@@ -911,7 +913,10 @@ fn a_runner_reports_the_model_that_goes_into_the_lock() {
     assert!(w.map("layout").contains("queue"));
     let lock = w.lock();
     assert_eq!(lock["collectors"]["writer"]["runner"], "runner");
-    assert_eq!(lock["collectors"]["writer"]["model"], "fake-1");
+    assert_eq!(
+        lock["collectors"]["writer"]["model"],
+        "fake-1 api_key=[redacted:high-entropy-assignment]"
+    );
 }
 
 // ---- Hooks, the store lock, views, status, exits 4 (spec §6.6, §4.1, §2) ----
@@ -1342,4 +1347,48 @@ fn a_credential_a_plugin_prints_stays_out_of_the_run_dir_and_the_commit_message(
             "{name} holds a credential"
         );
     }
+}
+
+/// Review round 1: without the `secrets` check, a credential still reaches no tracked map file.
+#[test]
+fn without_the_secrets_check_the_map_gets_a_credential_redacted() {
+    let pw = ["Xk9mQ2vR7t", "Y5pL8nB4cD"].concat();
+    let mut a = add("a", "layout", "Queue");
+    a["body"] = json!(format!("DB_PASSWORD={pw}"));
+    let w = world(&props(&[a]));
+    w.run_code(&[], 0);
+    let map = w.map("layout");
+    assert!(
+        map.contains("DB_PASSWORD=[redacted:high-entropy-assignment]") && !map.contains(&pw),
+        "{map}"
+    );
+}
+
+/// Review round 1: a verdict reason is redacted whole before the report shortens it, so the
+/// cut cannot leave a credential too short to be found.
+#[test]
+fn a_reason_is_redacted_before_the_report_shortens_it() {
+    let tok = ["gh", "p_", "Zq3vK9mW2xR7tY5pL8nB4cD6fG1hJ0kAa2Ss"].concat();
+    let reason = format!("{} {tok}", "x".repeat(1980));
+    let verdicts = json!({"verdicts": [{"key": "repo/a", "verdict": "accept", "reason": reason}]});
+    let w = world(&props(&[add("a", "layout", "Queue")]));
+    w.config(&format!(
+        "{}{}",
+        w.inst(
+            "repo",
+            "col",
+            &format!("out = {}", q(&props(&[add("a", "layout", "Queue")])))
+        ),
+        w.inst(
+            "check",
+            "check",
+            &format!("out = {}", q(&verdicts.to_string()))
+        ),
+    ));
+    w.run_code(&[], 0);
+    let report = w.report();
+    assert!(
+        report.contains(" [redacted:") && !report.contains(&tok[..12]),
+        "{report}"
+    );
 }

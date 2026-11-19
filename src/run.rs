@@ -245,6 +245,8 @@ fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> 
 
 /// One line of text: whitespace collapsed, at most `max` characters.
 fn one_line(s: &str, max: usize) -> String {
+    // Redacted whole, before the cut: a cut credential is too short to be found.
+    let s = secrets::redact(s);
     let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
     match s.char_indices().nth(max) {
         Some((i, _)) => format!("{}...", &s[..i]),
@@ -856,7 +858,12 @@ impl Run {
         .with_context(|| format!("runner of plugin `{}`", caller.id))?;
         let ro = wire::decode_runner(&r.id, &out)?;
         self.budget.spend(&caller.id, ro.cost_usd);
-        Ok((ro.output.to_string(), r.id.clone(), ro.model))
+        // The model goes into the tracked lock (spec §6.3).
+        Ok((
+            ro.output.to_string(),
+            r.id.clone(),
+            secrets::redact(&ro.model),
+        ))
     }
 
     /// Steps 4 to 7 for one round's proposals.
@@ -1182,7 +1189,12 @@ impl Run {
             let list: Vec<String> = self
                 .unreachable
                 .iter()
-                .map(|(id, e)| format!("{id} ({})", one_line(e.lines().next().unwrap_or(""), 100)))
+                .map(|(id, e)| {
+                    format!(
+                        "{id} ({})",
+                        one_line(secrets::redact(e).lines().next().unwrap_or(""), 100)
+                    )
+                })
                 .collect();
             body.push(format!("unreachable: {}", list.join(", ")));
         }

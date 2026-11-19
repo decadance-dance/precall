@@ -7,7 +7,7 @@ use crate::wire::{self, Event, HookInput};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
 use std::fs::File;
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -69,15 +69,11 @@ fn run(
     let (mut out, mut err) = (unnamed(&out_path)?, unnamed(&err_path)?);
     let status = command(ctx, inst, &argv, &path, &out, &err)
         .and_then(|mut cmd| wait(&mut cmd, program, stdin, inst.timeout));
-    let (stdout, _) = keep(&mut out, &out_path)?;
-    let (_, stderr) = keep(&mut err, &err_path)?;
+    let stdout = keep(&mut out, &out_path, MAX_STDOUT)?;
+    keep(&mut err, &err_path, MAX_STDOUT)?;
     let status = status.map_err(|e| anyhow!("{e:#}; stderr in {}", err_path.display()))?;
     if !status.success() {
-        let last = stderr
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("");
+        let last = last_line(&mut err)?;
         bail!("{status}: {last} (stderr in {})", err_path.display());
     }
     let size = out.metadata()?.len();
@@ -168,22 +164,48 @@ fn unnamed(path: &Path) -> Result<File> {
     Ok(f)
 }
 
-/// Reads what the child wrote to `f` (at most [`MAX_STDOUT`] bytes, a larger log is cut and
-/// says so) and writes it to `path` with every credential redacted. Returns the bytes as read
-/// and the text as kept.
-fn keep(f: &mut File, path: &Path) -> Result<(Vec<u8>, String)> {
-    use std::io::{Read, Seek};
+/// Reads what the child wrote to `f` and writes it to `path` with every credential redacted;
+/// past `cap` bytes the log is cut and says so. Returns the bytes as read, at most `cap`.
+fn keep(f: &mut File, path: &Path, cap: u64) -> Result<Vec<u8>> {
+    f.seek(SeekFrom::Start(0))?;
     let mut bytes = Vec::new();
-    f.seek(std::io::SeekFrom::Start(0))?;
-    f.take(MAX_STDOUT + 1).read_to_end(&mut bytes)?;
+    f.take(cap + 1).read_to_end(&mut bytes)?;
+    let cut = bytes.len() as u64 > cap;
+    bytes.truncate(cap as usize);
     // limit: a log that is not UTF-8 is kept with replacement characters, so the scanner can
-    // read it; the plugin's answer itself is never changed.
+    // read it, and a credential that the cut splits keeps the fragment before the cut; the
+    // plugin's answer itself is never changed.
     let mut text = secrets::redact(&String::from_utf8_lossy(&bytes));
-    if bytes.len() as u64 > MAX_STDOUT {
-        text += &format!("\n[log cut at {MAX_STDOUT} bytes]\n");
+    if cut {
+        text += &format!("\n[log cut at {cap} bytes]\n");
     }
     std::fs::write(path, &text).with_context(|| format!("writing {}", path.display()))?;
-    Ok((bytes, text))
+    Ok(bytes)
+}
+
+/// How much of the end of stderr the error message's line is taken from.
+const TAIL: u64 = 64 << 10;
+
+/// The last non-blank line the child wrote to `f`, redacted, for the error message: read from
+/// the last [`TAIL`] bytes on their own, so a log cut by [`keep`] still names the plugin's own
+/// last line. A line that starts before the tail is not quoted, so no cut credential is.
+fn last_line(f: &mut File) -> Result<String> {
+    let from = f.metadata()?.len().saturating_sub(TAIL);
+    f.seek(SeekFrom::Start(from))?;
+    let mut bytes = Vec::new();
+    f.take(TAIL).read_to_end(&mut bytes)?;
+    let text = String::from_utf8_lossy(&bytes);
+    let whole = if from > 0 {
+        text.split_once('\n').map_or("", |(_, rest)| rest)
+    } else {
+        &text
+    };
+    Ok(secrets::redact(whole)
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .to_string())
 }
 
 /// The absolute path `program` (an expanded argv[0]) names, checked once and then spawned as
@@ -658,6 +680,28 @@ mod tests {
         std::fs::write(&path, content).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         w.instance("prs", "gh", "ok", "")
+    }
+
+    /// Review round 1: past the cap the log keeps exactly the cap and says so, and the error
+    /// line is still the plugin's own last line, redacted, not the cut marker.
+    #[test]
+    fn a_log_past_the_cap_keeps_the_cap_and_the_error_quotes_the_last_line() {
+        let w = World::new();
+        std::fs::create_dir_all(w.run_dir()).unwrap();
+        let path = w.run_dir().join("prs.collect.stderr");
+        let mut f = unnamed(&path).unwrap();
+        let tok = ["gh", "p_", "Zq3vK9mW2xR7tY5pL8nB4cD6fG1hJ0kAa2Ss"].concat();
+        let long = "y".repeat(TAIL as usize);
+        write!(f, "0123456789abcdefXYZ\n{long}\nboom: {tok}\n\n").unwrap();
+        assert_eq!(keep(&mut f, &path, 16).unwrap(), b"0123456789abcdef");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "0123456789abcdef\n[log cut at 16 bytes]\n"
+        );
+        assert_eq!(last_line(&mut f).unwrap(), "boom: [redacted:github-token]");
+        // A last line longer than the tail is not quoted, cut or whole.
+        write!(f, "{long}{tok}").unwrap();
+        assert_eq!(last_line(&mut f).unwrap(), "");
     }
 
     /// While the plugin runs, its logs have no name in the run dir; after it ends, a timeout

@@ -7,13 +7,10 @@
 //! a token it already read, so the time is linear in the text: a check runs over every
 //! proposal of a run before it answers (spec §6.5).
 
-/// The most characters a value or token is read for; real credentials are shorter.
 use std::ops::Range;
 
+/// The most characters a value or token is read for; real credentials are shorter.
 const WINDOW: usize = 256;
-
-/// How far a private key without an end line is redacted: more than an RSA-8192 PEM block.
-const KEY_SPAN: usize = 8 << 10;
 
 /// A token that starts with a fixed prefix at a word boundary and goes on with at least `min`
 /// characters of its alphabet (exactly `min` when `exact`, ended by a non-word character).
@@ -125,26 +122,44 @@ const SECRET_WORDS: [&str; 8] = [
 /// Words between a label and its separator in prose: `the deploy token is: ...`.
 const LINKING_WORDS: [&str; 3] = ["is", "was", "are"];
 
-/// One match: the bytes it covers and the pattern's name.
-type Hit = (Range<usize>, &'static str);
+/// The matches of one pattern, lazily and in text order (each starts at or after the one
+/// before), so a first-match query stops early and redaction merges them in one pass.
+type Spans<'a> = Box<dyn Iterator<Item = Range<usize>> + 'a>;
 
 /// The name of the first pattern `text` matches.
 pub fn find(text: &str) -> Option<&'static str> {
-    hits(text).first().map(|h| h.1)
+    let lower = text.to_ascii_lowercase();
+    detectors(text, &lower)
+        .into_iter()
+        .find_map(|(name, mut spans)| spans.next().map(|_| name))
 }
 
 /// `text` with every match replaced by `[redacted:<pattern>]`; overlapping matches leave one
-/// marker. What the core keeps of a plugin's output goes through this (spec §6.3).
+/// marker. What the core keeps of a plugin's output goes through this (spec §6.3). One pass:
+/// it merges the patterns' matches in text order and holds only the next one of each.
 pub fn redact(text: &str) -> String {
-    let mut hits = hits(text);
-    if hits.is_empty() {
-        return text.to_string();
-    }
-    // Stable: at one start the pattern tried first names the marker.
-    hits.sort_by_key(|h| (h.0.start, std::cmp::Reverse(h.0.end)));
+    let lower = text.to_ascii_lowercase();
+    let mut heads: Vec<(&'static str, Spans, Option<Range<usize>>)> = detectors(text, &lower)
+        .into_iter()
+        .map(|(name, mut spans)| {
+            let next = spans.next();
+            (name, spans, next)
+        })
+        .collect();
     let mut out = String::with_capacity(text.len());
     let mut at = 0;
-    for (r, name) in hits {
+    // The match that starts first; at one start the longest, then the pattern tried first.
+    while let Some(k) = heads
+        .iter()
+        .enumerate()
+        .filter_map(|(k, h)| h.2.as_ref().map(|r| (k, r.start, std::cmp::Reverse(r.end))))
+        .min_by_key(|&(_, start, end)| (start, end))
+        .map(|(k, _, _)| k)
+    {
+        let (name, spans, head) = &mut heads[k];
+        let Some(r) = std::mem::replace(head, spans.next()) else {
+            break;
+        };
         if r.start >= at {
             out += &text[at..r.start];
             out += &format!("[redacted:{name}]");
@@ -155,41 +170,51 @@ pub fn redact(text: &str) -> String {
     out
 }
 
-/// Every match, pattern by pattern in the order [`find`] tries them.
-fn hits(text: &str) -> Vec<Hit> {
-    let mut out = Vec::new();
-    prefixed(text, &mut out);
-    slack_webhook(text, &mut out);
-    jwt(text, &mut out);
-    private_key(text, &mut out);
-    password_in_url(text, &mut out);
-    bearer(text, &mut out);
-    assignment(text, &mut out);
-    out
-}
-
-/// The tokens of [`PREFIXED`], prefix included.
-fn prefixed(text: &str, out: &mut Vec<Hit>) {
-    let b = text.as_bytes();
+/// Every pattern with its matches, in the order [`find`] tries them. `lower` is `text` in ASCII
+/// lower case.
+fn detectors<'a>(text: &'a str, lower: &'a str) -> Vec<(&'static str, Spans<'a>)> {
+    let mut d: Vec<(&'static str, Spans<'a>)> = Vec::new();
     for p in PREFIXED {
         for prefix in p.prefixes {
-            for (i, _) in text.match_indices(prefix) {
-                if i > 0 && word(b[i - 1]) {
-                    continue;
-                }
-                let start = i + prefix.len();
-                let tok = &b[start..start + run(b, start, p.alphabet, WINDOW)];
-                let ok = if p.exact {
-                    tok.len() == p.min && b.get(start + p.min).is_none_or(|c| !word(*c))
-                } else {
-                    tok.len() >= p.min && shaped(tok)
-                };
-                if ok {
-                    out.push((i..start + tok.len(), p.name));
-                }
-            }
+            d.push((p.name, Box::new(prefixed(text, p, prefix))));
         }
     }
+    d.push(("slack-webhook", Box::new(slack_webhook(text))));
+    d.push(("jwt", Box::new(jwt(text))));
+    d.push(("private-key", Box::new(private_key(text))));
+    d.push(("password-in-url", Box::new(password_in_url(text))));
+    for word in ["Bearer ", "bearer "] {
+        d.push(("bearer-token", Box::new(bearer(text, word))));
+    }
+    for word in SECRET_WORDS {
+        d.push((
+            "high-entropy-assignment",
+            Box::new(assignment(text, lower, word)),
+        ));
+    }
+    d
+}
+
+/// The tokens of one prefix of [`PREFIXED`], prefix included.
+fn prefixed<'a>(
+    text: &'a str,
+    p: &'static Prefixed,
+    prefix: &'static str,
+) -> impl Iterator<Item = Range<usize>> + 'a {
+    let b = text.as_bytes();
+    text.match_indices(prefix).filter_map(move |(i, _)| {
+        if i > 0 && word(b[i - 1]) {
+            return None;
+        }
+        let start = i + prefix.len();
+        let n = run(b, start, p.alphabet, WINDOW);
+        let ok = if p.exact {
+            n == p.min && b.get(start + p.min).is_none_or(|c| !word(*c))
+        } else {
+            n >= p.min && shaped(&b[start..start + n])
+        };
+        ok.then_some(i..start + n)
+    })
 }
 
 /// How many bytes from `start` on belong to `alphabet`, counting at most `cap`.
@@ -207,9 +232,9 @@ fn shaped(tok: &[u8]) -> bool {
 }
 
 /// `hooks.slack.com/services/T<team>/B<bot>/<secret>`, the whole path.
-fn slack_webhook(text: &str, out: &mut Vec<Hit>) {
+fn slack_webhook(text: &str) -> impl Iterator<Item = Range<usize>> + '_ {
     let b = text.as_bytes();
-    let path_end = |mut at: usize| {
+    let path_end = move |mut at: usize| {
         for (lead, min) in [(Some(b'T'), 2), (Some(b'B'), 2), (None, 16)] {
             if lead.is_some_and(|l| b.get(at) != Some(&l)) {
                 return None;
@@ -228,113 +253,156 @@ fn slack_webhook(text: &str, out: &mut Vec<Hit>) {
         }
         Some(at)
     };
-    for (i, m) in text.match_indices("hooks.slack.com/services/") {
-        if let Some(end) = path_end(i + m.len()) {
-            out.push((i..end, "slack-webhook"));
-        }
-    }
+    text.match_indices("hooks.slack.com/services/")
+        .filter_map(move |(i, m)| path_end(i + m.len()).map(|end| i..end))
 }
 
 /// Three dot-separated base64url segments of at least 10 characters, the first two starting
 /// with `eyJ` (a JSON object). One pass over the maximal segments, each read once and never
 /// capped: a token with many claims has a long payload.
-fn jwt(text: &str, out: &mut Vec<Hit>) {
+fn jwt(text: &str) -> impl Iterator<Item = Range<usize>> + '_ {
     let b = text.as_bytes();
     // The last two segments seen, as (start, end), while each followed the one before by a
     // single `.`.
     let mut chain: Vec<(usize, usize)> = Vec::with_capacity(2);
     let mut i = 0;
-    while i < b.len() {
-        if !word(b[i]) {
-            i += 1;
-            continue;
-        }
-        let start = i;
-        while i < b.len() && word(b[i]) {
-            i += 1;
-        }
-        let joined = chain
-            .last()
-            .is_some_and(|&(_, end)| end + 1 == start && b[end] == b'.');
-        if !joined {
-            chain.clear();
-        }
-        let long = i - start >= 10;
-        let object = b[start..i].starts_with(b"eyJ");
-        match chain.len() {
-            2 if long => {
-                out.push((chain[0].0..i, "jwt"));
+    std::iter::from_fn(move || {
+        while i < b.len() {
+            if !word(b[i]) {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < b.len() && word(b[i]) {
+                i += 1;
+            }
+            let joined = chain
+                .last()
+                .is_some_and(|&(_, end)| end + 1 == start && b[end] == b'.');
+            if !joined {
                 chain.clear();
             }
-            0 | 1 if long && object => chain.push((start, i)),
-            _ => {
-                chain.clear();
-                if long && object {
-                    chain.push((start, i));
+            let long = i - start >= 10;
+            let object = b[start..i].starts_with(b"eyJ");
+            match chain.len() {
+                2 if long => {
+                    let found = chain[0].0..i;
+                    chain.clear();
+                    return Some(found);
+                }
+                0 | 1 if long && object => chain.push((start, i)),
+                _ => {
+                    chain.clear();
+                    if long && object {
+                        chain.push((start, i));
+                    }
                 }
             }
         }
-    }
+        None
+    })
 }
 
-/// A PEM or PGP armor line that opens a private key, through its `-----END ...-----` line, or
-/// for [`KEY_SPAN`] bytes when none follows: what comes after the header is the key, and a
-/// header alone (a title cut short in a report) does not take the rest of the text with it.
-fn private_key(text: &str, out: &mut Vec<Hit>) {
+/// A PEM or PGP armor line that opens a private key, and its armor: through the
+/// `-----END <same label>-----` line when only armor lines (`Name: value` headers, blank lines,
+/// base64 lines) come between; else the header and the base64 lines of at least 16 characters
+/// right after it. Text that is not armor (the next log line, another block's end) stays.
+fn private_key(text: &str) -> impl Iterator<Item = Range<usize>> + '_ {
     let mut done = 0;
-    // Once no end line follows, none follows a later header either: search no more, so many
-    // headers without one stay linear.
-    let mut ends = true;
-    for (i, m) in text.match_indices("-----BEGIN ") {
+    text.match_indices("-----BEGIN ").filter_map(move |(i, m)| {
         if i < done {
-            continue;
+            return None;
         }
-        let label: String = text[i + m.len()..].chars().take(64).collect();
-        let opens = label
-            .split("-----")
-            .next()
-            .is_some_and(|l| l.contains("PRIVATE KEY") && !l.contains('\n'));
-        if !opens {
-            continue;
+        let from = i + m.len();
+        let b = &text.as_bytes()[from..];
+        let close = (0..b.len().min(64)).find(|&k| b[k..].starts_with(b"-----"))?;
+        let label = &text[from..from + close];
+        if !label.contains("PRIVATE KEY") || label.contains(['\n', '\r', '\\']) {
+            return None;
         }
-        let end = ends
-            .then(|| text[i..].find("-----END "))
-            .flatten()
-            .map(|e| i + e + "-----END ".len())
-            .and_then(|from| text[from..].find("-----").map(|f| from + f + 5))
-            .unwrap_or_else(|| {
-                ends = false;
-                let mut end = text.len().min(i + KEY_SPAN);
-                while !text.is_char_boundary(end) {
-                    end += 1;
-                }
-                end
-            });
-        out.push((i..end, "private-key"));
+        let end = armor_end(text, from + close + 5, label);
         done = end;
+        Some(i..end)
+    })
+}
+
+/// Where the armor that starts at `at`, right after a `-----BEGIN <label>-----` line, ends
+/// (see [`private_key`]). Line breaks are real or escaped as in a JSON log (`\n`, `\r\n`).
+/// Every byte is read once: an armor ends at the first byte that is not armor.
+fn armor_end(text: &str, mut at: usize, label: &str) -> usize {
+    let b = text.as_bytes();
+    let base64 = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'=');
+    let name = |c: u8| c.is_ascii_alphanumeric() || c == b'-';
+    let mut taken = at;
+    let mut plain = true;
+    while let Some(n) = line_break(b, at) {
+        at += n;
+        let rest = &text[at..];
+        if let Some(tail) = rest.strip_prefix("-----END ") {
+            if tail
+                .strip_prefix(label)
+                .is_some_and(|t| t.starts_with("-----"))
+            {
+                return at + "-----END ".len() + label.len() + 5;
+            }
+            break;
+        }
+        let len = run(b, at, base64, usize::MAX);
+        if line_break(b, at + len).is_some() {
+            if len > 0 && len < 16 {
+                plain = false;
+            }
+            if plain && len > 0 {
+                taken = at + len;
+            }
+            at += len;
+            continue;
+        }
+        // A `Name: value` header line, before the base64 lines.
+        let k = run(b, at, name, 64);
+        if k > 0 && rest[k..].starts_with(": ") {
+            let value = at + k + 2;
+            let mut j = value;
+            while j < b.len() && j - value < WINDOW && line_break(b, j).is_none() {
+                j += 1;
+            }
+            if line_break(b, j).is_none() {
+                break;
+            }
+            plain = false;
+            at = j;
+            continue;
+        }
+        break;
     }
+    taken
+}
+
+/// The length of the line break at `at`: `\n`, `\r\n`, or one escaped as in JSON.
+fn line_break(b: &[u8], at: usize) -> Option<usize> {
+    let rest = b.get(at..)?;
+    [&b"\r\n"[..], b"\n", b"\\r\\n", b"\\n"]
+        .iter()
+        .find(|nl| rest.starts_with(nl))
+        .map(|nl| nl.len())
 }
 
 /// `scheme://user:password@host` with a password that is not a placeholder; the match is the
-/// password. The authority ends at the next `/`, so two candidates never share a byte.
-fn password_in_url(text: &str, out: &mut Vec<Hit>) {
-    for (i, m) in text.match_indices("://") {
+/// password. The authority ends at the first byte that cannot be inside a URL literal (space,
+/// quote, `\`, `<`, `>`, `)`) or ends the authority (`/`, `?`, `#`), so it never reaches into
+/// the next field of a JSON log, and two candidates never share a byte.
+fn password_in_url(text: &str) -> impl Iterator<Item = Range<usize>> + '_ {
+    text.match_indices("://").filter_map(move |(i, m)| {
         let at = i + m.len();
         let authority = text[at..]
-            .split(|c: char| c.is_whitespace() || matches!(c, '/' | '?' | '#'))
+            .split(|c: char| c.is_whitespace() || "/?#\"'`\\<>)".contains(c))
             .next()
             .unwrap_or_default();
-        let Some((userinfo, _host)) = authority.rsplit_once('@') else {
-            continue;
-        };
-        let Some(colon) = userinfo.find(':') else {
-            continue;
-        };
+        let (userinfo, _host) = authority.rsplit_once('@')?;
+        let colon = userinfo.find(':')?;
         let pw = &userinfo[colon + 1..];
-        if !pw.is_empty() && !placeholder(pw) {
-            out.push((at + colon + 1..at + userinfo.len(), "password-in-url"));
-        }
-    }
+        (!pw.is_empty() && !placeholder(pw)).then_some(at + colon + 1..at + userinfo.len())
+    })
 }
 
 /// Template syntax (`${X}`, `<x>`, `{x}`, `[x]`, `%X%`), a mask (`***`) or one repeated
@@ -346,27 +414,28 @@ fn placeholder(v: &str) -> bool {
         || v.bytes().all(|b| b == v.as_bytes()[0])
 }
 
-/// `Bearer <token>` with a random-looking token; the match is the token.
-fn bearer(text: &str, out: &mut Vec<Hit>) {
-    for (i, m) in text
-        .match_indices("Bearer ")
-        .chain(text.match_indices("bearer "))
-    {
-        if let Some(v) = value_at(text, i + m.len()).filter(|v| random(v)) {
-            out.push((span(text, v), "bearer-token"));
-        }
-    }
+/// `Bearer <token>` (as spelled by `word`) with a random-looking token; the match is the
+/// token.
+fn bearer<'a>(text: &'a str, word: &'static str) -> impl Iterator<Item = Range<usize>> + 'a {
+    text.match_indices(word).filter_map(move |(i, m)| {
+        value_at(text, i + m.len())
+            .filter(|v| random(v))
+            .map(|v| span(text, v))
+    })
 }
 
-/// A secret-named label right before a `=` or `:` (`DB_PASSWORD=...`, `api_key: "..."`, or in
-/// prose `the deploy token is: ...`) and a random-looking literal after it, which is the
-/// match. Only the label counts: in `the token parser landed in commit: <sha>` the label is
-/// `commit`. The scan starts at each secret word, so separators with no label near them cost
-/// nothing.
-fn assignment(text: &str, out: &mut Vec<Hit>) {
-    let lower = text.to_ascii_lowercase();
+/// A label with the secret word `w` right before a `=` or `:` (`DB_PASSWORD=...`,
+/// `api_key: "..."`, or in prose `the deploy token is: ...`) and a random-looking literal after
+/// it, which is the match. Only the label counts: in `the token parser landed in commit: <sha>`
+/// the label is `commit`. The scan starts at each secret word, so separators with no label near
+/// them cost nothing.
+fn assignment<'a>(
+    text: &'a str,
+    lower: &'a str,
+    w: &'static str,
+) -> impl Iterator<Item = Range<usize>> + 'a {
     let b = lower.as_bytes();
-    let value = |i: usize, w: &str| {
+    lower.match_indices(w).filter_map(move |(i, _)| {
         // The rest of the label word, bounded: a longer word is no label.
         let mut at = i + w.len();
         let n = run(b, at, label_char, 33);
@@ -391,15 +460,10 @@ fn assignment(text: &str, out: &mut Vec<Hit>) {
         }
         at += 1;
         at += run(b, at, |c| matches!(c, b'=' | b'>'), 1);
-        value_at(text, at).filter(|v| random(v))
-    };
-    for w in SECRET_WORDS {
-        for (i, _) in lower.match_indices(w) {
-            if let Some(v) = value(i, w) {
-                out.push((span(text, v), "high-entropy-assignment"));
-            }
-        }
-    }
+        value_at(text, at)
+            .filter(|v| random(v))
+            .map(|v| span(text, v))
+    })
 }
 
 /// Where `sub`, a slice of `text`, lies in it.
@@ -604,15 +668,45 @@ mod tests {
                 "x [redacted:private-key] y".to_string(),
             ),
             (
-                "key block without an end line",
+                "key header and a short line",
                 j(&["x -----BEGIN RSA ", "PRIVATE KEY-----\nMIIE y"]),
-                "x [redacted:private-key]".to_string(),
+                "x [redacted:private-key]\nMIIE y".to_string(),
             ),
             (
-                "key header without an end line, then more text",
+                "key header and text on its line",
                 j(&["x -----BEGIN RSA ", "PRIVATE KEY----- ", &"y".repeat(9000), " tail"]),
-                // The header is 32 characters; the redaction stops 8 KiB after it starts.
-                format!("x [redacted:private-key]{} tail", "y".repeat(9032 - 8192)),
+                format!("x [redacted:private-key] {} tail", "y".repeat(9000)),
+            ),
+            // Review round 1: only the armor goes, never the diagnostics around it.
+            (
+                "key header, then the next log line",
+                j(&["Documentation: -----BEGIN RSA ", "PRIVATE KEY-----\nnext log line: migration completed"]),
+                "Documentation: [redacted:private-key]\nnext log line: migration completed".to_string(),
+            ),
+            (
+                "key body without an end line, then the next log line",
+                j(&["-----BEGIN RSA ", "PRIVATE KEY-----\nMIIEowIBAAKCAQEAx1mZ\nAAKCAQEAx1mZMIIEow==\nnext: done\n"]),
+                "[redacted:private-key]\nnext: done\n".to_string(),
+            ),
+            (
+                "an end line of another label",
+                j(&["-----BEGIN RSA ", "PRIVATE KEY-----\nMIIE\n-----END CERTIFICATE-----\nlater"]),
+                "[redacted:private-key]\nMIIE\n-----END CERTIFICATE-----\nlater".to_string(),
+            ),
+            (
+                "a JSON-escaped block with headers, between fields",
+                j(&[r#"{"body":"x -----BEGIN RSA "#, r#"PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\n\nMIIEowIBAAKCAQEAx1mZ\nAx==\n-----END RSA PRIVATE KEY----- y","next":"z"}"#]),
+                r#"{"body":"x [redacted:private-key] y","next":"z"}"#.to_string(),
+            ),
+            (
+                "url with a port, then a JSON field with an address",
+                r#"{"url":"https://example.org:8443","contact":"hello@example.org"}"#.to_string(),
+                r#"{"url":"https://example.org:8443","contact":"hello@example.org"}"#.to_string(),
+            ),
+            (
+                "url with a port in parentheses, then an address",
+                "(see https://example.org:8443) or write to hello@example.org".to_string(),
+                "(see https://example.org:8443) or write to hello@example.org".to_string(),
             ),
             (
                 "overlap",
@@ -684,16 +778,24 @@ mod tests {
             ("jwt", "eyJ."),
             ("jwt segments", "eyJabcdefghij."),
             ("key header", "-----BEGIN "),
+            // Review round 1: dense matches, each one redacted.
+            ("dense tokens", j(&["AK", "IAZQ3VK9MW2XR7TY5P "]).as_str()),
+            (
+                "dense assignments",
+                j(&["DB_PASSWORD=", "Zq3vK9mW2xR7tY5pL8nB "]).as_str(),
+            ),
+            ("dense key headers", "-----BEGIN RSA PRIVATE KEY-----\n"),
         ] {
             let text = unit.repeat(mib / unit.len());
             let started = std::time::Instant::now();
             let _ = find(&text);
-            let _ = redact(&text);
+            let red = redact(&text);
             let took = started.elapsed();
             assert!(
                 took < std::time::Duration::from_secs(3),
                 "case `{case}` took {took:?}"
             );
+            assert_eq!(find(&red), None, "case `{case}` after redaction");
         }
     }
 

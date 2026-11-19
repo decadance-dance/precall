@@ -4,6 +4,7 @@
 
 use crate::node::{self, Node};
 use crate::plugin::CORE_KINDS;
+use crate::secrets;
 use crate::store::Store;
 use crate::wire::{Op, Proposal, op_name};
 use serde::Serialize;
@@ -544,6 +545,21 @@ fn next_order(s: &Store, parent: &str) -> u32 {
         .unwrap_or(0)
 }
 
+/// `p` with the fields that become node fields redacted.
+fn scrub(p: &Proposal) -> Proposal {
+    let mut p = p.clone();
+    for v in [&mut p.title, &mut p.body, &mut p.date, &mut p.state]
+        .into_iter()
+        .flatten()
+    {
+        *v = secrets::redact(v);
+    }
+    for r in &mut p.sources {
+        *r = secrets::redact(r);
+    }
+    p
+}
+
 /// Applies one non-removal; `None` when the node did not change.
 fn apply_one(
     s: &mut Store,
@@ -551,7 +567,9 @@ fn apply_one(
     it: &Item,
     parent: Option<String>,
 ) -> Result<Option<Effect>, String> {
-    let p = &it.p;
+    // A map file is tracked: what a plugin wrote reaches it only through the scanner (spec
+    // §6.3). The `secrets` check rejects such a proposal before; this is the net without it.
+    let p = &scrub(&it.p);
     let effect = |change, id: &str, parent: &str, fields, s: &Store| Effect {
         change,
         id: id.to_string(),
