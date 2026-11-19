@@ -155,7 +155,7 @@ impl Manifest {
     }
 
     /// Whether a runner runs part of it (a `prompt` or `resolve_prompt`).
-    fn declarative(&self) -> bool {
+    pub fn declarative(&self) -> bool {
         match &self.spec {
             Spec::Collector(c) => c.prompt.is_some() || c.resolve_prompt.is_some(),
             Spec::Judge(j) => j.prompt.is_some(),

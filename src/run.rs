@@ -270,19 +270,10 @@ impl Run {
             .collect()
     }
 
-    /// The prompt file of a declarative collector or judge.
-    fn prompt_of(inst: &Instance) -> Option<&str> {
-        match &inst.plugin.manifest.spec {
-            Spec::Collector(c) => c.prompt.as_deref(),
-            Spec::Judge(j) => j.prompt.as_deref(),
-            _ => None,
-        }
-    }
-
     /// The runner and model a declarative plugin is configured with: its instance, else its
     /// manifest, else the user config (spec §6.1, §9).
     fn configured(&self, inst: &Instance) -> (Option<String>, Option<String>) {
-        if Self::prompt_of(inst).is_none() {
+        if !inst.plugin.manifest.declarative() {
             return (None, None);
         }
         let (runner, model) = match &inst.plugin.manifest.spec {
@@ -302,9 +293,8 @@ impl Run {
         )
     }
 
-    /// The runner instance a declarative plugin calls.
-    // limit: the runner must be an enabled `[[plugins]]` instance of kind `runner`; the built-in
-    // `claude` and `codex` runners come with #7.
+    /// The runner instance a declarative plugin calls: an enabled `[[plugins]]` instance of
+    /// kind `runner`, a built-in `claude` or `codex` included (spec §6.2, §6.8).
     fn runner_of(&self, inst: &Instance) -> Result<&Instance, String> {
         let name = self.configured(inst).0.ok_or_else(|| {
             format!(
@@ -321,6 +311,64 @@ impl Run {
                     inst.id
                 )
             })
+    }
+
+    /// Step 1 for `allowed_runners` (spec §6.8): every declarative plugin has a runner, every
+    /// listed runner is enabled, a collector runs on a runner it allows, and a declarative judge,
+    /// which sees every collector's proposals, runs on a runner each collector allows.
+    fn check_allowed(&self) -> Result<(), String> {
+        let restricted: Vec<(&Instance, &Vec<String>)> = self
+            .instances
+            .iter()
+            .filter_map(|c| c.allowed_runners.as_ref().map(|a| (c, a)))
+            .collect();
+        for (c, allowed) in &restricted {
+            if let Some(r) = allowed.iter().find(|r| {
+                !self
+                    .instances
+                    .iter()
+                    .any(|i| &&i.id == r && i.plugin.manifest.kind() == Kind::Runner)
+            }) {
+                return Err(format!(
+                    "plugin instance `{}`: `allowed_runners` names `{r}`, which is not an enabled runner instance",
+                    c.id
+                ));
+            }
+        }
+        for inst in self
+            .instances
+            .iter()
+            .filter(|i| i.plugin.manifest.declarative())
+        {
+            let runner = &self.runner_of(inst)?.id;
+            for (c, allowed) in &restricted {
+                if allowed.contains(runner) {
+                    continue;
+                }
+                if c.id == inst.id {
+                    return Err(format!(
+                        "plugin instance `{}` runs on the runner `{runner}`, which its `allowed_runners` does not list",
+                        c.id
+                    ));
+                }
+                if inst.plugin.manifest.kind() == Kind::Judge {
+                    return Err(format!(
+                        "judge `{}` runs on the runner `{runner}`, which collector `{}` does not allow (`allowed_runners`): \
+                         the judge could never accept its proposals",
+                        inst.id, c.id
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the collector that owns source `r`'s kind keeps its content from `runner`.
+    fn withheld(&self, runner: &str, r: &str) -> bool {
+        let kind = r.split_once(':').map_or("", |(k, _)| k);
+        plugin::owner(&self.instances, kind)
+            .and_then(|c| c.allowed_runners.as_ref())
+            .is_some_and(|a| !a.iter().any(|x| x == runner))
     }
 
     fn pipeline(&mut self, opts: &Opts) -> Result<Done> {
@@ -346,10 +394,8 @@ impl Run {
         }
         self.budget.cap = cfg.max_cost_usd;
         let old_lock = LockFile::load(&self.ctx.store).map_err(ab)?;
+        self.check_allowed().map_err(error::aborted)?;
         for inst in &self.instances {
-            if Self::prompt_of(inst).is_some() {
-                self.runner_of(inst).map_err(error::aborted)?;
-            }
             if matches!(
                 inst.plugin.manifest.kind(),
                 Kind::Collector | Kind::Check | Kind::Judge | Kind::View
@@ -780,12 +826,32 @@ impl Run {
             .filter(|b| c.scope.contains(&b.id))
             .cloned()
             .collect();
+        // A runner gets no node or proposal citing a source that does not allow it (spec §6.8).
+        let runner = match &c.prompt {
+            Some(_) => Some(self.runner_of(inst).map_err(CallFail::Error)?.id.clone()),
+            None => None,
+        };
+        let shown = |refs: &[String]| {
+            runner
+                .as_ref()
+                .is_none_or(|r| !refs.iter().any(|s| self.withheld(r, s)))
+        };
         let nodes = work
             .nodes
             .values()
             .filter(|n| n.parent.is_some() && c.scope.iter().any(|b| b == work.branch_of(&n.id)))
+            .filter(|n| shown(&n.sources))
             .cloned()
             .collect();
+        let mut rejections = rejections;
+        for v in rejections.iter_mut().flat_map(|r| r.verdicts.iter_mut()) {
+            if v.conflict_with
+                .as_ref()
+                .is_some_and(|p| !shown(&refs_of(p)))
+            {
+                v.conflict_with = None;
+            }
+        }
         let input = CollectorInput {
             project: self.ctx.project.clone(),
             run_id: self.ctx.run_id.clone(),
@@ -802,8 +868,8 @@ impl Run {
                 Ok((wire::decode_proposals(&inst.id, &out)?, None))
             }
             (None, Some(prompt)) => {
-                let schema = json!({"type": "object", "required": ["proposals"]});
                 let input = serde_json::to_value(&input).map_err(anyhow::Error::from)?;
+                let schema = wire::collect_schema();
                 let (out, runner, model) = self.via_runner(inst, prompt, &name, input, schema)?;
                 Ok((
                     wire::decode_proposals(&inst.id, &out)?,
@@ -814,8 +880,8 @@ impl Run {
         }
     }
 
-    /// A declarative plugin's call through its runner (spec §6.8): the cost cap first, then the
-    /// runner process with the caller's timeout. Returns the output as JSON text, the runner
+    /// A declarative plugin's call through its runner (spec §6.8): the prompt rendered with the
+    /// input and the schema, the cost cap, then the runner process with the caller's timeout. Returns the output as JSON text, the runner
     /// instance and the model it reported.
     fn via_runner(
         &self,
@@ -832,13 +898,11 @@ impl Run {
         let path = caller.plugin.dir.join(prompt);
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("plugin `{}`: reading {}", caller.id, path.display()))?;
-        // limit: `allowed_runners` (spec §6.8) is not enforced yet; #7 refuses a collector's nodes
-        // and resolved texts to any other runner.
         self.budget.reserve()?;
         let mut r = runner.clone();
         r.timeout = caller.timeout;
         let ri = RunnerInput {
-            prompt: text,
+            prompt: wire::render_prompt(&text, &input, &schema),
             input,
             output_schema: schema,
             model: self
@@ -1080,9 +1144,9 @@ impl Run {
         let out = match (cmd, prompt) {
             (Some(cmd), _) => process::call(&self.ctx, inst, &name, cmd, input)?,
             (None, Some(prompt)) => {
-                let schema = json!({"type": "object", "required": ["verdicts"]});
                 let input = serde_json::to_value(input).map_err(anyhow::Error::from)?;
-                self.via_runner(inst, prompt, &name, input, schema)?.0
+                self.via_runner(inst, prompt, &name, input, wire::judge_schema())?
+                    .0
             }
             (None, None) => return Err(CallFail::Error("neither `command` nor `prompt`".into())),
         };
@@ -1110,22 +1174,28 @@ impl Run {
             let Some(inst) = self.instances.iter().find(|i| i.id == owner).cloned() else {
                 continue;
             };
-            // limit: a `resolve_prompt` runs through a runner from #7; until then its references stay unresolved.
-            let Some(cmd) = Self::collector_spec(&inst).and_then(|c| c.resolve.clone()) else {
+            let Some(c) = Self::collector_spec(&inst) else {
                 continue;
             };
-            let got = process::call(
-                &self.ctx,
-                &inst,
-                &entry("resolve", round),
-                &cmd,
-                &ResolveInput { refs: refs.clone() },
-            )
-            .and_then(|out| wire::decode_texts(&inst.id, &out, &refs));
-            match got {
+            let (name, input) = (entry("resolve", round), ResolveInput { refs: refs.clone() });
+            let out = match (&c.resolve, &c.resolve_prompt) {
+                (Some(cmd), _) => {
+                    process::call(&self.ctx, &inst, &name, cmd, &input).map_err(CallFail::from)
+                }
+                (None, Some(prompt)) => serde_json::to_value(&input)
+                    .map_err(|e| CallFail::from(anyhow::Error::from(e)))
+                    .and_then(|v| self.via_runner(&inst, prompt, &name, v, wire::resolve_schema()))
+                    .map(|(out, _, _)| out),
+                (None, None) => continue,
+            };
+            match out.and_then(|o| Ok(wire::decode_texts(&inst.id, &o, &refs)?)) {
                 Ok(t) => texts.extend(t),
-                Err(e) => self.warnings.push(format!(
-                    "resolve of `{owner}` failed, its references stay unresolved: {e:#}"
+                Err(f) => self.warnings.push(format!(
+                    "resolve of `{owner}` failed, its references stay unresolved: {}",
+                    match f {
+                        CallFail::Budget => "budget".to_string(),
+                        CallFail::Error(e) => e,
+                    }
                 )),
             }
         }
