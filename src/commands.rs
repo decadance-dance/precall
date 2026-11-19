@@ -68,6 +68,8 @@ pub fn init(name_arg: Option<&str>, project_flag: Option<&str>) -> Result<String
         );
         found.push(format!("github {repo}"));
     }
+    cfg += "\n# The built-in checks (spec §10). Remove an entry to disable one; a plugin with its id replaces it.\n";
+    cfg += "[[plugins]]\nid = \"no-op\"\n\n[[plugins]]\nid = \"size-limits\"\n\n[[plugins]]\nid = \"secrets\"\n";
     let created = !path.exists();
     let made = std::fs::create_dir_all(&path)
         .with_context(|| format!("creating {}", path.display()))
@@ -294,6 +296,13 @@ prints one node with its sources (`--depth N` for more of its subtree, `--max-to
 `rrecall why <id>` shows when and why a node appeared. Add `--json` for JSON. \
 For the live status of a task, ask the tracker the map points to.
 ";
+
+/// `rrecall builtin <id>`: what a built-in plugin's argv runs (spec §6.2).
+pub fn builtin(id: &str) -> Result<String> {
+    let mut input = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut input).context("reading stdin")?;
+    crate::checks::run(id, &input).map(|out| out + "\n")
+}
 
 pub fn import(project: Option<&str>, file: &Path) -> Result<String> {
     let (_, path) = config::resolve_project(project)?;

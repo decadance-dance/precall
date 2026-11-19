@@ -199,10 +199,47 @@ pub fn load_manifest(dir: &Path) -> Result<Manifest> {
     }
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    parse_manifest(&text, dir, &path.display().to_string())
+}
+
+/// Parses and checks manifest `text`; `origin` names where it came from in errors.
+fn parse_manifest(text: &str, dir: &Path, origin: &str) -> Result<Manifest> {
     let raw: RawManifest =
-        toml::from_str(&text).with_context(|| format!("{} does not parse", path.display()))?;
+        toml::from_str(text).with_context(|| format!("{origin} does not parse"))?;
     let id = raw.id.clone();
-    check_manifest(raw, dir).map_err(|e| anyhow!("plugin `{id}` ({}): {e}", path.display()))
+    check_manifest(raw, dir).map_err(|e| anyhow!("plugin `{id}` ({origin}): {e}"))
+}
+
+/// The plugins shipped inside the binary, the first place of spec §6.2. Each runs the running
+/// binary itself (`rrecall builtin <id>`), by absolute path and never through `PATH`, in the
+/// binary's directory.
+pub fn builtin() -> Result<BTreeMap<String, Plugin>> {
+    // limit: in a test harness the running binary is the harness, which has no `builtin`
+    // subcommand; tests that run a built-in point its program at the rrecall binary.
+    let exe = std::env::current_exe().context("locating the rrecall binary")?;
+    let exe_text = exe
+        .to_str()
+        .with_context(|| format!("the rrecall binary's path {} is not UTF-8", exe.display()))?;
+    let dir = exe
+        .parent()
+        .context("the rrecall binary has no directory")?
+        .to_path_buf();
+    let mut found = BTreeMap::new();
+    for text in crate::checks::MANIFESTS {
+        let mut manifest = parse_manifest(text, &dir, "built in")?;
+        if let Spec::Check(c) = &mut manifest.spec {
+            c.command[0] = exe_text.to_string();
+        }
+        found.insert(
+            manifest.id.clone(),
+            Plugin {
+                manifest,
+                dir: dir.clone(),
+                builtin: true,
+            },
+        );
+    }
+    Ok(found)
 }
 
 fn check_manifest(raw: RawManifest, dir: &Path) -> Result<Manifest, String> {
@@ -468,6 +505,8 @@ fn fill(template: &str, params: &toml::Table) -> Result<String, String> {
 pub struct Plugin {
     pub manifest: Manifest,
     pub dir: PathBuf,
+    /// Shipped inside the binary (spec §6.2); `dir` is then the binary's directory.
+    pub builtin: bool,
 }
 
 /// The plugins under each of `places` (a subdirectory with a manifest is a plugin), by id; a
@@ -510,15 +549,22 @@ pub fn discover(places: &[PathBuf]) -> Result<BTreeMap<String, Plugin>> {
                     dir.display()
                 );
             }
-            here.insert(manifest.id.clone(), Plugin { manifest, dir });
+            here.insert(
+                manifest.id.clone(),
+                Plugin {
+                    manifest,
+                    dir,
+                    builtin: false,
+                },
+            );
         }
         found.extend(here);
     }
     Ok(found)
 }
 
-/// The plugin directories of spec §6.2 in load order, and the project's `.rrecall/plugins/`
-/// when it was skipped for want of trust.
+/// The plugin directories of spec §6.2 after the built-in place, in load order, and the
+/// project's `.rrecall/plugins/` when it was skipped for want of trust.
 #[derive(Debug)]
 pub struct Places {
     pub dirs: Vec<PathBuf>,
@@ -531,7 +577,7 @@ pub fn places(
     store: &Path,
     user_plugins: &Path,
 ) -> Result<Places> {
-    // limit: no plugin ships built in yet; the built-in checks and collectors add the first place.
+    // The first place, the plugins inside the binary, has no directory: see [`builtin`].
     let mut dirs = vec![user_plugins.to_path_buf()];
     let mut untrusted = None;
     if let Some(repo) = &cfg.repo {
@@ -639,9 +685,17 @@ impl Instance {
     /// it (a relative path against the plugin directory, a bare name on `PATH`).
     pub fn argv(&self, template: &[String]) -> Vec<String> {
         // Every placeholder was checked against the declared params when the manifest loaded.
+        // A built-in's program is the binary's path, set at run time, never a template.
         template
             .iter()
-            .map(|a| fill(a, &self.params).unwrap_or_else(|_| a.clone()))
+            .enumerate()
+            .map(|(i, a)| {
+                if i == 0 && self.plugin.builtin {
+                    a.clone()
+                } else {
+                    fill(a, &self.params).unwrap_or_else(|_| a.clone())
+                }
+            })
             .collect()
     }
 
@@ -794,7 +848,8 @@ pub fn load_with(store: &Path, user: &UserConfig, user_plugins: &Path) -> Result
     let loaded = (|| {
         let cfg = config::load_store_config(store)?;
         let places = places(user, &cfg, store, user_plugins)?;
-        let plugins = discover(&places.dirs)?;
+        let mut plugins = builtin()?;
+        plugins.extend(discover(&places.dirs)?);
         if let Some(d) = &places.untrusted
             && let Some(e) = cfg
                 .plugins
@@ -1380,6 +1435,78 @@ repo = ""
             instances(&cfg.plugins, &cat, &crate::config::default_branches()[..2]).unwrap_err()
         );
         assert!(e.contains("github") && e.contains("`done`"), "{e}");
+    }
+
+    #[test]
+    fn builtin_checks_load_first_and_a_plugin_with_their_id_replaces_them() {
+        let t = TempDir::new();
+        let (store, user) = (t.0.join("store"), t.0.join("user"));
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(
+            store.join(crate::config::STORE_CONFIG),
+            "[[plugins]]\nid = \"no-op\"\n\n[[plugins]]\nid = \"size-limits\"\nparams = { title_max = 60 }\n\n[[plugins]]\nid = \"secrets\"\n",
+        )
+        .unwrap();
+        let ins = load_with(&store, &UserConfig::default(), &user).unwrap();
+        let exe = std::env::current_exe().unwrap();
+        for (i, id) in ["no-op", "size-limits", "secrets"].iter().enumerate() {
+            let p = &ins[i].plugin;
+            assert!(p.builtin, "{id}");
+            assert_eq!(p.manifest.kind(), Kind::Check, "{id}");
+            let Spec::Check(c) = &p.manifest.spec else {
+                panic!("{id}: not a check")
+            };
+            // The running binary, never a `rrecall` found on PATH.
+            assert_eq!(
+                c.command,
+                [exe.to_string_lossy().as_ref(), "builtin", id],
+                "{id}"
+            );
+            assert_eq!(p.dir, exe.parent().unwrap(), "{id}");
+        }
+        assert_eq!(ins[1].params["title_max"].as_integer(), Some(60));
+        assert_eq!(ins[1].params["body_max"].as_integer(), Some(600));
+        // A user plugin with a built-in's id replaces it.
+        put(
+            &user,
+            "my-secrets",
+            &format!(
+                "{}[check]\ncommand = [\"./scan\"]\n",
+                head("secrets", "check")
+            ),
+        );
+        let ins = load_with(&store, &UserConfig::default(), &user).unwrap();
+        assert!(!ins[2].plugin.builtin);
+        assert_eq!(
+            ins[2].plugin.dir,
+            user.join("my-secrets").canonicalize().unwrap()
+        );
+        // Without its entry in the store config, a built-in does not run.
+        std::fs::write(store.join(crate::config::STORE_CONFIG), "").unwrap();
+        assert!(
+            load_with(&store, &UserConfig::default(), &user)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_builtin_program_path_is_never_expanded() {
+        let mut plugins = builtin().unwrap();
+        let p = plugins.get_mut("size-limits").unwrap();
+        // A binary installed under a directory whose name looks like a param.
+        let exe = "/opt/{title_max}/rrecall".to_string();
+        let Spec::Check(c) = &mut p.manifest.spec else {
+            panic!("not a check")
+        };
+        c.command[0] = exe.clone();
+        let command = c.command.clone();
+        let cfg: StoreConfig = toml::from_str("[[plugins]]\nid = \"size-limits\"\n").unwrap();
+        let ins = instances(&cfg.plugins, &plugins, &cfg.branches().unwrap()).unwrap();
+        assert_eq!(
+            ins[0].argv(&command),
+            [exe.as_str(), "builtin", "size-limits"]
+        );
     }
 
     #[test]

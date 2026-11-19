@@ -46,7 +46,7 @@ The project is resolved from `--project`, else `RRECALL_PROJECT`, else the curre
 
 `init` details:
 - The project name is the argument, else `--project` or `RRECALL_PROJECT`, else the basename of the `origin` URL without `.git`; with none of these it exits 2. A name is a plain directory name (no `/`, not starting with `.`). A store that already exists exits 2.
-- The store config names the sources found as the plugin instances `rrecall run` will use: inside a git repository, the top-level `repo = "<repo root>"` (§6.2) and `[[plugins]] id = "repo"`, `use = "files"`, `params = { path = "<repo root>", git = true, preset = "codebase" }`; for a GitHub `origin`, `[[plugins]] id = "github"`, `params = { repo = "<owner>/<name>" }`.
+- The store config names the sources found as the plugin instances `rrecall run` will use: inside a git repository, the top-level `repo = "<repo root>"` (§6.2) and `[[plugins]] id = "repo"`, `use = "files"`, `params = { path = "<repo root>", git = true, preset = "codebase" }`; for a GitHub `origin`, `[[plugins]] id = "github"`, `params = { repo = "<owner>/<name>" }`. After the sources, always, the built-in checks in this order: `[[plugins]] id = "no-op"`, `id = "size-limits"`, `id = "secrets"` (§10).
 - When the user config has no entry for the project, `init` appends `[[projects]]` with `name` and `remotes = ["<origin url>"]` (§9), so later commands resolve the project from inside the repo. It never edits an existing entry.
 
 `import` details: one node per line, `title | detail` split at the first `|` (the detail is optional), nesting by leading spaces (no tabs), blank lines skipped. A top-level line matches a branch by title or id, case-insensitively; a matching line may not carry a detail, because the branch's question comes from the config. A new top-level line becomes a branch whose question is its detail. Limits (§3.1) are checked before anything is written; a violation exits 2 naming the line.
@@ -158,7 +158,7 @@ The invariants are enforced by the core; no configuration turns them off. Plugin
 
 Plugin-level rules (built-in, can be disabled or replaced):
 
-- **No rewording.** The `no-op` check rejects an `update` whose title and body are identical to the current ones after normalizing whitespace, case and punctuation. The `support` judge rejects an `update` that keeps the meaning and changes only the wording, and an `add` or `update` its resolved source does not back.
+- **No rewording.** The `no-op` check rejects an `update` whose title and body are identical to the current ones after normalizing whitespace, case and punctuation, and that sets no other `date` or `state` and no source the node lacks; an update that changes only the state, the date or adds a source is a real change. Normalizing lowercases, turns punctuation (`. , ; : ! ? ' " ( ) [ ] { } - _ /`, dashes, ellipsis and typographic quotes) into spaces and collapses whitespace; symbols such as `+`, `#`, `%` and `$` stay, so `v1.2` and `v12` or `C++` and `C` differ. Every other op is accepted. The `support` judge rejects an `update` that keeps the meaning and changes only the wording, and an `add` or `update` its resolved source does not back.
 - **Duplicates.** The `duplicate` judge rejects an `add` that restates an existing node.
 
 Measured, not enforced:
@@ -222,7 +222,9 @@ Every manifest has exactly the table named by its `kind`; a table of another kin
 
 ### 6.2 Discovery and order
 
-Plugins come from four places, in this order: built-in (shipped inside the binary), the user directory `$XDG_CONFIG_HOME/rrecall/plugins/`, a project repository's `.rrecall/plugins/` once trusted (§6.7), and the store's `plugins/`. A later one with the same `id` replaces an earlier one. The store's config enables plugins and sets their params; the order of `[[plugins]]` entries there is the run order wherever order matters (§4.1 steps 5 and 7, §6.6).
+Plugins come from four places, in this order: built-in (shipped inside the binary, see below), the user directory `$XDG_CONFIG_HOME/rrecall/plugins/`, a project repository's `.rrecall/plugins/` once trusted (§6.7), and the store's `plugins/`. A later one with the same `id` replaces an earlier one. The store's config enables plugins and sets their params; the order of `[[plugins]]` entries there is the run order wherever order matters (§4.1 steps 5 and 7, §6.6).
+
+A built-in plugin is a manifest compiled into the binary and checked like any other. Its argv program is the running rrecall binary by absolute path, taken as it is (never one found on `PATH`, never `{param}`-expanded), with a hidden subcommand, `rrecall builtin <id>`, so it runs through the process contract (§6.3) and speaks its kind's protocol like any plugin; its directory (working directory and `RRECALL_PLUGIN_DIR`) is the binary's directory. It runs only when a `[[plugins]]` entry enables it: removing the entry disables it, and a plugin with the same `id` in a later place replaces it. The lock records a built-in plugin's source as `builtin`.
 
 The project's repository is the store config's top-level `repo` (an absolute path, written by `init`), so a run loads the same plugins from any directory; without it there is no third place. A place is a directory whose subdirectories holding `rrecall-plugin.toml` are plugins; two plugins with one `id` in the same place are an error.
 
@@ -319,7 +321,7 @@ Both configs reject unknown keys at every level.
 | collector | `git-history` | merged branches, tags, release notes | script, no model |
 | collector | `github` | PRs, issues, releases via `gh` | script fetches; prompt + runner proposes; resolve via `gh` |
 | collector | `slack` | named channels and DMs, through an agent that has Slack access | prompt + runner; `min_interval`; resolve through the runner |
-| check | `no-op`, `size-limits`, `secrets` | the diff | code |
+| check | `no-op`, `size-limits`, `secrets` | the diff | code, run as `rrecall builtin <id>` (§6.2). `no-op`: §5 "No rewording". `size-limits`: rejects an `add` or `update` whose `title` or `body` is longer than its param `title_max` (default 80) or `body_max` (default 600), counted in characters as §3.1 counts them; the reason gives the length and the limit. `secrets`: rejects a proposal whose `key`, `title`, `body`, `sources`, `evidence` or `reason` holds something that looks like a credential (common token and key formats with a mixed-case-and-digit body, private key blocks, a full Slack webhook path, a password in a URL, a bearer token, a random-looking literal right after a secret-named label such as `DB_PASSWORD=` or `the deploy token is:`); the reason names the field and the pattern, never the matched text, and no error message quotes an input value. Its scan is linear in the input. |
 | judge | `support`, `removal`, `duplicate` | the diff and the resolved sources | prompt + runner |
 | runner | `claude`, `codex` | | adapted from rreview |
 | view | `html` | the map | code |
