@@ -476,6 +476,23 @@ fn i2_a_collector_that_forgets_a_node_removes_nothing() {
 }
 
 #[test]
+fn the_report_keeps_accepting_verdicts_and_the_collector_gets_only_the_others() {
+    let w = world(&props(&[add("a", "layout", "Queue")]));
+    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    w.config(&format!(
+        "max_rounds = 2\n{cfg}{}",
+        w.inst("judge", "judge", "scenario = \"all\", out = \"reject\"")
+    ));
+    w.run_code(&[], 0);
+    let report = w.report();
+    assert!(report.contains("  - check accept: fake accept"), "{report}");
+    assert!(report.contains("  - judge reject: fake reject"), "{report}");
+    let back = &w.input("repo", 2)["rejections"][0]["verdicts"];
+    assert_eq!(back.as_array().unwrap().len(), 1, "{back}");
+    assert_eq!(back[0]["by"], "judge");
+}
+
+#[test]
 fn a_rewording_is_rejected_by_the_check_and_goes_back_to_its_collector() {
     let reword = json!({"key": "a", "op": "update", "id": "api", "title": "api", "body": "HTTP api", "sources": ["file:api.md"], "reason": "reworded"});
     let w = W::new();
@@ -1091,6 +1108,24 @@ fn a_view_failure_is_reported_and_keeps_the_exit_code() {
     assert_eq!(w.calls("view"), 1);
     assert!(w.report().contains("view `view` failed"), "{}", w.report());
     assert_eq!(w.input("view", 1)["project"], "kiln");
+    // With no proposals the warnings follow the summary; `run` and `status` still stop there.
+    let w = world(&props(&[]));
+    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    w.config(&format!(
+        "{cfg}{}",
+        w.inst("view", "view", "scenario = \"crash\"")
+    ));
+    let o = w.run_code(&[], 0);
+    assert!(!w.report().contains("## Proposals"), "{}", w.report());
+    assert!(w.report().contains("## Warnings"), "{}", w.report());
+    assert!(!o.stdout.contains("## Warnings"), "{}", o.stdout);
+    let o = w.cmd(&["status"]);
+    assert!(
+        o.stdout.contains("## Summary") || o.stdout.contains("- result"),
+        "{}",
+        o.stdout
+    );
+    assert!(!o.stdout.contains("## Warnings"), "{}", o.stdout);
 }
 
 #[test]

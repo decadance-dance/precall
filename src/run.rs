@@ -61,6 +61,7 @@ pub fn run(project: Option<&str>, opts: &Opts) -> Result<String> {
         models: BTreeMap::new(),
         warnings: Vec::new(),
         commit: None,
+        accepts: BTreeMap::new(),
     };
     let result = r.pipeline(opts);
     let report = r.report(&result, started.elapsed().as_secs_f64());
@@ -108,9 +109,12 @@ fn fresh_run_id(root: &Path, t0: u64) -> Result<String> {
     unreachable!("an unbounded range ends only by returning")
 }
 
-/// The report's head: the title and the `## Summary` section, without the proposals.
+/// The report's head: the title and the `## Summary` section, without the sections after it.
 pub fn summary_of(report: &str) -> &str {
-    report.split("\n## Proposals").next().unwrap_or(report)
+    let from = report.find("## Summary").map_or(0, |i| i + 1);
+    report[from..]
+        .find("\n## ")
+        .map_or(report, |i| &report[..from + i])
 }
 
 /// Why a plugin call gave no answer.
@@ -204,6 +208,8 @@ struct Run {
     models: BTreeMap<String, (String, String)>,
     warnings: Vec<String>,
     commit: Option<(String, String)>,
+    /// This round's `accept` verdicts by full key: for the report only, never sent back.
+    accepts: BTreeMap<String, Vec<RoundVerdict>>,
 }
 
 /// `name`, and `name.N` from round 2 on (spec §6.3 log names).
@@ -534,8 +540,11 @@ impl Run {
                     }
                     Outcome::Rejected
                 };
-                self.record(&it.by, round, it.p.clone(), vs, outcome);
+                let mut shown = vs;
+                shown.extend(self.accepts.remove(&key).unwrap_or_default());
+                self.record(&it.by, round, it.p.clone(), shown, outcome);
             }
+            self.accepts.clear();
             if last {
                 break;
             }
@@ -965,7 +974,8 @@ impl Run {
         })
     }
 
-    /// One check or judge over `live`: its verdicts that are not `accept` go to `verdicts`; a
+    /// One check or judge over `live`: its verdicts that are not `accept` go to `verdicts`, the
+    /// others to `accepts` for the report; a
     /// failure drops everything it was given (spec §6.5).
     #[allow(clippy::too_many_arguments)]
     fn judge_with(
@@ -1007,17 +1017,19 @@ impl Run {
         let kind = if texts.is_some() { "judge" } else { "check" };
         match self.verdicts_of(inst, round, &input, &keys) {
             Ok(vs) => {
-                for v in vs.into_iter().filter(|v| v.verdict != VerdictKind::Accept) {
-                    verdicts
-                        .entry(v.key.clone())
-                        .or_default()
-                        .push(RoundVerdict {
-                            by: inst.id.clone(),
-                            verdict: v.verdict,
-                            reason: v.reason,
-                            instruction: v.instruction,
-                            conflict_with: None,
-                        });
+                for v in vs {
+                    let to = if v.verdict == VerdictKind::Accept {
+                        &mut self.accepts
+                    } else {
+                        &mut *verdicts
+                    };
+                    to.entry(v.key.clone()).or_default().push(RoundVerdict {
+                        by: inst.id.clone(),
+                        verdict: v.verdict,
+                        reason: v.reason,
+                        instruction: v.instruction,
+                        conflict_with: None,
+                    });
                 }
             }
             Err(f) => {
