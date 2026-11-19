@@ -4,6 +4,6 @@
 
 A run sends collectors over the project's sources (the repo, its tracker, its chat, your notes), merges what they find into the current map, and lets checks and judges send rejected changes back for rework before anything is committed. The map lives in its own git repository, so every change shows in `git diff` and `git blame`. People read it as an HTML page; coding agents query one branch at a time (`rrecall show decisions`).
 
-Status: milestone 1: the map store and the query commands (`init`, `import`, `ls`, `show`, `find`, `why`, `recent`, `status`, `note`, `rm`, `agent-instructions`); the run pipeline comes next. The product and the plan: [docs/VISION.md](docs/VISION.md) and [docs/SPEC.md](docs/SPEC.md). Contributing: [AGENTS.md](AGENTS.md).
+Status: milestone 1: the map store and the query commands (`init`, `import`, `ls`, `show`, `find`, `why`, `recent`, `status`, `note`, `rm`, `agent-instructions`); milestone 2 in progress: the plugin protocol and `rrecall run`, tested with fake plugins (the built-in checks, collectors and runners come next). The product and the plan: [docs/VISION.md](docs/VISION.md) and [docs/SPEC.md](docs/SPEC.md). Contributing: [AGENTS.md](AGENTS.md).
 
 License: [Apache-2.0](LICENSE).

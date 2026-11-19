@@ -5,7 +5,7 @@
 use crate::node::{self, Node};
 use crate::plugin::CORE_KINDS;
 use crate::store::Store;
-use crate::wire::{Op, Proposal};
+use crate::wire::{Op, Proposal, op_name};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -90,16 +90,6 @@ fn allowed(op: Op) -> &'static [&'static str] {
         Op::Move => &["id", "parent", "parent_key", "sources"],
         Op::Remove => &["id", "evidence", "sources"],
         Op::AddSource => &["id", "sources"],
-    }
-}
-
-fn op_name(op: Op) -> &'static str {
-    match op {
-        Op::Add => "add",
-        Op::Update => "update",
-        Op::Move => "move",
-        Op::Remove => "remove",
-        Op::AddSource => "add_source",
     }
 }
 

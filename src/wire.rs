@@ -82,11 +82,15 @@ impl Proposal {
     }
 }
 
-fn op_name(op: Op) -> String {
-    serde_json::to_value(op)
-        .ok()
-        .and_then(|v| v.as_str().map(String::from))
-        .unwrap_or_default()
+/// The op as the wire spells it.
+pub fn op_name(op: Op) -> &'static str {
+    match op {
+        Op::Add => "add",
+        Op::Update => "update",
+        Op::Move => "move",
+        Op::Remove => "remove",
+        Op::AddSource => "add_source",
+    }
 }
 
 /// Collector input (spec §6.4).

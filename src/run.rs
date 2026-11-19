@@ -800,6 +800,8 @@ impl Run {
         let path = caller.plugin.dir.join(prompt);
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("plugin `{}`: reading {}", caller.id, path.display()))?;
+        // limit: `allowed_runners` (spec §6.8) is not enforced yet; #7 refuses a collector's nodes
+        // and resolved texts to any other runner.
         self.budget.reserve()?;
         let mut r = runner.clone();
         r.timeout = caller.timeout;
@@ -1310,11 +1312,7 @@ fn refs_of(p: &Proposal) -> Vec<String> {
 
 /// A proposal in a few words for the report.
 fn describe(p: &Proposal) -> String {
-    let op = serde_json::to_value(p.op)
-        .ok()
-        .and_then(|v| v.as_str().map(String::from))
-        .unwrap_or_default();
-    let mut s = op;
+    let mut s = wire::op_name(p.op).to_string();
     if let Some(id) = &p.id {
         s += &format!(" `{id}`");
     }
