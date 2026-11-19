@@ -745,7 +745,7 @@ fn github_fetches_prs_issues_and_releases_through_gh_with_bodies_cut() {
         "{argv}"
     );
     assert!(
-        argv.contains("api repos/acme/widget/releases?per_page=50"),
+        argv.contains("api repos/acme/widget/releases?per_page=50&page=1"),
         "{argv}"
     );
 }
@@ -788,6 +788,76 @@ fn github_fingerprint_follows_the_newest_update_and_release() {
         "{}",
     );
     assert!(o.stderr.contains("param `repo`"), "{}", o.stderr);
+}
+
+#[test]
+fn github_fingerprint_moves_when_a_release_note_is_edited() {
+    let w = W::new();
+    gh(
+        &w,
+        "api.issues",
+        &json!([{"number": 7, "updated_at": "2026-03-02T10:00:00Z"}]),
+    );
+    let release = |body: &str| json!([{"id": 1, "tag_name": "v1.0.0", "name": "One", "published_at": "2026-03-03T10:00:00Z", "draft": false, "prerelease": false, "body": body}]);
+    let fp = || {
+        let o = w.builtin("github", "fingerprint", &gh_params(), "{}");
+        assert_eq!(o.code, 0, "{}", o.stderr);
+        o.stdout
+    };
+    gh(&w, "api.releases", &release("Original"));
+    let first = fp();
+    gh(&w, "api.releases", &release("Corrected"));
+    assert_ne!(
+        fp(),
+        first,
+        "an edited release note makes the collector due"
+    );
+}
+
+#[test]
+fn github_pages_releases_past_100_newest_first() {
+    let w = W::new();
+    canned(&w);
+    let page = |from: u32, n: u32| -> Value {
+        (0..n)
+            .map(|i| {
+                let k = from - i;
+                json!({"tag_name": format!("r{k}"), "name": "", "published_at": "2026-03-03T10:00:00Z", "draft": k == 160, "prerelease": false, "body": ""})
+            })
+            .collect()
+    };
+    gh(&w, "api.releases.1", &page(160, 100));
+    gh(&w, "api.releases.2", &page(60, 60));
+    let o = w.builtin(
+        "github",
+        "fetch",
+        &[("repo", "acme/widget"), ("limit", "150")],
+        "{}",
+    );
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    let f: Value = serde_json::from_str(&o.stdout).unwrap();
+    let tags: Vec<&str> = f["releases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["tag"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        tags.len(),
+        150,
+        "the newest 150 releases, the draft left out"
+    );
+    assert_eq!(
+        (tags[0], tags[1], tags[149]),
+        ("r159", "r158", "r10"),
+        "in the API's order, newest first"
+    );
+    let argv = gh_argv(&w);
+    assert!(
+        argv.contains("api repos/acme/widget/releases?per_page=100&page=2"),
+        "{argv}"
+    );
+    assert!(!argv.contains("page=3"), "{argv}");
 }
 
 #[test]

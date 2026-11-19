@@ -59,28 +59,52 @@ fn gh(args: &[&str]) -> Result<Value> {
     serde_json::from_str(&out).with_context(|| format!("gh {} printed no JSON", args[0]))
 }
 
-/// The most recently updated issue or pull request and the newest release: any change to
-/// what fetch reads moves one of them.
+/// The most recently updated issue or pull request, and a hash of the releases as fetch lists
+/// them: an edit to an issue or pull request moves its `updated_at`, but an edited release note
+/// moves no date.
 fn fingerprint(repo: &str) -> Result<String> {
     let issues = gh(&[
         "api",
         &format!("repos/{repo}/issues?state=all&sort=updated&direction=desc&per_page=1"),
     ])?;
-    let releases = gh(&["api", &format!("repos/{repo}/releases?per_page=1")])?;
-    let first =
-        |v: &Value, keys: &[&str]| -> Value { keys.iter().map(|k| v[0][*k].clone()).collect() };
+    let newest: Value = ["number", "updated_at"]
+        .iter()
+        .map(|k| issues[0][*k].clone())
+        .collect();
+    let releases = Value::from(releases(repo, limit())?).to_string();
     Ok(format!(
-        "{}\n{}\n",
-        first(&issues, &["number", "updated_at"]),
-        first(&releases, &["id", "tag_name", "published_at"])
+        "{newest}\n{}\n",
+        crate::files::sha256_hex(releases.as_bytes())
     ))
 }
 
-fn limit() -> String {
-    match sources::param("limit") {
-        Value::Number(n) => n.to_string(),
-        _ => "100".into(),
+fn limit() -> u64 {
+    sources::param("limit").as_u64().unwrap_or(100)
+}
+
+/// The newest `limit` published releases, newest first as the API lists them, in the shape
+/// fetch gives them; GitHub caps a page at 100, so it pages until `limit` or a short page.
+fn releases(repo: &str, limit: u64) -> Result<Vec<Value>> {
+    let per_page = limit.clamp(1, 100);
+    let mut out = Vec::new();
+    for page in 1.. {
+        let got = gh(&[
+            "api",
+            &format!("repos/{repo}/releases?per_page={per_page}&page={page}"),
+        ])?;
+        let got = got.as_array().cloned().unwrap_or_default();
+        out.extend(got.iter().filter(|r| r["draft"] != true).map(|r| {
+            json!({
+                "tag": r["tag_name"], "name": r["name"], "published_at": r["published_at"],
+                "prerelease": r["prerelease"], "body": body(&r["body"]),
+            })
+        }));
+        if out.len() as u64 >= limit || (got.len() as u64) < per_page {
+            break;
+        }
     }
+    out.truncate(limit as usize);
+    Ok(out)
 }
 
 fn logins(v: &Value) -> Value {
@@ -111,6 +135,8 @@ fn by_number(mut items: Vec<Value>) -> Vec<Value> {
 /// The pull requests, issues and releases the agent proposes from, newest `limit` of each.
 fn fetch(repo: &str) -> Result<String> {
     let limit = limit();
+    let releases = releases(repo, limit)?;
+    let limit = limit.to_string();
     let list = |noun: &str, fields: &str| -> Result<Vec<Value>> {
         let v = gh(&[
             noun, "list", "-R", repo, "--state", "all", "--limit", &limit, "--json", fields,
@@ -146,22 +172,6 @@ fn fetch(repo: &str) -> Result<String> {
         })
     })
     .collect();
-    // limit: one page, and GitHub caps a page at 100, so a `limit` above 100 still gives
-    // at most 100 releases; paging is the upgrade if a project needs older ones.
-    let releases: Vec<Value> = gh(&["api", &format!("repos/{repo}/releases?per_page={limit}")])?
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|r| r["draft"] != true)
-        .map(|r| {
-            json!({
-                "tag": r["tag_name"], "name": r["name"], "published_at": r["published_at"],
-                "prerelease": r["prerelease"], "body": body(&r["body"]),
-            })
-        })
-        .collect();
-    let mut releases = releases;
-    releases.sort_by(|a, b| a["tag"].to_string().cmp(&b["tag"].to_string()));
     Ok(json!({
         "repo": repo,
         "cite": {

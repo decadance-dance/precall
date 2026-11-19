@@ -427,7 +427,7 @@ fn rel_of(root: &Path, path: &Path) -> String {
         .join("/")
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(bytes)
         .iter()

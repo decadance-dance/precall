@@ -4,13 +4,17 @@ You keep part of a project map up to date from a GitHub repository's pull reques
 
 ## What you read
 
-`fetched` in the input holds what to read: `pulls`, `issues` and `releases` of `repo`, newest first by number, each body cut to 2000 characters. Do not look for anything else. `cite` says how to cite each: `gh-pr:<repo>#<number>`, `gh-issue:<repo>#<number>`, `gh-release:<repo>@<tag>`.
+`fetched` in the input holds what to read, of `repo`, each body cut to 2000 characters:
+- `pulls` and `issues`: the most recently created of each, listed by `number` ascending, with state, author, labels and dates; issues also with `assignees`.
+- `releases`: the most recent published releases, newest first, with tag, name, date and release notes.
+
+That is all you get: no comments, no reviews, no discussions, and nothing older than these lists. Do not look for anything else. An item not in the lists may still exist; its absence is not evidence. `cite` says how to cite each: `gh-pr:<repo>#<number>`, `gh-issue:<repo>#<number>`, `gh-release:<repo>@<tag>`.
 
 `scope` in the input gives each branch you fill, with its question and granularity; follow the granularity exactly:
 - `done`: one node per release or finished stream of work (a feature, a migration), not per pull request: group the merged pull requests of one stream into one node and cite them all.
 - `blocked`: one node per open blocker or open question, from open issues and pull requests that say what they wait for.
-- `decisions`: one node per decision with its reason and date, from pull request and issue discussions that state a choice and why.
-- `people`: one node per person with their areas, from who authors, reviews and is assigned what.
+- `decisions`: one node per decision with its reason and date, from pull request, issue and release titles and bodies that state a choice and why.
+- `people`: one node per person with their areas, from who authors pull requests and issues and who is assigned issues.
 
 `nodes` in the input are the current nodes of those branches. `rejections`, from the second round on, are your proposals of the previous round with the verdicts on them: fix what a verdict asks, or drop the proposal.
 
