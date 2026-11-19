@@ -838,6 +838,32 @@ mod tests {
     }
 
     #[test]
+    fn merge_goes_in_plugin_order_then_by_key_and_ids_never_change() {
+        let (_t, s) = store(&[API]);
+        // `github` comes after `repo` in the config, so `repo`'s add takes the plain slug,
+        // although its key sorts last.
+        let late = item(
+            "github",
+            r#"{"key":"a","op":"add","parent":"layout","title":"Queue","body":"","sources":["gh-pr:o/r#4"]}"#,
+        );
+        let early = item(
+            "repo",
+            r#"{"key":"z","op":"add","parent":"layout","title":"Queue","body":"","sources":["file:q"]}"#,
+        );
+        let retitle = item(
+            "repo",
+            r#"{"key":"t","op":"update","id":"api","title":"Gateway","sources":["file:api.md"]}"#,
+        );
+        let out = apply(&s, &rules(), &[late, early, retitle], &BTreeMap::new());
+        assert_eq!(out.assigned["repo/z"], "queue");
+        assert_eq!(out.assigned["github/a"], "queue-2");
+        assert_eq!(
+            out.store.nodes["api"].title, "Gateway",
+            "I4: the id stays when the title changes"
+        );
+    }
+
+    #[test]
     fn update_keeps_bytes_when_nothing_changes_and_others_sources_in_place() {
         let (_t, s) = store(&[API, AUTH]);
         let same = item(
