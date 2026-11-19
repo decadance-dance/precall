@@ -301,7 +301,6 @@ fn stored_node<'a>(s: &'a Store, id: &str) -> Result<&'a Node> {
     Ok(n)
 }
 
-/// Sets or clears the user's note (spec §5 I7); the only field this command writes.
 /// `rrecall open`: renders the built-in html view and opens it with `RRECALL_BROWSER`, else the
 /// platform's opener (spec §2, §8). The page stays written when the opener fails.
 pub fn open_page(project: Option<&str>) -> Result<String> {
@@ -329,6 +328,7 @@ pub fn open_page(project: Option<&str>) -> Result<String> {
     Ok(format!("{}\n", page.display()))
 }
 
+/// Sets or clears the user's note (spec §5 I7); the only field this command writes.
 pub fn note(project: Option<&str>, id: &str, text: &str) -> Result<String> {
     let (mut s, _held) = open_locked(project)?;
     let new = (!text.is_empty()).then(|| text.to_string());

@@ -1515,11 +1515,10 @@ fn the_builtin_html_view_renders_after_the_commit_and_its_failure_is_only_report
     let page = std::fs::read_to_string(w.store().join("views/index.html")).unwrap();
     assert!(page.contains("<title>kiln"), "{}", &page[..200]);
     // The node the run added is changed since the last run, with the run commit in its history.
-    let (from, to) = (
-        page.find("{\"last_run\"").unwrap(),
-        page.rfind("}</script>").unwrap(),
-    );
-    let data: Value = serde_json::from_str(&page[from..=to]).unwrap();
+    let start = r#"<script type="application/json" id="map-data">"#;
+    let from = page.find(start).unwrap() + start.len();
+    let to = from + page[from..].find("</script>").unwrap();
+    let data: Value = serde_json::from_str(&page[from..to]).unwrap();
     let queue = data["nodes"]
         .as_array()
         .unwrap()
