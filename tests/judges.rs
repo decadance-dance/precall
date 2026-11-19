@@ -48,7 +48,10 @@ fn each_labeled_set_is_a_judge_input_with_one_label_per_proposal() {
         let mut texts = std::collections::BTreeMap::new();
         for j in &input.proposals {
             if let Some(id) = &j.proposal.id {
-                assert!(targets.insert(id.clone()), "{judge}: two proposals on `{id}`");
+                assert!(
+                    targets.insert(id.clone()),
+                    "{judge}: two proposals on `{id}`"
+                );
             }
             for (r, t) in j.sources.as_ref().unwrap() {
                 let first = texts.entry(r.clone()).or_insert(t.clone());
