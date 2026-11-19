@@ -219,6 +219,17 @@ fn write_files(root: &Path, changes: &[Change]) -> Result<()> {
     Ok(())
 }
 
+/// The context of a `write_and_commit` error raised after its commit landed: only the real
+/// index lags behind it.
+#[derive(Debug)]
+pub struct IndexLag(String);
+
+impl std::fmt::Display for IndexLag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Writes `changes` and commits exactly those paths: other files, staged or not, stay out of the
 /// commit. If the write or the commit fails, the files get their previous content back.
 pub fn write_and_commit(root: &Path, changes: &[Change], message: &str) -> Result<bool> {
@@ -255,12 +266,12 @@ pub fn write_and_commit(root: &Path, changes: &[Change], message: &str) -> Resul
         reset.extend(&paths);
         git_status(root, None, &reset).with_context(|| {
             let subject = message.lines().next().unwrap_or("");
-            format!(
+            IndexLag(format!(
                 "the commit `{subject}` landed, but updating the store's git index failed; \
                  once no other git process uses the store, run: git -C {} {}",
                 root.display(),
                 reset.join(" ")
-            )
+            ))
         })?;
     }
     Ok(committed)

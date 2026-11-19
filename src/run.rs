@@ -673,8 +673,21 @@ impl Run {
                 "",
             )?;
             // `false`: git found nothing to commit (its own normalization), so no commit to report.
-            let committed = store::write_and_commit(&self.ctx.store, &changes, &message)?;
-            self.drift = measured;
+            let written = store::write_and_commit(&self.ctx.store, &changes, &message);
+            let lag = written
+                .as_ref()
+                .is_err_and(|e| e.downcast_ref::<store::IndexLag>().is_some());
+            if written.is_ok() || lag {
+                self.drift = measured;
+            }
+            if lag {
+                // The commit landed: the report shows it beside the error.
+                if let Ok(h) = store::git(&self.ctx.store, &["rev-parse", "HEAD"]) {
+                    let subject = message.lines().next().unwrap_or("").to_string();
+                    self.commit = Some((h.trim().to_string(), subject));
+                }
+            }
+            let committed = written?;
             if committed {
                 let h = store::git(&self.ctx.store, &["rev-parse", "HEAD"])?
                     .trim()
@@ -766,11 +779,13 @@ impl Run {
             "runner": runner,
             "model": model,
         });
-        // The runner's effort counts like the model, but only when set: an unset one leaves
-        // every setup as it was before the param existed (spec §4.1).
+        // The built-in `claude` runner's effort counts like the model, but only when set: an
+        // unset one, or another runner's param of that name, leaves every setup as it was
+        // (spec §4.1).
         if let Some(e) = self
             .runner_of(inst)
             .ok()
+            .filter(|r| r.plugin.builtin && r.plugin.manifest.id == "claude")
             .and_then(|r| r.params.get("effort")?.as_str())
             .filter(|e| !e.is_empty())
         {
