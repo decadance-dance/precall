@@ -7,7 +7,7 @@ use crate::node::{BODY_MAX, TITLE_MAX};
 use crate::sources::{self, cut, git, is_sha};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 pub const MANIFEST: &str = r#"id = "git-history"
@@ -82,11 +82,12 @@ fn main_line(dir: &Path) -> String {
     }
 }
 
-/// Everything collect reads: the merges in the main line's history and its tags. A commit
-/// that is neither does not change it.
+/// Everything collect reads: the merges in the main line's history and its releases. A
+/// commit that is neither does not change it.
 fn fingerprint(dir: &Path, branch: &str) -> Result<String> {
     let merges = git(dir, &["log", "--merges", "--format=%H", branch, "--"])?;
-    let tags = tags(dir, branch)?;
+    let main = main_commits(dir, branch)?;
+    let tags = tags(dir, &main)?;
     Ok(format!("{merges}\n{tags:?}\n"))
 }
 
@@ -95,22 +96,36 @@ struct Tag {
     name: String,
     /// The tagged commit.
     commit: String,
-    /// Seconds since the epoch: tags of one day keep their order.
+    /// The commit's place on the main line, 0 the oldest.
+    place: usize,
+    /// Seconds since the epoch: tags of one commit keep their order.
     time: i64,
     date: String,
     /// The annotation without its signature; empty for a lightweight tag.
     notes: String,
 }
 
-/// The tags whose commit is on `branch`, oldest first (then by name), from one git call.
-fn tags(dir: &Path, branch: &str) -> Result<Vec<Tag>> {
-    let merged = format!("--merged={branch}");
+/// The main line's commits, the first-parent history of `branch`, each with its place, 0 the
+/// oldest.
+fn main_commits(dir: &Path, branch: &str) -> Result<HashMap<String, usize>> {
+    let list = git(dir, &["rev-list", "--first-parent", branch, "--"])?;
+    let shas: Vec<&str> = list.lines().collect();
+    let n = shas.len();
+    Ok(shas
+        .into_iter()
+        .enumerate()
+        .map(|(i, s)| (s.to_string(), n - 1 - i))
+        .collect())
+}
+
+/// The tags of commits on the main line, in main-line order (then by time and name), from
+/// one git call.
+fn tags(dir: &Path, main: &HashMap<String, usize>) -> Result<Vec<Tag>> {
     // Each record ends with NUL and a newline; notes hold newlines but never NUL.
     let list = git(
         dir,
         &[
             "for-each-ref",
-            &merged,
             "--format=%(refname:strip=2)%00%(objecttype)%00%(objectname)%00%(*objectname)%00%(creatordate:unix)%00%(creatordate:short)%00%(contents:subject)%0a%0a%(contents:body)%00",
             "refs/tags",
         ],
@@ -127,55 +142,93 @@ fn tags(dir: &Path, branch: &str) -> Result<Vec<Tag>> {
         } else {
             (obj, "")
         };
+        let Some(&place) = main.get(commit) else {
+            continue;
+        };
         tags.push(Tag {
             name: name.to_string(),
             commit: commit.to_string(),
+            place,
             time: unix.parse().unwrap_or(0),
             date: date.to_string(),
             notes: notes.to_string(),
         });
     }
-    tags.sort_by(|a, b| (a.time, &a.name).cmp(&(b.time, &b.name)));
+    tags.sort_by(|a, b| (a.place, a.time, &a.name).cmp(&(b.place, b.time, &b.name)));
     Ok(tags)
 }
 
-/// A merge commit: its id, date, the branch it merged and the rest of its message.
+/// A merge commit: its date, the branch it merged and the rest of its message.
 struct Merge {
-    sha: String,
     date: String,
     branch: String,
     body: String,
 }
 
-/// The merges in `range`, oldest first; `first_parent` keeps only those into the main line.
-fn merges(dir: &Path, range: &str, first_parent: bool) -> Result<Vec<Merge>> {
-    let mut args = vec![
-        "log",
-        "--merges",
-        "--reverse",
-        "-z",
-        "--format=%H%x00%cs%x00%B",
-    ];
-    if first_parent {
-        args.push("--first-parent");
+/// The history behind `branch`: every commit's parents and every merge, read in two git calls
+/// whatever the number of tags.
+struct History {
+    parents: HashMap<String, Vec<String>>,
+    /// Merge commits, oldest first.
+    merges: Vec<(String, Merge)>,
+}
+
+impl History {
+    fn read(dir: &Path, branch: &str) -> Result<History> {
+        let list = git(dir, &["rev-list", "--parents", branch, "--"])?;
+        let parents = list
+            .lines()
+            .filter_map(|l| {
+                let mut it = l.split(' ').map(String::from);
+                Some((it.next()?, it.collect()))
+            })
+            .collect();
+        let out = git(
+            dir,
+            &[
+                "log",
+                "--merges",
+                "--reverse",
+                "-z",
+                "--format=%H%x00%cs%x00%B",
+                branch,
+                "--",
+            ],
+        )?;
+        let f: Vec<&str> = out.split('\0').collect();
+        let merges = f
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|c| {
+                let msg = c[2].trim();
+                let (subject, rest) = msg.split_once('\n').unwrap_or((msg, ""));
+                (
+                    c[0].trim().to_string(),
+                    Merge {
+                        date: c[1].to_string(),
+                        branch: branch_of(subject),
+                        body: rest.trim().to_string(),
+                    },
+                )
+            })
+            .collect();
+        Ok(History { parents, merges })
     }
-    args.extend([range, "--"]);
-    let out = git(dir, &args)?;
-    let f: Vec<&str> = out.split('\0').collect();
-    Ok(f.as_chunks::<3>()
-        .0
-        .iter()
-        .map(|c| {
-            let msg = c[2].trim();
-            let (subject, rest) = msg.split_once('\n').unwrap_or((msg, ""));
-            Merge {
-                sha: c[0].trim().to_string(),
-                date: c[1].to_string(),
-                branch: branch_of(subject),
-                body: rest.trim().to_string(),
+
+    /// Marks every commit reachable from `from` that `seen` lacks, and returns them.
+    fn take(&self, from: &str, seen: &mut HashSet<String>) -> HashSet<String> {
+        let mut new = HashSet::new();
+        let mut stack = vec![from.to_string()];
+        while let Some(c) = stack.pop() {
+            if !seen.insert(c.clone()) {
+                continue;
             }
-        })
-        .collect())
+            stack.extend(self.parents.get(&c).into_iter().flatten().cloned());
+            new.insert(c);
+        }
+        new
+    }
 }
 
 /// The branch a merge commit's subject names, else the subject.
@@ -215,34 +268,36 @@ struct Want {
 }
 
 fn wanted(dir: &Path, repo: &str, branch: &str) -> Result<Vec<Want>> {
-    let tags = tags(dir, branch)?;
+    let main = main_commits(dir, branch)?;
+    let tags = tags(dir, &main)?;
+    let history = History::read(dir, branch)?;
     if tags.is_empty() {
-        return Ok(merges(dir, branch, true)?
-            .into_iter()
-            .map(|m| Want {
-                key: format!("merge:{}", &m.sha[..SHA_LEN]),
+        return Ok(history
+            .merges
+            .iter()
+            .filter(|(sha, _)| main.contains_key(sha))
+            .map(|(sha, m)| Want {
+                key: format!("merge:{}", &sha[..SHA_LEN]),
                 title: cut(&m.branch, TITLE_MAX),
                 body: cut(&m.body, BODY_MAX),
-                date: m.date,
-                source: reference(repo, &m.sha),
+                date: m.date.clone(),
+                source: reference(repo, sha),
                 reason: format!("merged {}", m.branch),
             })
             .collect());
     }
     let mut out = Vec::new();
-    let mut prev: Option<&Tag> = None;
+    // A release brings what its commit reaches and no earlier release did.
+    let mut seen = HashSet::new();
     for t in &tags {
+        let new = history.take(&t.commit, &mut seen);
         let body = if !t.notes.is_empty() {
             t.notes.clone()
         } else {
-            let range = match prev {
-                Some(p) => format!("{}..{}", p.commit, t.commit),
-                None => t.commit.clone(),
-            };
-            let mut names: Vec<String> = Vec::new();
-            for m in merges(dir, &range, false)? {
-                if !names.contains(&m.branch) {
-                    names.push(m.branch);
+            let mut names: Vec<&str> = Vec::new();
+            for (_, m) in history.merges.iter().filter(|(sha, _)| new.contains(sha)) {
+                if !names.contains(&m.branch.as_str()) {
+                    names.push(&m.branch);
                 }
             }
             if names.is_empty() {
@@ -259,7 +314,6 @@ fn wanted(dir: &Path, repo: &str, branch: &str) -> Result<Vec<Want>> {
             source: reference(repo, &t.commit),
             reason: format!("tagged {}", t.name),
         });
-        prev = Some(t);
     }
     Ok(out)
 }
@@ -272,27 +326,29 @@ fn collect(dir: &Path, repo: &str, branch: &str, input: &str) -> Result<String> 
     if input["round"].as_u64().unwrap_or(1) > 1 {
         return Ok(json!({"proposals": []}).to_string());
     }
-    // This collector's nodes by the reference they cite.
-    let mut ours: BTreeMap<&str, &Value> = BTreeMap::new();
+    // This collector's nodes by the reference they cite and their title, the tag or the
+    // branch: two tags of one commit, or a stream and the release tagged on its merge, cite
+    // one commit and stay two nodes.
+    let mut ours: BTreeMap<(&str, &str), &Value> = BTreeMap::new();
     for n in input["nodes"].as_array().into_iter().flatten() {
+        let title = n["title"].as_str().unwrap_or("");
         for s in n["sources"].as_array().into_iter().flatten() {
             if let Some(s) = s.as_str() {
-                ours.entry(s).or_insert(n);
+                ours.entry((s, title)).or_insert(n);
             }
         }
     }
     let mut proposals = Vec::new();
     for w in wanted(dir, repo, branch)? {
-        match ours.get(w.source.as_str()) {
+        match ours.get(&(w.source.as_str(), w.title.as_str())) {
             None => proposals.push(json!({
                 "key": w.key, "op": "add", "parent": "done", "title": w.title, "body": w.body,
                 "date": w.date, "state": "done", "sources": [w.source], "reason": w.reason,
             })),
-            Some(n) if n["title"] != w.title.as_str() || n["body"] != w.body.as_str() => proposals
-                .push(json!({
-                    "key": w.key, "op": "update", "id": n["id"], "title": w.title,
-                    "body": w.body, "sources": [w.source], "reason": w.reason,
-                })),
+            Some(n) if n["body"] != w.body.as_str() => proposals.push(json!({
+                "key": w.key, "op": "update", "id": n["id"], "title": w.title,
+                "body": w.body, "sources": [w.source], "reason": w.reason,
+            })),
             Some(_) => {}
         }
     }

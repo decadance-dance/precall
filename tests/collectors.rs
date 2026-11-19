@@ -326,6 +326,131 @@ fn git_history_orders_tags_of_one_day_by_time_not_by_name() {
     assert_eq!(body("v0.10.0"), "Merged: feature/b.");
 }
 
+fn done_pairs(w: &W) -> Vec<(String, String)> {
+    let mut v: Vec<(String, String)> = w
+        .map("done")
+        .iter()
+        .map(|n| {
+            (
+                n["id"].as_str().unwrap().into(),
+                n["title"].as_str().unwrap().into(),
+            )
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn git_history_keeps_two_tags_of_one_commit_and_a_stream_tagged_on_its_merge_apart() {
+    // Review round 1, finding 1.
+    let w = W::new();
+    w.commit_file("README.md", "widget\n", "init");
+    w.merge("feature/a", "Merge branch 'feature/a'");
+    history_config(&w);
+    w.run(0);
+    w.git(&["tag", "-a", "v1", "-m", "Alpha"]);
+    w.git(&["tag", "-a", "v2", "-m", "Beta"]);
+    w.run(0);
+    let first = done_pairs(&w);
+    assert_eq!(
+        first.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>(),
+        ["feature/a", "v1", "v2"]
+    );
+    let head = w.store_head();
+    let o = w.raw(&["--project", "widget", "run", "--force"], None, &[]);
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    assert_eq!(done_pairs(&w), first);
+    assert_eq!(
+        w.store_head(),
+        head,
+        "a forced run over unchanged history changes nothing"
+    );
+}
+
+#[test]
+fn git_history_takes_releases_only_from_the_main_lines_first_parents() {
+    // Review round 1, finding 2.
+    let w = W::new();
+    w.commit_file("README.md", "widget\n", "init");
+    w.git(&["checkout", "-q", "-b", "side"]);
+    w.commit_file("side.txt", "side", "side");
+    w.git(&["tag", "v-side"]);
+    w.git(&["checkout", "-q", "main"]);
+    w.git(&[
+        "merge",
+        "-q",
+        "--no-ff",
+        "-m",
+        "Merge branch 'side'",
+        "side",
+    ]);
+    w.git(&["tag", "v1"]);
+    let path = w.repo().to_string_lossy().into_owned();
+    let o = w.builtin(
+        "git-history",
+        "collect",
+        &[("path", &path), ("repo", "acme/widget"), ("branch", "")],
+        r#"{"round": 1, "nodes": []}"#,
+    );
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    assert!(!o.stdout.contains("v-side"), "{}", o.stdout);
+    assert!(o.stdout.contains("tag:v1"), "{}", o.stdout);
+}
+
+#[test]
+fn git_history_reads_history_in_a_fixed_number_of_git_calls() {
+    // Review round 1, finding 8: not one walk per tag.
+    let w = W::new();
+    w.commit_file("README.md", "widget\n", "init");
+    let real = std::env::var("PATH")
+        .unwrap()
+        .split(':')
+        .map(|d| Path::new(d).join("git"))
+        .find(|p| p.is_file())
+        .unwrap();
+    let wrap = w.root.join("gitwrap");
+    std::fs::create_dir_all(&wrap).unwrap();
+    let log = w.root.join("rec/git.log");
+    std::fs::write(
+        wrap.join("git"),
+        format!(
+            "#!/bin/sh\necho \"$1\" >> {}\nexec {} \"$@\"\n",
+            q(&log.to_string_lossy()),
+            q(&real.to_string_lossy())
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(wrap.join("git"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = w.repo().to_string_lossy().into_owned();
+    let calls = |w: &W| {
+        let _ = std::fs::remove_file(&log);
+        let env_path = format!("{}:{}", wrap.display(), w.path());
+        let o = w.raw(
+            &["builtin", "git-history", "collect"],
+            Some(r#"{"round": 1, "nodes": []}"#),
+            &[
+                ("PATH", &env_path),
+                ("RRECALL_PARAM_PATH", &path),
+                ("RRECALL_PARAM_REPO", "acme/widget"),
+            ],
+        );
+        assert_eq!(o.code, 0, "{}", o.stderr);
+        std::fs::read_to_string(&log).unwrap().lines().count()
+    };
+    w.git(&["tag", "v1"]);
+    let one = calls(&w);
+    for t in ["v2", "v3", "v4", "v5"] {
+        w.merge(
+            &format!("feature/{t}"),
+            &format!("Merge branch 'feature/{t}'"),
+        );
+        w.git(&["tag", t]);
+    }
+    assert_eq!(calls(&w), one);
+}
+
 #[test]
 fn git_history_resolves_its_own_commits_and_nothing_else() {
     let w = W::new();
