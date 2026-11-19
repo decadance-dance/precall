@@ -6,6 +6,28 @@ A run sends collectors over the project's sources (the repo, its tracker, its ch
 
 Status: milestone 1: the map store and the query commands (`init`, `import`, `ls`, `show`, `find`, `why`, `recent`, `status`, `note`, `rm`, `agent-instructions`); milestone 2: the plugin protocol, `rrecall run` and the built-in checks; milestone 3 in progress: the built-in `claude` and `codex` runners and declarative plugins (a manifest and a prompt), the built-in judges `support`, `removal` and `duplicate`, and the built-in collectors `files`, `git-history`, `github` and `slack`. A run collects incrementally: `files` in a git repository, `github` and `slack` read only what changed since their last settled run (`slack` never further back than `lookback_days`), while `git-history` and `files` outside git always read in full; `rrecall run --force` reads everything again and can commit a lock-only change. The product and the plan: [docs/VISION.md](docs/VISION.md) and [docs/SPEC.md](docs/SPEC.md). Writing a plugin for another source, check, judge, view or agent: [docs/plugins.md](docs/plugins.md), with an example in [examples/meeting-notes/](examples/meeting-notes/). Contributing: [AGENTS.md](AGENTS.md).
 
+## Install
+
+With Homebrew, on macOS or Linux:
+
+```sh
+brew install decadance-dance/tap/rrecall
+```
+
+With Cargo, the latest release (all versions: [Releases](https://github.com/decadance-dance/rrecall/releases)):
+
+```sh
+cargo install --git https://github.com/decadance-dance/rrecall --tag 0.1.0 --locked
+```
+
+With Cargo, the unreleased development branch `develop`:
+
+```sh
+cargo install --git https://github.com/decadance-dance/rrecall --locked
+```
+
+Each Release also carries prebuilt binaries for macOS (arm64, x86_64) and Linux (x86_64, arm64; static) with their `SHA256SUMS`. rrecall keeps the map in a git repository, so it needs `git`.
+
 ## Slack
 
 The built-in `slack` collector reads named channels and DMs through an agent that can reach Slack: the claude.ai Slack connector of your Claude login. Enable a second `claude` runner instance that loads the connector (`connectors = true`) and may use only the connector's read tools, and let the collector run on it. Add to the store's `rrecall.toml`, next to the `claude` instance `init` enables (`init` does not add these):
