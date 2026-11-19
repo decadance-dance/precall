@@ -84,6 +84,9 @@ pub struct CollectorSpec {
     pub command: Option<Vec<String>>,
     #[serde(default)]
     pub prompt: Option<String>,
+    /// Only with `prompt`: its JSON output reaches every collect input as `fetched` (§6.4).
+    #[serde(default)]
+    pub fetch: Option<Vec<String>>,
     #[serde(default)]
     pub resolve: Option<Vec<String>>,
     #[serde(default)]
@@ -169,6 +172,7 @@ impl Manifest {
             Spec::Collector(c) => vec![
                 ("fingerprint", c.fingerprint.as_ref()),
                 ("command", c.command.as_ref()),
+                ("fetch", c.fetch.as_ref()),
                 ("resolve", c.resolve.as_ref()),
             ],
             Spec::Judge(j) => vec![("command", j.command.as_ref())],
@@ -346,6 +350,9 @@ fn check_manifest(raw: RawManifest, dir: &Path) -> Result<Manifest, String> {
                 "prompt",
                 c.prompt.is_some(),
             )?;
+            if c.fetch.is_some() && c.prompt.is_none() {
+                return Err(format!("[{t}] `fetch` goes only with a prompt"));
+            }
             if c.resolve.is_some() && c.resolve_prompt.is_some() {
                 return Err(format!(
                     "[{t}] has both `resolve` and `resolve_prompt`; keep one"
@@ -1078,6 +1085,12 @@ repo = ""
                     "{base}fingerprint = [\"f\"]\ncommand = [\"./c\"]\nrunner = \"claude\""
                 )),
                 "runner",
+            ),
+            (
+                col(&format!(
+                    "{base}fingerprint = [\"f\"]\ncommand = [\"./c\"]\nfetch = [\"./f\"]"
+                )),
+                "fetch",
             ),
             (
                 col(&format!("{base}fingerprint = [\"f\"]\ncommand = []")),

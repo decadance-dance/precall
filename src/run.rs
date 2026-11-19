@@ -63,6 +63,7 @@ pub fn run(project: Option<&str>, opts: &Opts) -> Result<String> {
         warnings: Vec::new(),
         commit: None,
         accepts: BTreeMap::new(),
+        fetched: Default::default(),
     };
     let result = r.pipeline(opts);
     // Keys, titles, verdict reasons and error lines come from plugins (spec §4.4).
@@ -212,6 +213,8 @@ struct Run {
     commit: Option<(String, String)>,
     /// This round's `accept` verdicts by full key: for the report only, never sent back.
     accepts: BTreeMap<String, Vec<RoundVerdict>>,
+    /// Collector instance to its `fetch` output: fetched once per run, sent every round.
+    fetched: std::sync::Mutex<BTreeMap<String, Value>>,
 }
 
 /// `name`, and `name.N` from round 2 on (spec §6.3 log names).
@@ -862,6 +865,10 @@ impl Run {
                 }
             }
         }
+        let fetched = match &c.fetch {
+            Some(cmd) => Some(self.fetch(inst, cmd)?),
+            None => None,
+        };
         let input = CollectorInput {
             project: self.ctx.project.clone(),
             run_id: self.ctx.run_id.clone(),
@@ -870,6 +877,7 @@ impl Run {
             nodes,
             rejections,
             params: inst.params_json(),
+            fetched,
         };
         let name = entry("collect", round);
         match (&c.command, &c.prompt) {
@@ -888,6 +896,32 @@ impl Run {
             }
             (None, None) => Err(CallFail::Error("neither `command` nor `prompt`".into())),
         }
+    }
+
+    /// The output of a collector's `fetch` entrypoint (spec §6.1): run on the instance's first
+    /// collect of the run, then reused, so every round sees the same source data.
+    fn fetch(&self, inst: &Instance, cmd: &[String]) -> Result<Value, CallFail> {
+        let cache = || self.fetched.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(v) = cache().get(&inst.id) {
+            return Ok(v.clone());
+        }
+        let input = PluginInput {
+            project: self.ctx.project.clone(),
+            run_id: self.ctx.run_id.clone(),
+            params: inst.params_json(),
+        };
+        let out = process::call(&self.ctx, inst, "fetch", cmd, &input)?;
+        // Say where it fails, not what: the output is source text (spec §6.3).
+        let v = wire::parse_strict(&out).map_err(|e| {
+            anyhow::anyhow!(
+                "plugin `{}`: the fetch output does not decode at line {} column {}",
+                inst.id,
+                e.line(),
+                e.column()
+            )
+        })?;
+        cache().insert(inst.id.clone(), v.clone());
+        Ok(v)
     }
 
     /// A declarative plugin's call through its runner (spec §6.8): the prompt rendered with the
