@@ -1008,23 +1008,14 @@ impl Run {
         )?;
         // Step 7: checks over the diff, then judges over what every check accepted.
         let map_ids: Vec<String> = work.nodes.keys().cloned().collect();
-        // The branch each add or move lands in: its checks and judges see the nodes there.
-        let lands: BTreeMap<String, String> = valid
-            .iter()
-            .filter_map(|it| {
-                let id = match it.p.op {
-                    wire::Op::Add => pre.assigned.get(&it.key())?,
-                    wire::Op::Move => it.p.id.as_ref()?,
-                    _ => return None,
-                };
-                Some((it.key(), pre.store.branch_of(id).to_string()))
-            })
-            .collect();
+        // The branches each judge was shown an add or move under, by proposal key.
+        let mut judged_in: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for check in self.of_kind(Kind::Check) {
             let live: Vec<&Item> = valid
                 .iter()
                 .filter(|it| !dropped.contains_key(&it.key()))
                 .collect();
+            let lands = lands(work, rules, earlier, &live);
             self.judge_with(
                 &check,
                 round,
@@ -1050,6 +1041,13 @@ impl Run {
                     .copied()
                     .filter(|it| !dropped.contains_key(&it.key()))
                     .collect();
+                let lands = lands(work, rules, earlier, &live);
+                for (key, branch) in &lands {
+                    judged_in
+                        .entry(key.clone())
+                        .or_default()
+                        .insert(branch.clone());
+                }
                 self.judge_with(
                     &judge,
                     round,
@@ -1063,13 +1061,38 @@ impl Run {
                 );
             }
         }
-        let accepted: Vec<Item> = valid
+        let mut accepted: Vec<Item> = valid
             .iter()
             .filter(|it| !dropped.contains_key(&it.key()) && !verdicts.contains_key(&it.key()))
             .cloned()
             .collect();
-        // A parent or a child that was not accepted takes its dependants with it.
-        let post = merge::apply(work, rules, &accepted, earlier);
+        // A parent or a child that was not accepted takes its dependants with it, and an add or
+        // move must land in the branch every judge compared it with.
+        let post = loop {
+            let post = merge::apply(work, rules, &accepted, earlier);
+            let elsewhere: Vec<(String, String)> = accepted
+                .iter()
+                .filter_map(|it| {
+                    let shown = judged_in.get(&it.key())?;
+                    let now = landed(&post, it)?;
+                    let away = shown.iter().find(|b| **b != now)?;
+                    Some((
+                        it.key(),
+                        format!(
+                            "judged under `{away}` but lands under `{now}`, since a move it \
+                             depended on was not accepted: propose it again"
+                        ),
+                    ))
+                })
+                .collect();
+            if elsewhere.is_empty() {
+                break post;
+            }
+            accepted.retain(|it| !elsewhere.iter().any(|(k, _)| *k == it.key()));
+            for (key, reason) in elsewhere {
+                verdicts.entry(key).or_default().push(core(reason, None));
+            }
+        };
         for (key, reason) in &post.failed {
             verdicts
                 .entry(key.clone())
@@ -1505,6 +1528,31 @@ fn refs_of(p: &Proposal) -> Vec<String> {
         refs.push(e.clone());
     }
     refs
+}
+
+/// The branch an add or move of `live` lands in when exactly `live` is applied to `work`, by
+/// proposal key: what a check or judge given `live` sees the nodes of (spec §6.5 `nodes`).
+fn lands(
+    work: &Store,
+    rules: &Rules,
+    earlier: &BTreeMap<String, String>,
+    live: &[&Item],
+) -> BTreeMap<String, String> {
+    let batch: Vec<Item> = live.iter().map(|it| (*it).clone()).collect();
+    let applied = merge::apply(work, rules, &batch, earlier);
+    live.iter()
+        .filter_map(|it| Some((it.key(), landed(&applied, it)?)))
+        .collect()
+}
+
+/// The branch add or move `it` ended under in `applied`; `None` for other ops or one that failed.
+fn landed(applied: &merge::Applied, it: &Item) -> Option<String> {
+    let id = match it.p.op {
+        wire::Op::Add => applied.assigned.get(&it.key())?,
+        wire::Op::Move if !applied.failed.contains_key(&it.key()) => it.p.id.as_ref()?,
+        _ => return None,
+    };
+    Some(applied.store.branch_of(id).to_string())
 }
 
 /// A proposal in a few words for the report.

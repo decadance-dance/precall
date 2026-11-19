@@ -1874,3 +1874,67 @@ fn a_builtin_judge_accept_with_resolved_sources_enters_the_map() {
         "the resolved text reaches the agent"
     );
 }
+
+const PARENT: &str = r#"{"id":"parent","parent":"layout","title":"Parent","body":"","sources":["file:p.md"],"order":0}"#;
+const QUEUE: &str = r#"{"id":"queue","parent":"layout","title":"Queue","body":"","sources":["file:q.md"],"order":1}"#;
+
+/// `repo` moves `parent` to `how-it-works` and adds a second Queue under it; `check` answers
+/// `check_out` (verdicts for `repo/m` and `repo/q`), `judge` runs with `judge_params`.
+fn moving(check_out: &str, judge_params: &str) -> W {
+    let w = W::new();
+    w.seed("layout", &[PARENT, QUEUE]);
+    let m = json!({"key": "m", "op": "move", "id": "parent", "parent": "how-it-works", "sources": ["file:p.md"], "reason": "moved"});
+    let a = json!({"key": "q", "op": "add", "parent": "parent", "title": "Queue", "body": "", "sources": ["file:q2.md"], "reason": "found"});
+    w.config(&format!(
+        "max_rounds = 1\n{}{}{}{}",
+        w.inst("repo", "col", &format!("out = {}", q(&props(&[m, a])))),
+        w.inst("check", "check", &format!("out = {}", q(check_out))),
+        w.inst("judge", "judge", judge_params),
+        w.inst("dup", "judge", "scenario = \"all\", out = \"accept\""),
+    ));
+    w
+}
+
+fn verdicts(m: &str, q: &str) -> String {
+    json!({"verdicts": [
+        {"key": "repo/m", "verdict": m, "reason": format!("move {m}")},
+        {"key": "repo/q", "verdict": q, "reason": format!("add {q}")},
+    ]})
+    .to_string()
+}
+
+fn node_ids(input: &Value) -> Vec<String> {
+    input["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn a_judge_sees_the_branch_an_add_lands_in_without_a_move_a_check_rejected() {
+    let w = moving(
+        &verdicts("reject", "accept"),
+        "scenario = \"all\", out = \"accept\"",
+    );
+    w.run_code(&[], 0);
+    // The judges get only the add; it lands in `layout`, next to the Queue it may restate.
+    let input = w.input("dup", 1);
+    assert_eq!(input["proposals"].as_array().unwrap().len(), 1, "{input}");
+    assert_eq!(node_ids(&input), ["parent", "queue"]);
+}
+
+#[test]
+fn an_add_whose_branch_changed_after_it_was_judged_goes_back() {
+    // Both judges see the move and the add in `how-it-works`; `judge` then rejects the move,
+    // which would leave the add in `layout`, where no judge compared it with the nodes there.
+    let w = moving(
+        &verdicts("accept", "accept"),
+        &format!("out = {}", q(&verdicts("reject", "accept"))),
+    );
+    w.run_code(&[], 0);
+    assert!(node_ids(&w.input("dup", 1)).is_empty());
+    assert!(!w.map("layout").contains("queue-2"), "{}", w.map("layout"));
+    assert!(w.report().contains("judged under"), "{}", w.report());
+}
