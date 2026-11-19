@@ -8,7 +8,7 @@ Status: milestone 1: the map store and the query commands (`init`, `import`, `ls
 
 ## Slack
 
-The built-in `slack` collector reads named channels and DMs through an agent that can reach Slack: the claude.ai Slack connector of your Claude login. Enable a second `claude` runner instance that loads the connector (`connectors = true`, which loads your user settings without hooks, skills or slash commands) and may use only the connector's read tools, and let the collector run on it. Add to the store's `rrecall.toml`, next to the `claude` instance `init` enables (`init` does not add these):
+The built-in `slack` collector reads named channels and DMs through an agent that can reach Slack: the claude.ai Slack connector of your Claude login. Enable a second `claude` runner instance that loads the connector (`connectors = true`) and may use only the connector's read tools, and let the collector run on it. Add to the store's `rrecall.toml`, next to the `claude` instance `init` enables (`init` does not add these):
 
 ```toml
 [[plugins]]
@@ -33,6 +33,6 @@ allowed_runners = ["claude-slack", "claude"]
 params = { channels = ["eng-platform"], dms = [], lookback_days = 14 }
 ```
 
-It runs at most once a day (`min_interval = "1d"`) and proposes decisions, people and blockers, each citing `slack:<channel-id>/<ts>`. `allowed_runners` keeps Slack text on these two runner instances; judges can stay on the plain `claude` one. `connectors = true` also loads the permission rules of your Claude Code user settings: keep any rule that allows a Slack write tool (or `mcp__claude_ai_Slack` as a whole) out of them, or the collector's agent may use it.
+It runs at most once a day (`min_interval = "1d"`) and proposes decisions, people and blockers, each citing `slack:<channel-id>/<ts>`. `allowed_runners` keeps Slack text on these two runner instances; judges can stay on the plain `claude` one. `connectors = true` runs the agent in a fresh Claude Code config dir that keeps your login: your CLAUDE.md, settings, permission rules, hooks and local plugins stay out; what your account syncs from claude.ai (its connectors and synced plugins) still loads.
 
 License: [Apache-2.0](LICENSE).

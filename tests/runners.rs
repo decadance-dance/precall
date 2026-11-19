@@ -480,10 +480,15 @@ fn a_key_twice_in_codex_usage_fails_the_call() {
 }
 
 #[test]
-fn claude_with_connectors_loads_the_user_source_without_hooks_and_allows_only_named_tools() {
-    let t = T::new("ok", r#"{"texts":{"note:a":"A"}}"#);
+fn claude_with_connectors_runs_in_a_fresh_config_dir_without_hooks_and_allows_only_named_tools() {
+    let t = T::new("config", r#"{"texts":{"note:a":"A"}}"#);
     let tools =
         r#"["mcp__claude_ai_Slack__slack_read_channel","mcp__claude_ai_Slack__slack_read_thread"]"#;
+    // The user's own config dir, with a login file and a CLAUDE.md that must not load.
+    let real = t.root.join("home/real-config");
+    std::fs::create_dir_all(&real).unwrap();
+    std::fs::write(real.join(".credentials.json"), "{}").unwrap();
+    std::fs::write(real.join("CLAUDE.md"), "user instructions").unwrap();
     let o = t.call_with(
         "claude",
         "default",
@@ -492,6 +497,7 @@ fn claude_with_connectors_loads_the_user_source_without_hooks_and_allows_only_na
         &[
             ("RRECALL_PARAM_CONNECTORS", "true".into()),
             ("RRECALL_PARAM_TOOLS", tools.into()),
+            ("CLAUDE_CONFIG_DIR", real.to_string_lossy().into()),
         ],
     );
     assert!(o.ok, "{}", o.stderr);
@@ -506,8 +512,31 @@ fn claude_with_connectors_loads_the_user_source_without_hooks_and_allows_only_na
         "Read,Grep,Glob,mcp__claude_ai_Slack__slack_read_channel,mcp__claude_ai_Slack__slack_read_thread"
     );
     assert_eq!(after(&argv, "--permission-mode"), "dontAsk");
-    assert!(t.rec("claude.env.1").contains("ENABLE_TOOL_SEARCH=true\n"));
+    let env = t.rec("claude.env.1");
+    for want in [
+        "ENABLE_TOOL_SEARCH=true",
+        "MCP_CONNECTION_NONBLOCKING=false",
+        "CLAUDE_CODE_MCP_STARTUP_WAIT_MS=30000",
+        "CLAUDE_CODE_DISABLE_CLAUDE_MDS=1",
+    ] {
+        assert!(env.lines().any(|l| l == want), "{want}: {env}");
+    }
+    // A fresh owner-only config dir in the call's scratch dir; the login stays the user's.
+    let cwd = t.rec("claude.cwd.1");
+    let config = env
+        .lines()
+        .find_map(|l| l.strip_prefix("CLAUDE_CONFIG_DIR="))
+        .unwrap();
+    assert_eq!(config, format!("{}/claude-config", cwd.trim()), "{env}");
+    let secure = format!("CLAUDE_SECURESTORAGE_CONFIG_DIR={}", real.display());
+    assert!(env.lines().any(|l| l == secure), "{env}");
+    assert_eq!(
+        t.rec("claude.config"),
+        format!("drwx------\n{}\n", real.join(".credentials.json").display())
+    );
     t.no_scratch_left();
+    // Removing the call's dir removed the link, not the user's login.
+    assert!(real.join(".credentials.json").is_file());
 }
 
 #[test]

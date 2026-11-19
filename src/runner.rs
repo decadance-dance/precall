@@ -302,13 +302,45 @@ fn is_mcp_tool(name: &str) -> bool {
         .is_some_and(|(server, tool)| part(server) && part(tool))
 }
 
+/// A fresh owner-only config dir in the scratch dir, so none of the user's CLAUDE.md, settings,
+/// permission rules, hooks or local plugins and MCP servers load, while the login stays the
+/// user's, never copied: on macOS the keychain entry is named after
+/// `CLAUDE_SECURESTORAGE_CONFIG_DIR` (empty for the default `~/.claude` entry), elsewhere the
+/// login is the user's `.credentials.json`, linked in as the codex runner links `auth.json`.
+fn claude_config(dir: &Path) -> Result<Vec<(String, String)>> {
+    let user = std::env::var("CLAUDE_CONFIG_DIR")
+        .ok()
+        .filter(|d| !d.is_empty());
+    let real = match &user {
+        Some(d) => PathBuf::from(d),
+        None => PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join(".claude"),
+    };
+    let config = dir.join("claude-config");
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&config)
+        .with_context(|| format!("{}", config.display()))?;
+    let login = real.join(".credentials.json");
+    if login.is_file() {
+        std::os::unix::fs::symlink(&login, config.join(".credentials.json"))
+            .with_context(|| format!("{}", config.display()))?;
+    }
+    Ok(vec![
+        ("CLAUDE_CONFIG_DIR".into(), utf8(&config)?.into()),
+        (
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR".into(),
+            user.unwrap_or_default(),
+        ),
+    ])
+}
+
 /// `claude -p --safe-mode --output-format stream-json`, tools limited to reading, every other
 /// permission refused without a prompt nobody would answer, and the output schema enforced.
 /// `--safe-mode` drops the user's CLAUDE.md, skills, plugins, hooks and MCP servers.
 /// With `connectors` (spec §12): the claude.ai connectors load only from the user setting
-/// source, so that replaces `--safe-mode`, with skills, slash commands and hooks off and tool
-/// search on (else every connector's tool schemas fill each call); the user's CLAUDE.md,
-/// enabled plugins and their MCP servers load too.
+/// source, so that replaces `--safe-mode`, pointed at a fresh config dir ([`claude_config`]),
+/// with skills, slash commands, hooks and CLAUDE.md files off and tool search on (else every
+/// connector's tool schemas fill each call). What the account syncs still loads.
 fn claude_launch(input: &RunnerInput, dir: &Path, access: &Access) -> Result<Launch> {
     let mut args: Vec<String> = vec!["-p".into()];
     let mut env = vec![];
@@ -323,7 +355,16 @@ fn claude_launch(input: &RunnerInput, dir: &Path, access: &Access) -> Result<Lau
             ]
             .map(String::from),
         );
-        env.push(("ENABLE_TOOL_SEARCH".into(), "true".into()));
+        env.extend(claude_config(dir)?);
+        for (k, v) in [
+            ("ENABLE_TOOL_SEARCH", "true"),
+            // A fresh config dir has no MCP discovery cache: wait for the connectors.
+            ("MCP_CONNECTION_NONBLOCKING", "false"),
+            ("CLAUDE_CODE_MCP_STARTUP_WAIT_MS", "30000"),
+            ("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1"),
+        ] {
+            env.push((k.into(), v.into()));
+        }
     } else {
         args.push("--safe-mode".into());
     }

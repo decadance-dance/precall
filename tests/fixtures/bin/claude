@@ -5,7 +5,9 @@
 # answers the first turn, answers a `--resume` turn; result-sleep: answers, then hangs until
 # killed, answers a `--resume` turn; torn: prints one message's usage and half of the next
 # record, then hangs, answers a `--resume` turn; perms: records the modes of its working dir
-# and its stdout file to claude.perms, then answers; sleep-always: never answers) and `out`
+# and its stdout file to claude.perms, then answers; config: records the mode of
+# $CLAUDE_CONFIG_DIR and where its .credentials.json links to claude.config, then answers;
+# sleep-always: never answers) and `out`
 # (the structured output to print; `out.N`, when present, for call N). Each call N records its argv to claude.argv.N,
 # its stdin to claude.stdin.N, its environment to claude.env.N and its cwd to claude.cwd.N.
 d="$HOME/agent"
@@ -44,6 +46,7 @@ case "$(cat "$d/scenario")" in
             sleep 30 & wait
         fi ;;
     perms) ls -ld . turn1.stdout | cut -c1-10 > "$d/claude.perms"; answer 0.25 ;;
+    config) { ls -ld "$CLAUDE_CONFIG_DIR" | cut -c1-10; readlink "$CLAUDE_CONFIG_DIR/.credentials.json"; } > "$d/claude.config"; answer 0.25 ;;
     sleep-always) sleep 30 & echo $! > "$d/claude.pid.$n"; wait ;;
     *) echo "fake claude: unknown scenario" >&2; exit 64 ;;
 esac
