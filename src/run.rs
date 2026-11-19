@@ -8,6 +8,7 @@ use crate::lock::{self, CollectorLock, LockFile, PluginLock};
 use crate::merge::{self, Effect, Grant, Item, Rules};
 use crate::plugin::{self, Instance, Kind, Spec};
 use crate::process::{self, Ctx};
+use crate::secrets;
 use crate::store::{self, Store};
 use crate::wire::{
     self, CollectorInput, Event, JudgeInput, JudgeItem, PluginInput, Proposal, Rejection,
@@ -64,7 +65,8 @@ pub fn run(project: Option<&str>, opts: &Opts) -> Result<String> {
         accepts: BTreeMap::new(),
     };
     let result = r.pipeline(opts);
-    let report = r.report(&result, started.elapsed().as_secs_f64());
+    // Keys, titles, verdict reasons and error lines come from plugins (spec §4.4).
+    let report = secrets::redact(&r.report(&result, started.elapsed().as_secs_f64()));
     let path = r.ctx.run_dir.join("report.md");
     let written =
         std::fs::write(&path, &report).with_context(|| format!("writing {}", path.display()));
@@ -243,6 +245,8 @@ fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> 
 
 /// One line of text: whitespace collapsed, at most `max` characters.
 fn one_line(s: &str, max: usize) -> String {
+    // Redacted whole, before the cut: a cut credential is too short to be found.
+    let s = secrets::redact(s);
     let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
     match s.char_indices().nth(max) {
         Some((i, _)) => format!("{}...", &s[..i]),
@@ -633,7 +637,8 @@ impl Run {
         let mut hash: Option<String> = None;
         if !changes.is_empty() {
             let diff = merge::net(&base, &work, &effects);
-            let message = self.message(&diff);
+            // Tracked in the store: error lines quote a plugin's stderr (spec §4.3).
+            let message = secrets::redact(&self.message(&diff));
             self.hook(
                 Event::CommitBefore,
                 json!({"diff": diff, "message": message}),
@@ -853,7 +858,12 @@ impl Run {
         .with_context(|| format!("runner of plugin `{}`", caller.id))?;
         let ro = wire::decode_runner(&r.id, &out)?;
         self.budget.spend(&caller.id, ro.cost_usd);
-        Ok((ro.output.to_string(), r.id.clone(), ro.model))
+        // The model goes into the tracked lock (spec §6.3).
+        Ok((
+            ro.output.to_string(),
+            r.id.clone(),
+            secrets::redact(&ro.model),
+        ))
     }
 
     /// Steps 4 to 7 for one round's proposals.
@@ -1179,7 +1189,12 @@ impl Run {
             let list: Vec<String> = self
                 .unreachable
                 .iter()
-                .map(|(id, e)| format!("{id} ({})", one_line(e.lines().next().unwrap_or(""), 100)))
+                .map(|(id, e)| {
+                    format!(
+                        "{id} ({})",
+                        one_line(secrets::redact(e).lines().next().unwrap_or(""), 100)
+                    )
+                })
                 .collect();
             body.push(format!("unreachable: {}", list.join(", ")));
         }

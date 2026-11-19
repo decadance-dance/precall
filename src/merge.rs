@@ -4,6 +4,7 @@
 
 use crate::node::{self, Node};
 use crate::plugin::CORE_KINDS;
+use crate::secrets;
 use crate::store::Store;
 use crate::wire::{Op, Proposal, op_name};
 use serde::Serialize;
@@ -544,14 +545,47 @@ fn next_order(s: &Store, parent: &str) -> u32 {
         .unwrap_or(0)
 }
 
-/// Applies one non-removal; `None` when the node did not change.
+/// `p` with the fields that become node fields redacted.
+fn scrub(p: &Proposal) -> Proposal {
+    let mut p = p.clone();
+    for v in [&mut p.title, &mut p.body, &mut p.date, &mut p.state]
+        .into_iter()
+        .flatten()
+    {
+        *v = secrets::redact(v);
+    }
+    for r in &mut p.sources {
+        *r = secrets::redact(r);
+    }
+    p
+}
+
+/// Applies one non-removal; `None` when the node did not change. A map file is tracked: what a
+/// plugin wrote reaches it only through the scanner (spec §6.3); the `secrets` check rejects
+/// such a proposal before, this is the net without it. The proposal is validated on its own
+/// values first, so redaction cannot turn one that breaks a rule into one that passes; the
+/// node it stores is validated as well.
 fn apply_one(
     s: &mut Store,
     rules: &Rules,
     it: &Item,
     parent: Option<String>,
 ) -> Result<Option<Effect>, String> {
-    let p = &it.p;
+    let scrubbed = scrub(&it.p);
+    if scrubbed != it.p {
+        apply_as(&mut s.clone(), rules, it, &it.p, parent.clone())?;
+    }
+    apply_as(s, rules, it, &scrubbed, parent)
+}
+
+/// [`apply_one`] with `p` in place of the item's proposal.
+fn apply_as(
+    s: &mut Store,
+    rules: &Rules,
+    it: &Item,
+    p: &Proposal,
+    parent: Option<String>,
+) -> Result<Option<Effect>, String> {
     let effect = |change, id: &str, parent: &str, fields, s: &Store| Effect {
         change,
         id: id.to_string(),

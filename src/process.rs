@@ -2,11 +2,12 @@
 
 use crate::error;
 use crate::plugin::{Instance, Spec};
+use crate::secrets;
 use crate::wire::{self, Event, HookInput};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
 use std::fs::File;
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -28,9 +29,9 @@ const MAX_STDOUT: u64 = 64 << 20;
 
 /// Runs `template` (an argv of `inst`'s manifest) as a child process (spec §6.3): in the plugin
 /// directory, never through a shell, `input` as JSON on stdin, the `RRECALL_*` environment, and
-/// killed with everything it started at the instance's timeout. stdout and stderr go to
-/// `<run_dir>/<instance>.<entry>.stdout|stderr` (a later call with the same `entry` replaces
-/// them). Returns stdout of a run that exited 0.
+/// killed with everything it started at the instance's timeout. stdout and stderr are kept,
+/// redacted, as `<run_dir>/<instance>.<entry>.stdout|stderr` (a later call with the same
+/// `entry` replaces them). Returns stdout of a run that exited 0, as the plugin printed it.
 pub fn call(
     ctx: &Ctx,
     inst: &Instance,
@@ -39,24 +40,22 @@ pub fn call(
     input: &impl Serialize,
 ) -> Result<String> {
     run(ctx, inst, entry, template, input)
-        .and_then(|out| {
-            let bytes =
-                std::fs::read(&out).with_context(|| format!("reading {}", out.display()))?;
-            String::from_utf8(bytes).map_err(|_| anyhow!("output is not UTF-8"))
-        })
+        .and_then(|out| String::from_utf8(out).map_err(|_| anyhow!("output is not UTF-8")))
         .with_context(|| format!("plugin `{}` ({entry})", inst.id))
 }
 
-/// Runs the process and returns the path of its stdout, without reading it.
+/// Runs the process and returns its stdout. The child writes to files that have no name
+/// while it runs, so a credential it prints never sits in the run dir as printed, not even
+/// when rrecall dies; once it ends, only the redacted copies are written under the log names.
 fn run(
     ctx: &Ctx,
     inst: &Instance,
     entry: &str,
     template: &[String],
     input: &impl Serialize,
-) -> Result<PathBuf> {
+) -> Result<Vec<u8>> {
     let argv = inst.argv(template);
-    let (program, args) = argv.split_first().context("empty argv")?;
+    let program = argv.first().context("empty argv")?;
     let cwd = std::env::current_dir().context("reading the working directory")?;
     let path_var = std::env::var_os("PATH").unwrap_or_default();
     let path = resolve_program(program, &inst.plugin.dir, &path_var, &cwd)?;
@@ -67,17 +66,40 @@ fn run(
         .with_context(|| format!("creating {}", ctx.run_dir.display()))?;
     let log = |ext| ctx.run_dir.join(format!("{}.{entry}.{ext}", inst.id));
     let (out_path, err_path) = (log("stdout"), log("stderr"));
-    let mut cmd = Command::new(&path);
-    cmd.arg0(program)
-        .args(args)
+    let (mut out, mut err) = (unnamed(&out_path)?, unnamed(&err_path)?);
+    let status = command(ctx, inst, &argv, &path, &out, &err)
+        .and_then(|mut cmd| wait(&mut cmd, program, stdin, inst.timeout));
+    let stdout = keep(&mut out, &out_path, MAX_STDOUT)?;
+    keep(&mut err, &err_path, MAX_STDOUT)?;
+    let status = status.map_err(|e| anyhow!("{e:#}; stderr in {}", err_path.display()))?;
+    if !status.success() {
+        let last = last_line(&mut err)?;
+        bail!("{status}: {last} (stderr in {})", err_path.display());
+    }
+    let size = out.metadata()?.len();
+    if size > MAX_STDOUT {
+        bail!("printed {size} bytes, more than {MAX_STDOUT}");
+    }
+    Ok(stdout)
+}
+
+/// The child's command: in the plugin directory, its own process group, `out` and `err` as
+/// its stdout and stderr, and the `RRECALL_*` environment.
+fn command(
+    ctx: &Ctx,
+    inst: &Instance,
+    argv: &[String],
+    path: &Path,
+    out: &File,
+    err: &File,
+) -> Result<Command> {
+    let mut cmd = Command::new(path);
+    cmd.arg0(&argv[0])
+        .args(&argv[1..])
         .current_dir(&inst.plugin.dir)
         .stdin(Stdio::piped())
-        .stdout(
-            File::create(&out_path).with_context(|| format!("creating {}", out_path.display()))?,
-        )
-        .stderr(
-            File::create(&err_path).with_context(|| format!("creating {}", err_path.display()))?,
-        )
+        .stdout(out.try_clone()?)
+        .stderr(err.try_clone()?)
         .process_group(0);
     // A param the instance does not set must not leak in from rrecall's own environment.
     for (k, _) in std::env::vars_os() {
@@ -92,9 +114,20 @@ fn run(
     .env("RRECALL_PROJECT", &ctx.project)
     .env("RRECALL_STORE", &ctx.store)
     .env("RRECALL_PLUGIN_DIR", &inst.plugin.dir)
-    .env("RRECALL_STATE_DIR", &state)
+    .env("RRECALL_STATE_DIR", ctx.store.join("state").join(&inst.id))
     .env("RRECALL_RUN_ID", &ctx.run_id)
     .envs(inst.env_params());
+    Ok(cmd)
+}
+
+/// Starts `cmd`, writes `stdin` to it and waits until `timeout`, when it kills the child's
+/// process group.
+fn wait(
+    cmd: &mut Command,
+    program: &str,
+    stdin: Vec<u8>,
+    timeout: Duration,
+) -> Result<std::process::ExitStatus> {
     let mut child = cmd
         .spawn()
         .with_context(|| format!("cannot start `{program}`"))?;
@@ -103,36 +136,89 @@ fn run(
         std::thread::spawn(move || pipe.write_all(&stdin));
     }
     let started = Instant::now();
-    let status = loop {
+    loop {
         if let Some(status) = child.try_wait()? {
-            break status;
+            return Ok(status);
         }
-        if started.elapsed() >= inst.timeout {
+        if started.elapsed() >= timeout {
             let killed = kill_group(&mut child)
                 .map(|()| String::new())
                 .unwrap_or_else(|e| format!("; killing its process group failed: {e}"));
-            bail!(
-                "timed out after {:?}{killed}; stderr in {}",
-                inst.timeout,
-                err_path.display()
-            );
+            bail!("timed out after {timeout:?}{killed}");
         }
         std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A file opened at `path` and removed from it at once: the open handle (and the child's
+/// copy of it) still reads and writes it, and the OS frees it with the last handle.
+fn unnamed(path: &Path) -> Result<File> {
+    let f = File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .with_context(|| format!("creating {}", path.display()))?;
+    std::fs::remove_file(path).with_context(|| format!("removing {}", path.display()))?;
+    Ok(f)
+}
+
+/// Reads what the child wrote to `f` and writes it to `path` with every credential redacted;
+/// past `cap` bytes the log is cut and says so. Returns the bytes as read, at most `cap`.
+fn keep(f: &mut File, path: &Path, cap: u64) -> Result<Vec<u8>> {
+    f.seek(SeekFrom::Start(0))?;
+    let mut bytes = Vec::new();
+    f.take(cap + OVERLAP).read_to_end(&mut bytes)?;
+    let cut = bytes.len() as u64 > cap;
+    // limit: a log that is not UTF-8 is kept with replacement characters, so the scanner can
+    // read it, and then the cut lands near `cap`, not on it; the plugin's answer itself is
+    // never changed.
+    let text = String::from_utf8_lossy(&bytes);
+    let mut limit = text.len().min(cap as usize);
+    while !text.is_char_boundary(limit) {
+        limit -= 1;
+    }
+    let mut kept = secrets::redact_until(&text, limit);
+    if cut {
+        kept += &format!("\n[log cut at {cap} bytes]\n");
+    }
+    std::fs::write(path, &kept).with_context(|| format!("writing {}", path.display()))?;
+    bytes.truncate(cap as usize);
+    Ok(bytes)
+}
+
+/// How far past a cut [`keep`] reads, so a credential the cut splits is still found and
+/// redacted whole.
+// limit: a match that needs more than this past the cut to be recognized (a key block whose
+// end line lies further) is redacted as far as its own rule goes without it (the header).
+const OVERLAP: u64 = 64 << 10;
+
+/// How much of the end of stderr the error message's line is taken from.
+const TAIL: u64 = 64 << 10;
+
+/// The last non-blank line the child wrote to `f`, redacted, for the error message: read from
+/// the last [`TAIL`] bytes on their own, so a log cut by [`keep`] still names the plugin's own
+/// last line. A line that starts before the tail is not quoted, so no cut credential is.
+// limit: the first line of the tail is dropped even when it starts exactly at the tail's first
+// byte, so a stderr that ends with nearly [`TAIL`] bytes of blank lines quotes no line.
+fn last_line(f: &mut File) -> Result<String> {
+    let from = f.metadata()?.len().saturating_sub(TAIL);
+    f.seek(SeekFrom::Start(from))?;
+    let mut bytes = Vec::new();
+    f.take(TAIL).read_to_end(&mut bytes)?;
+    let text = String::from_utf8_lossy(&bytes);
+    let whole = if from > 0 {
+        text.split_once('\n').map_or("", |(_, rest)| rest)
+    } else {
+        &text
     };
-    if !status.success() {
-        let stderr = std::fs::read_to_string(&err_path).unwrap_or_default();
-        let last = stderr
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("");
-        bail!("{status}: {last} (stderr in {})", err_path.display());
-    }
-    let size = std::fs::metadata(&out_path)?.len();
-    if size > MAX_STDOUT {
-        bail!("printed {size} bytes, more than {MAX_STDOUT}");
-    }
-    Ok(out_path)
+    Ok(secrets::redact(whole)
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .to_string())
 }
 
 /// The absolute path `program` (an expanded argv[0]) names, checked once and then spawned as
@@ -607,6 +693,67 @@ mod tests {
         std::fs::write(&path, content).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         w.instance("prs", "gh", "ok", "")
+    }
+
+    /// Review round 1: past the cap the log keeps exactly the cap and says so, and the error
+    /// line is still the plugin's own last line, redacted, not the cut marker.
+    #[test]
+    fn a_log_past_the_cap_keeps_the_cap_and_the_error_quotes_the_last_line() {
+        let w = World::new();
+        std::fs::create_dir_all(w.run_dir()).unwrap();
+        let path = w.run_dir().join("prs.collect.stderr");
+        let mut f = unnamed(&path).unwrap();
+        let tok = ["gh", "p_", "Zq3vK9mW2xR7tY5pL8nB4cD6fG1hJ0kAa2Ss"].concat();
+        let long = "y".repeat(TAIL as usize);
+        write!(f, "0123456789abcdefXYZ\n{long}\nboom: {tok}\n\n").unwrap();
+        assert_eq!(keep(&mut f, &path, 16).unwrap(), b"0123456789abcdef");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "0123456789abcdef\n[log cut at 16 bytes]\n"
+        );
+        assert_eq!(last_line(&mut f).unwrap(), "boom: [redacted:github-token]");
+        // A last line longer than the tail is not quoted, cut or whole.
+        write!(f, "{long}{tok}").unwrap();
+        assert_eq!(last_line(&mut f).unwrap(), "");
+        // Review round 2: a credential the cut splits is still redacted whole.
+        let path = w.run_dir().join("prs.collect.stdout");
+        let mut f = unnamed(&path).unwrap();
+        write!(f, "01234 {tok} tail").unwrap();
+        keep(&mut f, &path, 16).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "01234 [redacted:github-token]\n[log cut at 16 bytes]\n"
+        );
+    }
+
+    /// While the plugin runs, its logs have no name in the run dir; after it ends, a timeout
+    /// included, they are there with the credential it printed redacted.
+    #[test]
+    fn logs_get_a_name_only_once_redacted() {
+        let w = World::new();
+        let tok = ["gh", "p_", "Zq3vK9mW2xR7tY5pL8nB4cD6fG1hJ0kAa2Ss"].concat();
+        let seen = w.t.0.join("seen");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s' '{tok}'\necho '{tok}' >&2\nls \"$RRECALL_STORE/runs/r1\" > {}\nsleep 5\n",
+            seen.display()
+        );
+        let mut inst = script_plugin(&w, "leak", &script);
+        inst.timeout = Duration::from_millis(1000);
+        let e = format!(
+            "{:#}",
+            call(&w.ctx(), &inst, "collect", &command(&inst), &"{}").unwrap_err()
+        );
+        assert!(e.contains("timed out"), "{e}");
+        assert_eq!(
+            std::fs::read_to_string(&seen).unwrap(),
+            "",
+            "no log name while running"
+        );
+        for ext in ["stdout", "stderr"] {
+            let kept =
+                std::fs::read_to_string(w.run_dir().join(format!("prs.collect.{ext}"))).unwrap();
+            assert_eq!(kept.trim_end(), "[redacted:github-token]", "{ext}");
+        }
     }
 
     #[test]
