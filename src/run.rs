@@ -1009,6 +1009,18 @@ impl Run {
         )?;
         // Step 7: checks over the diff, then judges over what every check accepted.
         let map_ids: Vec<String> = work.nodes.keys().cloned().collect();
+        // The branch each add or move lands in: its checks and judges see the nodes there.
+        let lands: BTreeMap<String, String> = valid
+            .iter()
+            .filter_map(|it| {
+                let id = match it.p.op {
+                    wire::Op::Add => pre.assigned.get(&it.key())?,
+                    wire::Op::Move => it.p.id.as_ref()?,
+                    _ => return None,
+                };
+                Some((it.key(), pre.store.branch_of(id).to_string()))
+            })
+            .collect();
         for check in self.of_kind(Kind::Check) {
             let live: Vec<&Item> = valid
                 .iter()
@@ -1021,6 +1033,7 @@ impl Run {
                 &live,
                 None,
                 &map_ids,
+                &lands,
                 &mut verdicts,
                 &mut dropped,
             );
@@ -1045,6 +1058,7 @@ impl Run {
                     &live,
                     Some(&texts),
                     &map_ids,
+                    &lands,
                     &mut verdicts,
                     &mut dropped,
                 );
@@ -1084,6 +1098,7 @@ impl Run {
         live: &[&Item],
         texts: Option<&BTreeMap<String, Option<String>>>,
         map_ids: &[String],
+        lands: &BTreeMap<String, String>,
         verdicts: &mut BTreeMap<String, Vec<RoundVerdict>>,
         dropped: &mut BTreeMap<String, String>,
     ) {
@@ -1091,6 +1106,10 @@ impl Run {
             return;
         }
         let keys: Vec<String> = live.iter().map(|it| it.key()).collect();
+        let branches: BTreeSet<&str> = live
+            .iter()
+            .filter_map(|it| lands.get(&it.key()).map(String::as_str))
+            .collect();
         let input = JudgeInput {
             proposals: live
                 .iter()
@@ -1109,6 +1128,12 @@ impl Run {
                     }),
                 })
                 .collect(),
+            nodes: work
+                .nodes
+                .values()
+                .filter(|n| n.parent.is_some() && branches.contains(work.branch_of(&n.id)))
+                .cloned()
+                .collect(),
             map_ids: map_ids.to_vec(),
             params: inst.params_json(),
         };
@@ -1119,11 +1144,29 @@ impl Run {
                 let current = j.current.iter().flat_map(|n| n.sources.iter().cloned());
                 refs_of(&j.proposal).into_iter().chain(current)
             })
+            .chain(input.nodes.iter().flat_map(|n| n.sources.iter().cloned()))
+            .collect();
+        // A judge may not accept a claim whose only sources are unresolved (spec §6.4).
+        let unbacked: BTreeSet<&str> = input
+            .proposals
+            .iter()
+            .filter(|j| {
+                j.sources
+                    .as_ref()
+                    .is_some_and(|s| !s.is_empty() && s.values().all(Option::is_none))
+            })
+            .map(|j| j.key.as_str())
             .collect();
         let kind = if texts.is_some() { "judge" } else { "check" };
         match self.verdicts_of(inst, round, &input, &keys) {
             Ok(vs) => {
-                for v in vs {
+                for mut v in vs {
+                    if v.verdict == VerdictKind::Accept && unbacked.contains(v.key.as_str()) {
+                        v.verdict = VerdictKind::Reject;
+                        v.reason = "accepted with only unresolved sources, which no judge may \
+                                    accept (spec §6.4): cite a source that can be read"
+                            .into();
+                    }
                     let to = if v.verdict == VerdictKind::Accept {
                         &mut self.accepts
                     } else {

@@ -64,13 +64,19 @@ impl W {
         assert_eq!(o.code, 0, "{}", o.stderr);
         std::fs::write(w.fp(), "v1").unwrap();
         let fake = q(&fake());
+        // The fake collectors resolve every reference: a judge may not accept a claim whose
+        // only sources are unresolved (spec §6.4).
+        let resolve = q(&format!(
+            "{}/tests/fixtures/bin/fake-resolve",
+            env!("CARGO_MANIFEST_DIR")
+        ));
         let fp = q(&w.fp().to_string_lossy());
         for (id, kind, table, extra) in [
             (
                 "col",
                 "collector",
                 format!(
-                    "[collector]\nscope = {SCOPE}\nsource_kinds = [\"{{kind}}\"]\nfingerprint = [\"/bin/cat\", \"{{fp}}\"]\ncommand = [{fake}]\n"
+                    "[collector]\nscope = {SCOPE}\nsource_kinds = [\"{{kind}}\"]\nfingerprint = [\"/bin/cat\", \"{{fp}}\"]\ncommand = [{fake}]\nresolve = [{resolve}]\n"
                 ),
                 format!("fp = {fp}\nkind = \"file\"\n"),
             ),
@@ -86,7 +92,7 @@ impl W {
                 "prompted",
                 "collector",
                 format!(
-                    "[collector]\nscope = {SCOPE}\nsource_kinds = [\"{{kind}}\"]\nfingerprint = [\"/bin/cat\", \"{{fp}}\"]\nprompt = \"p.md\"\nrunner = \"runner\"\nmodel = \"fake-model\"\n"
+                    "[collector]\nscope = {SCOPE}\nsource_kinds = [\"{{kind}}\"]\nfingerprint = [\"/bin/cat\", \"{{fp}}\"]\nprompt = \"p.md\"\nresolve = [{resolve}]\nrunner = \"runner\"\nmodel = \"fake-model\"\n"
                 ),
                 format!("fp = {fp}\nkind = \"note\"\n"),
             ),
@@ -1764,4 +1770,100 @@ fn a_builtin_judge_that_omits_a_verdict_accepts_nothing() {
     assert!(!w.map("layout").contains("Queue"));
     assert!(o.stderr.contains("duplicate"), "{}", o.stderr);
     assert!(w.lock()["collectors"].get("repo").is_none(), "unsettled");
+}
+
+const SYNC: &str = r#"{"id":"sync","parent":"how-it-works","title":"Sync","body":"Nightly.","sources":["file:sync.md"],"order":0}"#;
+
+#[test]
+fn checks_and_judges_get_the_nodes_of_the_branches_their_batch_adds_to() {
+    let w = world(&props(&[add("a", "layout", "Queue")]));
+    w.seed("how-it-works", &[SYNC]);
+    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    w.config(&format!(
+        "{cfg}{}",
+        w.inst("judge", "judge", "scenario = \"all\", out = \"accept\"")
+    ));
+    w.run_code(&[], 0);
+    for inst in ["check", "judge"] {
+        let input = w.input(inst, 1);
+        let ids: Vec<&str> = input["nodes"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{inst}: {input}"))
+            .iter()
+            .map(|n| n["id"].as_str().unwrap())
+            .collect();
+        // Not `sync` (another branch), not the branch `layout` itself, not the new node.
+        assert_eq!(ids, ["api", "auth", "noted", "theirs"], "{inst}");
+        assert_eq!(input["nodes"][0]["title"], "API", "{inst}");
+    }
+}
+
+/// `world` whose `repo` also resolves: it answers `out` to collect and `texts` to resolve.
+fn resolving(out: &str, texts: Value) -> W {
+    let w = world("");
+    let fake = q(&fake());
+    w.plugin(
+        "rcol",
+        "collector",
+        &format!(
+            "[collector]\nscope = {SCOPE}\nsource_kinds = [\"file\"]\nfingerprint = [\"/bin/cat\", \"{{fp}}\"]\ncommand = [{fake}]\nresolve = [{fake}]\n"
+        ),
+        &format!("fp = {}\n", q(&w.fp().to_string_lossy())),
+    );
+    let lines = format!("{out}\n{}", json!({ "texts": texts }));
+    w.config(&format!(
+        "{}{}",
+        w.inst(
+            "repo",
+            "rcol",
+            &format!("scenario = \"seq\", out = {}", q(&lines))
+        ),
+        w.inst("check", "check", "scenario = \"all\", out = \"accept\""),
+    ));
+    w
+}
+
+#[test]
+fn a_judge_may_not_accept_a_claim_whose_only_sources_are_unresolved() {
+    for (texts, accepted) in [
+        (json!({"file:a.md": null}), false),
+        (json!({}), false),
+        (json!({"file:a.md": "The queue."}), true),
+    ] {
+        let w = resolving(&props(&[add("a", "layout", "Queue")]), texts.clone());
+        let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+        // One round: the fake's collect and resolve answers would run out in a second.
+        w.config(&format!(
+            "max_rounds = 1\n{cfg}{}",
+            w.inst("judge", "judge", "scenario = \"all\", out = \"accept\"")
+        ));
+        w.run_code(&[], 0);
+        assert_eq!(w.map("layout").contains("Queue"), accepted, "{texts}");
+        assert_eq!(
+            w.report().contains("only unresolved sources"),
+            !accepted,
+            "{texts}: {}",
+            w.report()
+        );
+    }
+}
+
+#[test]
+fn a_builtin_judge_accept_with_resolved_sources_enters_the_map() {
+    let w = resolving(
+        &props(&[add("a", "layout", "Queue")]),
+        json!({"file:a.md": "The queue."}),
+    );
+    agent(&w, "ok", &verdict("repo/a", "accept", "the source says so"));
+    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    w.config(&format!(
+        "{cfg}\n[[plugins]]\nid = \"claude\"\n\n[[plugins]]\nid = \"support\"\nrunner = \"claude\"\n"
+    ));
+    w.run_code(&[], 0);
+    assert!(w.map("layout").contains("Queue"));
+    let stdin = std::fs::read_to_string(w.root.join("home/agent/claude.stdin.1")).unwrap();
+    assert!(
+        stdin.contains("The queue."),
+        "the resolved text reaches the agent"
+    );
 }
