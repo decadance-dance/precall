@@ -87,9 +87,9 @@ enum Cmd {
     },
     /// Print a paragraph for an agent's instruction file.
     AgentInstructions,
-    /// Run a built-in check plugin: check input on stdin, verdicts on stdout (spec §6.2, §6.5).
+    /// Run a built-in plugin's entrypoint: its input on stdin, its output on stdout (spec §6.2).
     #[command(hide = true)]
-    Builtin { id: String },
+    Builtin { id: String, entry: Option<String> },
 }
 
 fn main() -> ExitCode {
@@ -128,7 +128,7 @@ fn main() -> ExitCode {
             recursive,
         } => commands::rm(p, id, reason.as_deref(), *recursive),
         Cmd::AgentInstructions => Ok(commands::AGENT_INSTRUCTIONS.to_string()),
-        Cmd::Builtin { id } => commands::builtin(id),
+        Cmd::Builtin { id, entry } => commands::builtin(id, entry.as_deref()),
     };
     match out {
         Ok(text) => {

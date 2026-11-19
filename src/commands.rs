@@ -220,7 +220,7 @@ fn origin_basename(url: &str) -> String {
 }
 
 /// `owner/name` of a GitHub remote URL (ssh or https).
-fn github_repo(url: &str) -> Option<String> {
+pub(crate) fn github_repo(url: &str) -> Option<String> {
     // `scheme://[user@]host[:port]/path` or scp-like `[user@]host:path`.
     let (authority, path) = match url.split_once("://") {
         Some((_, rest)) => rest.split_once('/')?,
@@ -362,11 +362,15 @@ For the live status of a task, ask the tracker the map points to.
 ";
 
 /// `rrecall builtin <id>`: what a built-in plugin's argv runs (spec §6.2).
-pub fn builtin(id: &str) -> Result<String> {
+pub fn builtin(id: &str, entry: Option<&str>) -> Result<String> {
     let mut input = String::new();
     std::io::Read::read_to_string(&mut std::io::stdin(), &mut input).context("reading stdin")?;
+    let entry = entry.unwrap_or_default();
     match id {
         "claude" | "codex" => crate::runner::run(id, &input),
+        "git-history" => crate::git_history::run(entry, &input),
+        "files" => crate::files::run(entry, &input),
+        "github" => crate::github::run(entry, &input),
         _ => crate::checks::run(id, &input).map(|out| out + "\n"),
     }
 }
