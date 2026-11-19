@@ -12,6 +12,9 @@ use std::ops::Range;
 
 const WINDOW: usize = 256;
 
+/// How far a private key without an end line is redacted: more than an RSA-8192 PEM block.
+const KEY_SPAN: usize = 8 << 10;
+
 /// A token that starts with a fixed prefix at a word boundary and goes on with at least `min`
 /// characters of its alphabet (exactly `min` when `exact`, ended by a non-word character).
 /// A token of open length must also be credential-shaped: upper and lower case and a digit,
@@ -275,9 +278,13 @@ fn jwt(text: &str, out: &mut Vec<Hit>) {
 }
 
 /// A PEM or PGP armor line that opens a private key, through its `-----END ...-----` line, or
-/// to the end of the text when none follows: what comes after the header is the key.
+/// for [`KEY_SPAN`] bytes when none follows: what comes after the header is the key, and a
+/// header alone (a title cut short in a report) does not take the rest of the text with it.
 fn private_key(text: &str, out: &mut Vec<Hit>) {
     let mut done = 0;
+    // Once no end line follows, none follows a later header either: search no more, so many
+    // headers without one stay linear.
+    let mut ends = true;
     for (i, m) in text.match_indices("-----BEGIN ") {
         if i < done {
             continue;
@@ -290,11 +297,19 @@ fn private_key(text: &str, out: &mut Vec<Hit>) {
         if !opens {
             continue;
         }
-        let end = text[i..]
-            .find("-----END ")
+        let end = ends
+            .then(|| text[i..].find("-----END "))
+            .flatten()
             .map(|e| i + e + "-----END ".len())
             .and_then(|from| text[from..].find("-----").map(|f| from + f + 5))
-            .unwrap_or(text.len());
+            .unwrap_or_else(|| {
+                ends = false;
+                let mut end = text.len().min(i + KEY_SPAN);
+                while !text.is_char_boundary(end) {
+                    end += 1;
+                }
+                end
+            });
         out.push((i..end, "private-key"));
         done = end;
     }
@@ -592,6 +607,12 @@ mod tests {
                 "key block without an end line",
                 j(&["x -----BEGIN RSA ", "PRIVATE KEY-----\nMIIE y"]),
                 "x [redacted:private-key]".to_string(),
+            ),
+            (
+                "key header without an end line, then more text",
+                j(&["x -----BEGIN RSA ", "PRIVATE KEY----- ", &"y".repeat(9000), " tail"]),
+                // The header is 32 characters; the redaction stops 8 KiB after it starts.
+                format!("x [redacted:private-key]{} tail", "y".repeat(9032 - 8192)),
             ),
             (
                 "overlap",
