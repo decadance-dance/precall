@@ -356,6 +356,7 @@ impl Run {
             )));
         }
         let mut work = Store::load(&self.ctx.store)?;
+        let base = work.clone();
 
         // Step 2: fingerprint.
         let collectors: Vec<Instance> = self
@@ -612,10 +613,11 @@ impl Run {
         }
         let mut hash: Option<String> = None;
         if !changes.is_empty() {
-            let message = self.message(&effects);
+            let diff = merge::net(&base, &work, &effects);
+            let message = self.message(&diff);
             self.hook(
                 Event::CommitBefore,
-                json!({"diff": effects, "message": message}),
+                json!({"diff": diff, "message": message}),
                 "",
             )?;
             store::write_and_commit(&self.ctx.store, &changes, &message)?;

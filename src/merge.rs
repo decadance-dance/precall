@@ -442,9 +442,16 @@ fn remove_set(
         }
         set = keep;
     }
-    for it in set {
+    // Branches first: once a parent goes, its child's branch can no longer be looked up.
+    let branches: Vec<String> = set
+        .iter()
+        .map(|it| {
+            s.branch_of(it.p.id.as_deref().unwrap_or_default())
+                .to_string()
+        })
+        .collect();
+    for (it, branch) in set.into_iter().zip(branches) {
         let id = it.p.id.clone().unwrap_or_default();
-        let branch = s.branch_of(&id).to_string();
         if let Some(n) = s.nodes.remove(&id) {
             effects.push(Effect {
                 change: "removed",
@@ -460,6 +467,69 @@ fn remove_set(
             });
         }
     }
+}
+
+/// The run's net diff (spec §4.3): each node that differs between `before` and `after`, in the
+/// order of its last change in `effects`. A node changed and changed back shows nothing. A line
+/// names the last proposal of its kind on the node (the add for `added`), else the last one.
+pub fn net(before: &Store, after: &Store, effects: &[Effect]) -> Vec<Effect> {
+    let mut seen = BTreeSet::new();
+    let mut last: Vec<&Effect> = effects
+        .iter()
+        .rev()
+        .filter(|e| seen.insert(e.id.as_str()))
+        .collect();
+    last.reverse();
+    let mut out = Vec::new();
+    for e in last {
+        let line = |change: &'static str, store: &Store, parent: &Option<String>| {
+            let src = effects
+                .iter()
+                .rev()
+                .find(|x| x.id == e.id && x.change == change)
+                .unwrap_or(e);
+            Effect {
+                change,
+                id: e.id.clone(),
+                parent: parent.clone().unwrap_or_default(),
+                fields: Vec::new(),
+                by: src.by.clone(),
+                key: src.key.clone(),
+                branch: store.branch_of(&e.id).to_string(),
+                from: None,
+                reason: src.reason.clone(),
+                refs: src.refs.clone(),
+            }
+        };
+        match (before.nodes.get(&e.id), after.nodes.get(&e.id)) {
+            (None, None) => {}
+            (Some(b), None) => out.push(line("removed", before, &b.parent)),
+            (None, Some(a)) => out.push(line("added", after, &a.parent)),
+            (Some(b), Some(a)) => {
+                if b.parent != a.parent {
+                    let mut m = line("moved", after, &a.parent);
+                    m.from = b.parent.clone();
+                    out.push(m);
+                }
+                let fields: Vec<&'static str> = [
+                    ("title", a.title != b.title),
+                    ("body", a.body != b.body),
+                    ("sources", a.sources != b.sources),
+                    ("date", a.date != b.date),
+                    ("state", a.state != b.state),
+                ]
+                .into_iter()
+                .filter_map(|(f, changed)| changed.then_some(f))
+                .collect();
+                if !fields.is_empty() {
+                    let mut u = line("updated", after, &a.parent);
+                    u.fields = fields;
+                    out.push(u);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The next sibling order under `parent`: new and moved nodes go last.
@@ -945,6 +1015,65 @@ mod tests {
             assert!(!out.store.nodes.contains_key("child"));
             assert!(out.effects.iter().all(|e| e.id != "child"));
         }
+    }
+
+    #[test]
+    fn the_net_diff_folds_rounds_and_drops_what_was_undone() {
+        let (_t, s) = store(&[API, AUTH, THEIRS]);
+        let r = |s: &Store, its: &[Item]| apply(s, &rules(), its, &BTreeMap::new());
+        let one = r(
+            &s,
+            &[
+                item(
+                    "repo",
+                    r#"{"key":"m","op":"move","id":"auth","parent":"how-it-works","sources":["file:x"]}"#,
+                ),
+                item(
+                    "github",
+                    r#"{"key":"t","op":"update","id":"theirs","title":"Other","sources":["gh-pr:o/r#2"]}"#,
+                ),
+            ],
+        );
+        let two = r(
+            &one.store,
+            &[
+                item(
+                    "repo",
+                    r#"{"key":"u","op":"update","id":"auth","body":"Keys.","sources":["file:auth.md"]}"#,
+                ),
+                item(
+                    "github",
+                    r#"{"key":"b","op":"update","id":"theirs","title":"Theirs","sources":["gh-pr:o/r#2"]}"#,
+                ),
+            ],
+        );
+        let all: Vec<Effect> = one.effects.into_iter().chain(two.effects).collect();
+        assert_eq!(all.len(), 4);
+        let d: Vec<_> = net(&s, &two.store, &all)
+            .into_iter()
+            .map(|e| (e.change, e.branch, e.id, e.from, e.fields, e.key))
+            .collect();
+        assert_eq!(
+            d,
+            [
+                (
+                    "moved",
+                    "how-it-works".into(),
+                    "auth".into(),
+                    Some("api".into()),
+                    vec![],
+                    "m".into()
+                ),
+                (
+                    "updated",
+                    "how-it-works".into(),
+                    "auth".into(),
+                    None,
+                    vec!["body"],
+                    "u".into()
+                ),
+            ]
+        );
     }
 
     #[test]

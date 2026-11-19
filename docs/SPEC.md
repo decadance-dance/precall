@@ -165,6 +165,7 @@ rejected 3, see runs/<run-id>/report.md
 unreachable: chat (login expired)
 ```
 
+- The changes are the run's net diff against the map before the run, the same diff `commit.before` gets: a node changed in several rounds shows once per kind of change, a change undone in a later round not at all, and a line names the last proposal of its kind on the node. A removed node shows under the branch it was in. The run report keeps each round's changes (§4.4).
 - One line per change, columns aligned: `added|updated|moved|removed <branch>/<id>`, then `(<fields>)` for an update or `(from <old parent>)` for a move, `by <collector>`, the proposal's one-line `reason` and its sources in brackets; a removal shows `evidence: <reason> [<evidence>]`. An `add_source` shows as an update of `sources`.
 - The subject counts `+added ~updated-or-moved -removed`, and `(rejected N)` when proposals were left rejected.
 - After the changes: `rejected N, see runs/<run-id>/report.md`, `unreachable: <id> (<first line of the error>), ...`, and `unsettled: <id> (<why>), ...` for collectors left unsettled for another reason.

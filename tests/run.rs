@@ -536,6 +536,10 @@ fn i3_a_node_with_a_note_or_children_is_not_removed() {
     assert!(
         !w.map("layout").contains("\"id\":\"api\"") && !w.map("layout").contains("\"id\":\"auth\"")
     );
+    // Each removal is named by the branch it was under before the set went.
+    let msg = w.message();
+    assert!(msg.contains("removed layout/api"), "{msg}");
+    assert!(msg.contains("removed layout/auth"), "{msg}");
 }
 
 #[test]
@@ -872,6 +876,51 @@ fn a_denying_run_before_hook_aborts_before_collecting() {
         w.input("gate", 1)["data"],
         json!({"collectors": ["repo", "github"], "force": false})
     );
+}
+
+#[test]
+fn the_commit_shows_the_net_diff_so_changes_that_cancel_out_do_not_appear() {
+    let w = W::new();
+    let rm = json!({"key": "b", "op": "remove", "id": "queue", "sources": [], "evidence": "file:gone.md", "reason": "gone"});
+    let col = format!(
+        "{}\n{}",
+        props(&[add("a", "layout", "Queue"), add("b", "layout", "Maybe")]),
+        props(&[rm])
+    );
+    let verdicts = format!(
+        "{}\n{}",
+        json!({"verdicts": [
+            {"key": "repo/a", "verdict": "accept", "reason": "fine"},
+            {"key": "repo/b", "verdict": "reject", "reason": "not a fact"}]}),
+        json!({"verdicts": [{"key": "repo/b", "verdict": "accept", "reason": "fine"}]})
+    );
+    w.config(&format!(
+        "{}{}{}",
+        w.inst(
+            "repo",
+            "col",
+            &format!("scenario = \"seq\", out = {}", q(&col))
+        ),
+        w.inst(
+            "check",
+            "check",
+            &format!("scenario = \"seq\", out = {}", q(&verdicts))
+        ),
+        w.inst("cgate", "cgate", &format!("out = {}", q("{}"))),
+    ));
+    w.run_code(&[], 0);
+    assert_eq!(w.calls("repo"), 2, "the rejected key went back");
+    assert_eq!(w.map("layout"), "", "added, then removed");
+    let data = &w.input("cgate", 1)["data"];
+    assert_eq!(data["diff"], json!([]), "{data}");
+    let msg = w.message();
+    assert!(
+        msg.lines().next().unwrap().ends_with("no map changes"),
+        "{msg}"
+    );
+    assert!(!msg.contains("queue"), "{msg}");
+    // The report still shows each round's effects.
+    assert!(w.report().contains("queue"), "{}", w.report());
 }
 
 #[test]
