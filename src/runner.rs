@@ -530,7 +530,8 @@ fn strip_acl(_: &Path) -> Result<()> {
 /// this user can add one to the private dir, and `remove_dir_all` never follows a link.
 // limit: a dead runner's pid reused by a live process keeps its dir until that process ends;
 // a dir whose runner was killed while its agent lives on is removed under that agent, whose
-// answer nobody reads any more.
+// answer nobody reads any more; runners in different pid namespaces (containers) sharing one
+// temp dir as the same user see each other's runners as gone.
 fn sweep(private: &Path) {
     let Ok(entries) = fs::read_dir(private) else {
         return;
