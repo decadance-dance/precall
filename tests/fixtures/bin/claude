@@ -1,0 +1,68 @@
+#!/bin/sh
+# A fake `claude -p --output-format stream-json` for tests. The runner passes it only a
+# whitelisted environment, so its scenario comes from files under $HOME/agent/: `scenario` (ok,
+# nocost, nousage, malformed, error, sleep: prints the usage of one message, then never
+# answers the first turn, answers a `--resume` turn; result-sleep: answers, then hangs until
+# killed, answers a `--resume` turn; torn: prints one message's usage and half of the next
+# record, then hangs, answers a `--resume` turn; perms: records the modes of its working dir, its parent
+# and its stdout file (with the ACL flag) and their ACL entry count to claude.perms, then
+# answers; config: the same for $CLAUDE_CONFIG_DIR plus its entries to claude.config, then answers;
+# sleep-always: never answers; stop-runner: streams `out` in one event and stops its runner) and `out`
+# (the structured output to print; `out.N`, when present, for call N). Each call N records its argv to claude.argv.N,
+# its stdin to claude.stdin.N, its environment to claude.env.N and its cwd to claude.cwd.N.
+d="$HOME/agent"
+# `claude auth status` (rrecall doctor): logged in unless $HOME/agent/logged-out exists.
+if [ "$1 $2" = "auth status" ]; then
+    if [ -e "$d/logged-out" ]; then echo '{"loggedIn": false}'; exit 1; fi
+    echo '{"loggedIn": true}'; exit 0
+fi
+echo call >> "$d/claude.calls"
+# Calls run in parallel (collectors do): mkdir claims the call number atomically.
+n=1
+while ! mkdir "$d/claude.slot.$n" 2>/dev/null; do n=$((n + 1)); done
+printf '%s\n' "$@" > "$d/claude.argv.$n"
+cat > "$d/claude.stdin.$n"
+env | sort > "$d/claude.env.$n"
+pwd -P > "$d/claude.cwd.$n"
+out=$(cat "$d/out.$n" 2>/dev/null || cat "$d/out" 2>/dev/null || echo '{}')
+resume=no
+modes() { ls -ld "$@" | cut -c1-10; }
+# ACL flags (`+`) plus macOS ACL entries (`ls -e`; GNU ls has no `-e`).
+acls() {
+    n=$(ls -ld "$@" | cut -c11 | grep -c '+')
+    e=$(ls -lde "$@" 2>/dev/null | grep -c '^ [0-9]*: ')
+    echo "acl=$((n + e))"
+}
+for a in "$@"; do [ "$a" = --resume ] && resume=yes; done
+answer() {
+    printf '{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"s","structured_output":%s,"total_cost_usd":%s,"usage":{"input_tokens":1,"cache_creation_input_tokens":3,"cache_read_input_tokens":4,"output_tokens":2},"modelUsage":{"claude-fake-small":{"outputTokens":1},"claude-fake-1":{"outputTokens":2}}}\n' "$out" "$1"
+}
+case "$(cat "$d/scenario")" in
+    ok) answer 0.25 ;;
+    nousage) printf '{"type":"result","is_error":false,"result":"x","structured_output":%s,"modelUsage":{"claude-fake-1":{"outputTokens":0}}}\n' "$out" ;;
+    nocost) printf '{"type":"result","is_error":false,"result":"x","structured_output":%s,"usage":{"input_tokens":1000000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0},"modelUsage":{"claude-fake-1":{"outputTokens":0}}}\n' "$out" ;;
+    malformed) echo 'this is not json' ;;
+    error) printf '{"type":"result","is_error":true,"result":"Not logged in"}\n'; exit 1 ;;
+    sleep)
+        if [ $resume = yes ]; then answer 0.1; else
+            # One message, its usage streamed twice (once per content block), as claude does.
+            for _ in 1 2; do printf '{"type":"assistant","message":{"id":"msg1","model":"claude-fake-1","usage":{"input_tokens":1000000,"output_tokens":0}}}\n'; done
+            sleep 30 & echo $! > "$d/claude.pid"; wait
+        fi ;;
+    result-sleep)
+        if [ $resume = yes ]; then answer 0.25; else
+            answer 0.5; sleep 30 & wait
+        fi ;;
+    torn)
+        if [ $resume = yes ]; then answer 0.1; else
+            printf '{"type":"assistant","message":{"id":"msg1","model":"claude-fake-1","usage":{"input_tokens":1000000,"output_tokens":0}}}\n'
+            printf '{"type":"assistant"'
+            sleep 30 & wait
+        fi ;;
+    perms) { modes . .. turn1.stdout; acls . .. turn1.stdout; } > "$d/claude.perms"; answer 0.25 ;;
+    config) { modes "$CLAUDE_CONFIG_DIR"; acls "$CLAUDE_CONFIG_DIR"; ls -A "$CLAUDE_CONFIG_DIR"; } > "$d/claude.config"; answer 0.25 ;;
+    sleep-always) sleep 30 & echo $! > "$d/claude.pid.$n"; wait ;;
+    # Streams one event holding `out`, then stops its runner, so the core's timeout kills it.
+    stop-runner) printf '{"type":"system","note":%s}\n' "$out"; kill -STOP "$PPID" ;;
+    *) echo "fake claude: unknown scenario" >&2; exit 64 ;;
+esac

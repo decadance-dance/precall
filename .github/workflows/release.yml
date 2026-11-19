@@ -1,0 +1,82 @@
+name: Release
+
+on:
+  push:
+    tags: ['[0-9]+.[0-9]+.[0-9]+']
+
+permissions:
+  contents: write
+
+jobs:
+  # The binaries are built before the Release exists and attached when it is created, so a failed
+  # build publishes no Release.
+  build:
+    strategy:
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-apple-darwin, os: macos-latest }
+          # musl: static binaries that run on any Linux, whatever its glibc.
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    # Dependencies' build scripts run here: no write token.
+    permissions:
+      contents: read
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install && rustup target add "$TARGET" # the toolchain in rust-toolchain.toml
+      - if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --locked --target "$TARGET"
+      - run: |
+          cp LICENSE "target/$TARGET/release/"
+          tar -czf "rrecall-$GITHUB_REF_NAME-$TARGET.tar.gz" -C "target/$TARGET/release" rrecall LICENSE
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.target }}
+          path: rrecall-*.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      # A checkout of a tag ref does not carry the annotated tag object; fetch it explicitly.
+      - run: git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}" "+refs/heads/main:refs/remotes/origin/main"
+      # Publish only a tag on main, and only for the commit the build jobs checked out (the tag's
+      # commit when the workflow started): a tag on a feature or release branch, or one moved before
+      # the fetch above, publishes nothing. A move after that fetch is not caught (releasing.md).
+      - run: |
+          commit=$(git rev-parse "$GITHUB_REF_NAME^{commit}")
+          built=$(git rev-parse "$GITHUB_SHA^{commit}")
+          [ "$commit" = "$built" ] || { echo "::error::tag $GITHUB_REF_NAME points at $commit, but this run built $built"; exit 1; }
+          git merge-base --is-ancestor "$commit" origin/main || { echo "::error::tag $GITHUB_REF_NAME ($commit) is not on main; tag main after the release PR merges"; exit 1; }
+      # Notes = the tag message body (its subject when the body is empty). Fails on a lightweight tag,
+      # so no release is published with a commit message as notes.
+      - run: |
+          [ "$(git cat-file -t "$GITHUB_REF_NAME")" = tag ] || { echo "::error::$GITHUB_REF_NAME is not an annotated tag"; exit 1; }
+          body=$(git tag -l --format='%(contents:body)' "$GITHUB_REF_NAME")
+          printf '%s\n' "${body:-$(git tag -l --format='%(contents:subject)' "$GITHUB_REF_NAME")}" > notes.md
+      # The binaries report the Cargo.toml version (`rrecall --version`); the formula's test checks it.
+      - run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          [ "$version" = "$GITHUB_REF_NAME" ] || { echo "::error::tag $GITHUB_REF_NAME differs from version $version in Cargo.toml"; exit 1; }
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - run: |
+          cd dist
+          sha256sum rrecall-*.tar.gz > SHA256SUMS
+          ../bin/formula "$GITHUB_REF_NAME" SHA256SUMS > rrecall.rb
+      - run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag dist/*
+        env:
+          GH_TOKEN: ${{ github.token }}

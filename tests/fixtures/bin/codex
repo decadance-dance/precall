@@ -1,0 +1,75 @@
+#!/bin/sh
+# A fake `codex exec --json` for tests. Its scenario comes from files under $HOME/agent/:
+# `scenario` (ok, nolog: no session log, only `turn.completed` events; dupusage: like nolog,
+# its usage with a key twice; crash; sleep: never
+# answers the first turn, answers a `resume` turn; links: like ok, plus links and a FIFO
+# the runner must not follow or export; nolog-sleep: no session log, the first turn
+# reports a completed turn and hangs, a `resume` turn answers; its `turn.completed` usage is
+# the thread's running total, as codex exec prints it) and `out` (the final message). It writes
+# the final message to the `-o` file and a session log under $CODEX_HOME/sessions. Each call N
+# records its argv to codex.argv.N, its stdin to codex.stdin.N and its environment to
+# codex.env.N.
+d="$HOME/agent"
+# `codex login status` (rrecall doctor): logged in unless $HOME/agent/logged-out exists.
+if [ "$1 $2" = "login status" ]; then
+    if [ -e "$d/logged-out" ]; then echo "Not logged in" >&2; exit 1; fi
+    echo "Logged in using ChatGPT"; exit 0
+fi
+echo call >> "$d/codex.calls"
+# Calls run in parallel (collectors do): mkdir claims the call number atomically.
+n=1
+while ! mkdir "$d/codex.slot.$n" 2>/dev/null; do n=$((n + 1)); done
+printf '%s\n' "$@" > "$d/codex.argv.$n"
+cat > "$d/codex.stdin.$n"
+env | sort > "$d/codex.env.$n"
+reply=
+resume=no
+prev=
+for a in "$@"; do
+    [ "$prev" = -o ] && reply="$a"
+    [ "$a" = resume ] && resume=yes
+    prev="$a"
+done
+log="$CODEX_HOME/sessions/2026/11/19/rollout-2026-11-19T00-00-00-th1.jsonl"
+answer() {
+    cat "$d/out" > "$reply"
+    if [ "$1" = log ]; then
+        mkdir -p "$(dirname "$log")"
+        printf '{"type":"turn_context","payload":{"model":"codex-fake-1"}}\n' >> "$log"
+        printf '{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1500000,"cached_input_tokens":1000000,"cache_write_input_tokens":200000,"output_tokens":100000}}}}\n' >> "$log"
+    fi
+    printf '{"type":"turn.completed","usage":{"input_tokens":1000000,"cached_input_tokens":0,"output_tokens":0}}\n'
+}
+case "$(cat "$d/scenario")" in
+    ok) printf '{"type":"thread.started","thread_id":"th1"}\n'; answer log ;;
+    nolog) printf '{"type":"thread.started","thread_id":"th1"}\n'; answer ;;
+    dupusage)
+        printf '{"type":"thread.started","thread_id":"th1"}\n'
+        cat "$d/out" > "$reply"
+        printf '{"type":"turn.completed","usage":{"input_tokens":1000000,"input_tokens":0,"output_tokens":0}}\n' ;;
+    links)
+        # Like ok, then the final message becomes a link, and the session dir gains links to
+        # a file and a dir outside the call's dir, and a FIFO: none of them is exported.
+        printf '{"type":"thread.started","thread_id":"th1"}\n'; answer log
+        mv "$reply" "$d/reply.real"; ln -s "$d/reply.real" "$reply"
+        sessions="$CODEX_HOME/sessions"
+        echo OUTSIDE > "$d/outside.jsonl"; ln -s "$d/outside.jsonl" "$sessions/link.jsonl"
+        mkdir -p "$d/outdir"; echo OUTSIDE > "$d/outdir/x.jsonl"; ln -s "$d/outdir" "$sessions/linkdir"
+        mkfifo "$sessions/fifo.jsonl" ;;
+    crash) echo "fake codex: crash" >&2; exit 2 ;;
+    nolog-sleep)
+        if [ $resume = yes ]; then
+            cat "$d/out" > "$reply"
+            printf '{"type":"turn.completed","usage":{"input_tokens":105,"cached_input_tokens":84,"output_tokens":21}}\n'
+        else
+            printf '{"type":"thread.started","thread_id":"th1"}\n'
+            printf '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":20}}\n'
+            sleep 30 & wait
+        fi ;;
+    sleep)
+        if [ $resume = yes ]; then answer log; else
+            printf '{"type":"thread.started","thread_id":"th1"}\n'
+            sleep 30 & echo $! > "$d/codex.pid"; wait
+        fi ;;
+    *) echo "fake codex: unknown scenario" >&2; exit 64 ;;
+esac

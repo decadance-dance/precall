@@ -1,0 +1,57 @@
+#!/bin/sh
+# Prints the Homebrew formula for release <version> from the Release's SHA256SUMS.
+# release.yml attaches the output as rrecall.rb; the tap decadance-dance/homebrew-tap keeps it as
+# Formula/rrecall.rb (docs/workflow/releasing.md).
+set -eu
+[ $# -eq 2 ] || { echo "usage: bin/formula <version> <SHA256SUMS>" >&2; exit 2; }
+ver=$1 sums=$2
+case $ver in '' | *[!0-9.]*) echo "bin/formula: version '$ver' is not X.Y.Z" >&2; exit 2 ;; esac
+
+sha() {
+  s=$(awk -v f="rrecall-$ver-$1.tar.gz" '{ sub(/^\*/, "", $2) } $2 == f { print $1 }' "$sums")
+  [ ${#s} -eq 64 ] || { echo "bin/formula: no sha256 for rrecall-$ver-$1.tar.gz in $sums" >&2; exit 1; }
+  echo "$s"
+}
+mac_arm=$(sha aarch64-apple-darwin)
+mac_intel=$(sha x86_64-apple-darwin)
+linux_arm=$(sha aarch64-unknown-linux-musl)
+linux_intel=$(sha x86_64-unknown-linux-musl)
+url="https://github.com/decadance-dance/rrecall/releases/download/$ver/rrecall-$ver"
+
+cat <<EOF
+class Rrecall < Formula
+  desc "Keeps a versioned map of a software project and answers questions about it"
+  homepage "https://github.com/decadance-dance/rrecall"
+  license "Apache-2.0"
+
+  on_macos do
+    on_arm do
+      url "$url-aarch64-apple-darwin.tar.gz"
+      sha256 "$mac_arm"
+    end
+    on_intel do
+      url "$url-x86_64-apple-darwin.tar.gz"
+      sha256 "$mac_intel"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "$url-aarch64-unknown-linux-musl.tar.gz"
+      sha256 "$linux_arm"
+    end
+    on_intel do
+      url "$url-x86_64-unknown-linux-musl.tar.gz"
+      sha256 "$linux_intel"
+    end
+  end
+
+  def install
+    bin.install "rrecall"
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/rrecall --version")
+  end
+end
+EOF

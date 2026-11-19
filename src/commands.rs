@@ -1,0 +1,593 @@
+//! One function per command; each returns what goes to stdout.
+
+use crate::config::{self, BranchDef, STORE_CONFIG};
+use crate::error;
+use crate::history;
+use crate::lock;
+use crate::node::{self, Node};
+use crate::outline;
+use crate::plugin;
+use crate::query;
+use crate::store::{self, Store};
+use anyhow::{Context, Result};
+use std::io::Write;
+use std::path::Path;
+
+/// The resolved project's store, loaded.
+pub fn open(project: Option<&str>) -> Result<Store> {
+    let (_, path) = config::resolve_project(project)?;
+    Store::load(&path)
+}
+
+/// The store loaded under its run lock, for a command that writes it: a run in progress would
+/// otherwise commit its in-memory map over this command's change.
+fn open_locked(project: Option<&str>) -> Result<(Store, lock::StoreLock)> {
+    let (_, path) = config::resolve_project(project)?;
+    let held = lock::acquire(&path, true)?.context("the store lock was not granted")?;
+    Ok((Store::load(&path)?, held))
+}
+
+pub fn init(name_arg: Option<&str>, project_flag: Option<&str>) -> Result<String> {
+    let cwd = std::env::current_dir()?;
+    let top = store::git(&cwd, &["rev-parse", "--show-toplevel"])
+        .ok()
+        .map(|s| s.trim().to_string());
+    let origin = config::origin_url(&cwd);
+    let env = std::env::var("RRECALL_PROJECT")
+        .ok()
+        .filter(|v| !v.is_empty());
+    let name = name_arg
+        .map(str::to_string)
+        .or(project_flag.map(str::to_string))
+        .or(env)
+        .or_else(|| origin.as_deref().map(origin_basename))
+        .ok_or_else(|| {
+            error::usage(
+                "name the project: `rrecall init <project>` (no origin remote to name it after)",
+            )
+        })?;
+    config::check_project_name(&name)?;
+    let user = config::load_user_config()?;
+    let path = user.store_path(&name)?;
+    if path.join(STORE_CONFIG).exists() || path.join(".git").exists() {
+        return Err(error::usage(format!(
+            "a map store for `{name}` already exists at {}",
+            path.display()
+        )));
+    }
+    let mut cfg = String::from(
+        "# rrecall store config (spec §9). Add branches with [[skeleton.branch]] (id, title, question, granularity).\n",
+    );
+    let mut found = Vec::new();
+    // The instance ids this config enables, which the default runner's id must not take.
+    let mut ids = vec![
+        "no-op",
+        "size-limits",
+        "secrets",
+        "support",
+        "removal",
+        "duplicate",
+        "html",
+    ];
+    if let Some(top) = &top {
+        ids.push("repo");
+        // Top-level keys go before the first table.
+        cfg += &format!(
+            "\n# The project's repository: its .rrecall/plugins/ loads once trusted.\nrepo = {}\n",
+            config::toml_str(top)
+        );
+        cfg += "\n# Sources rrecall init found, as the plugin instances `rrecall run` will use.\n";
+        cfg += &format!(
+            "[[plugins]]\nid = \"repo\"\nuse = \"files\"\nparams = {{ path = {}, git = true, preset = \"codebase\" }}\n",
+            config::toml_str(top)
+        );
+        found.push(format!("repo {top}"));
+    }
+    if let Some(repo) = origin.as_deref().and_then(github_repo) {
+        ids.push("github");
+        cfg += &format!(
+            "\n[[plugins]]\nid = \"github\"\nparams = {{ repo = {} }}\n",
+            config::toml_str(&repo)
+        );
+        found.push(format!("github {repo}"));
+    }
+    cfg += "\n# The built-in checks (spec §10). Remove an entry to disable one; a plugin with its id replaces it.\n";
+    cfg += "[[plugins]]\nid = \"no-op\"\n\n[[plugins]]\nid = \"size-limits\"\n\n[[plugins]]\nid = \"secrets\"\n";
+    cfg += "\n# The built-in judges (spec §10). They call the user config's default runner unless an entry sets `runner`.\n";
+    cfg += "[[plugins]]\nid = \"support\"\n\n[[plugins]]\nid = \"removal\"\n\n[[plugins]]\nid = \"duplicate\"\n";
+    // The user's default runner, or `claude`, which init makes the default below. The default
+    // is an instance id (spec §9): init enables it only as the plugin of that id.
+    let runner = user.runner.clone().unwrap_or_else(|| "claude".into());
+    if !plugin::finds_runner(&user, top.as_deref().map(Path::new), &path, &runner)? {
+        return Err(error::usage(format!(
+            "the user config's default runner `{runner}` is no runner plugin rrecall can find, so init cannot enable it: set `runner` in {} to a runner plugin id (`claude`, `codex`), or add the instance to the store's config after init",
+            config::user_config_path()?.display()
+        )));
+    }
+    if ids.contains(&runner.as_str()) {
+        return Err(error::usage(format!(
+            "the user config's default runner `{runner}` has the id of another instance init enables, so init cannot enable it: set `runner` in {} to another runner plugin id (`claude`, `codex`)",
+            config::user_config_path()?.display()
+        )));
+    }
+    cfg += &format!(
+        "\n# The runner the judges call (spec §6.8).\n[[plugins]]\nid = {}\n",
+        config::toml_str(&runner)
+    );
+    cfg += "\n# The built-in html view: views/index.html after each run, and `rrecall open` (spec §8).\n[[plugins]]\nid = \"html\"\n";
+    // The user config gains a default runner (the judges name none, spec §6.8) and the
+    // project's entry. It is written before the store and restored if the store fails, so a
+    // failure leaves nothing behind and init can run again.
+    let user_path = config::user_config_path()?;
+    // Held to the end, rollback included, so a concurrent `plugin add` or `plugin trust`
+    // appends after this init and a rollback never drops its entry.
+    let _held = config::lock_user_config()?;
+    let old = match std::fs::read_to_string(&user_path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        r => Some(r.with_context(|| format!("reading {}", user_path.display()))?),
+    };
+    // The config as it is under the lock, which a command may have changed since it was read.
+    let user: config::UserConfig = toml::from_str(old.as_deref().unwrap_or(""))
+        .with_context(|| format!("{} does not parse", user_path.display()))?;
+    let mut new = old.clone().unwrap_or_default();
+    if user.runner.is_none() {
+        // A top-level key goes before the first table, after a BOM, which must stay first.
+        let (bom, rest) = match new.strip_prefix('\u{feff}') {
+            Some(rest) => ("\u{feff}", rest),
+            None => ("", new.as_str()),
+        };
+        new = format!(
+            "{bom}# The default runner of declarative plugins (spec §9).\nrunner = \"claude\"\n{rest}"
+        );
+    }
+    if user.project(&name).is_none() {
+        new += &format!("\n[[projects]]\nname = {}\n", config::toml_str(&name));
+        if let Some(url) = &origin {
+            new += &format!("remotes = [{}]\n", config::toml_str(url));
+        }
+    }
+    let parsed: config::UserConfig =
+        toml::from_str(&new).with_context(|| format!("updating {}", user_path.display()))?;
+    anyhow::ensure!(
+        parsed.runner.is_some() && parsed.project(&name).is_some(),
+        "updating {} did not set the default runner and the project",
+        user_path.display()
+    );
+    config::replace_config(&user_path, &new)?;
+    let created = !path.exists();
+    let made = std::fs::create_dir_all(&path)
+        .with_context(|| format!("creating {}", path.display()))
+        .and_then(|()| store::git(&path, &["init", "-q"]))
+        .and_then(|_| {
+            let files = [
+                (".gitignore", "cache/\nruns/\nviews/\nstate/\n".to_string()),
+                // Map lines stay LF in the working tree whatever core.autocrlf says (spec §5 I6).
+                (".gitattributes", "*.jsonl text eol=lf\n".to_string()),
+                (STORE_CONFIG, cfg),
+            ];
+            let changes: Vec<store::Change> = files
+                .into_iter()
+                .map(|(rel, text)| (rel.to_string(), Some(text)))
+                .collect();
+            store::write_and_commit(&path, &changes, &format!("init {name}"))
+        });
+    if let Err(e) = made {
+        // Undo only what this init made: the whole directory if it created it, else the
+        // `.git` it added (absent before, checked above); the files it wrote are already restored.
+        let _ = if created {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_dir_all(path.join(".git"))
+        };
+        let _ = match &old {
+            Some(old) => config::replace_config(&user_path, old),
+            None => std::fs::remove_file(&user_path).map_err(Into::into),
+        };
+        return Err(e);
+    }
+
+    let mut out = format!("Created the map of `{name}` at {}\n", path.display());
+    if user.runner.is_none() {
+        out += &format!("default runner: claude, in {}\n", user_path.display());
+    }
+    if let Some(p) = user.project(&name)
+        && let Some(url) = origin.as_ref().filter(|u| !p.remotes.contains(u))
+    {
+        // limit: rrecall appends whole entries only, so it does not edit an existing one.
+        out += &format!(
+            "Add {url} to the remotes of project `{name}` in {} to resolve it from this repo.\n",
+            user_path.display()
+        );
+    }
+    let ids: Vec<String> = config::default_branches()
+        .into_iter()
+        .map(|b| b.id)
+        .collect();
+    out += &format!("branches: {}\n", ids.join(", "));
+    out += &format!(
+        "sources: {}\n",
+        if found.is_empty() {
+            "none found".into()
+        } else {
+            found.join(", ")
+        }
+    );
+    out += "Next: `rrecall import <outline>` to seed it, `rrecall ls` to read it.\n";
+    Ok(out)
+}
+
+fn origin_basename(url: &str) -> String {
+    let last = url
+        .trim_end_matches('/')
+        .rsplit(['/', ':'])
+        .next()
+        .unwrap_or("");
+    last.strip_suffix(".git").unwrap_or(last).to_string()
+}
+
+/// `owner/name` of a GitHub remote URL (ssh or https).
+pub(crate) fn github_repo(url: &str) -> Option<String> {
+    // `scheme://[user@]host[:port]/path` or scp-like `[user@]host:path`.
+    let (authority, path) = match url.split_once("://") {
+        Some((_, rest)) => rest.split_once('/')?,
+        None => url.split_once(':')?,
+    };
+    let host = authority.rsplit('@').next()?;
+    let host = host.split(':').next()?;
+    if !host.eq_ignore_ascii_case("github.com") {
+        return None;
+    }
+    let path = path.trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let (owner, name) = path.split_once('/')?;
+    (!owner.is_empty() && !name.is_empty() && !name.contains('/'))
+        .then(|| format!("{owner}/{name}"))
+}
+
+pub fn ls(project: Option<&str>, depth: usize, json: bool) -> Result<String> {
+    Ok(query::ls(&open(project)?, depth, json))
+}
+
+pub fn show(
+    project: Option<&str>,
+    id: &str,
+    depth: usize,
+    max_tokens: Option<usize>,
+    json: bool,
+) -> Result<String> {
+    query::show(&open(project)?, id, depth, max_tokens, json)
+}
+
+pub fn find(project: Option<&str>, text: &str, json: bool) -> Result<String> {
+    query::find(&open(project)?, text, json)
+}
+
+pub fn why(project: Option<&str>, id: &str, json: bool) -> Result<String> {
+    history::why(&open(project)?, id, json)
+}
+
+pub fn recent(project: Option<&str>, since: &str, json: bool) -> Result<String> {
+    history::recent(&open(project)?, since, json)
+}
+
+/// The summary of the last run report under `runs/` (spec §2).
+pub fn status(project: Option<&str>, json: bool) -> Result<String> {
+    let s = open(project)?;
+    let last = std::fs::read_dir(s.root.join("runs"))
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().join("report.md").is_file())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .max();
+    let report = match &last {
+        Some(id) => Some(std::fs::read_to_string(
+            s.root.join("runs").join(id).join("report.md"),
+        )?),
+        None => None,
+    };
+    Ok(match (json, last, report) {
+        (true, run, report) => format!("{}\n", serde_json::json!({ "run": run, "report": report })),
+        (false, Some(run), Some(report)) => {
+            format!("Last run: {run}\n\n{}", crate::run::summary_of(&report))
+        }
+        _ => "No run report yet: this map has not been through `rrecall run`.\n".into(),
+    })
+}
+
+fn stored_node<'a>(s: &'a Store, id: &str) -> Result<&'a Node> {
+    let n = s.get(id)?;
+    if n.parent.is_none() {
+        return Err(error::usage(format!(
+            "`{id}` is a branch; branches come from {STORE_CONFIG} (spec §5 I5), so notes and removals apply to the nodes under them"
+        )));
+    }
+    Ok(n)
+}
+
+/// `rrecall open`: renders the built-in html view and opens it with `RRECALL_BROWSER`, else the
+/// platform's opener (spec §2, §8). The page stays written when the opener fails.
+pub fn open_page(project: Option<&str>) -> Result<String> {
+    let (name, root) = config::resolve_project(project)?;
+    let page = crate::view::write(&root, &name)?;
+    // The path first, so it is on stdout whatever the opener does.
+    let mut out = std::io::stdout().lock();
+    writeln!(out, "{}", page.display())
+        .and_then(|()| out.flush())
+        .context("printing the page's path")?;
+    drop(out);
+    let browser = std::env::var_os("RRECALL_BROWSER")
+        .filter(|b| !b.is_empty())
+        .unwrap_or_else(|| {
+            if cfg!(target_os = "macos") {
+                "open"
+            } else {
+                "xdg-open"
+            }
+            .into()
+        });
+    let shown = browser.to_string_lossy();
+    let status = std::process::Command::new(&browser)
+        .arg(&page)
+        .stdin(std::process::Stdio::null())
+        .status()
+        .with_context(|| format!("starting `{shown}` to open {}", page.display()))?;
+    if !status.success() {
+        anyhow::bail!("`{shown}` {status} opening {}", page.display());
+    }
+    Ok(String::new())
+}
+
+/// Sets or clears the user's note (spec §5 I7); the only field this command writes.
+pub fn note(project: Option<&str>, id: &str, text: &str) -> Result<String> {
+    let (mut s, _held) = open_locked(project)?;
+    let new = (!text.is_empty()).then(|| text.to_string());
+    if stored_node(&s, id)?.note == new {
+        return Ok(format!("No change: `{id}` already has this note.\n"));
+    }
+    let branch = s.branch_of(id).to_string();
+    if let Some(n) = s.nodes.get_mut(id) {
+        n.note = new.clone();
+    }
+    let suffix = if new.is_none() { ": cleared" } else { "" };
+    s.save_and_commit(Vec::new(), &format!("note {branch}/{id}{suffix}"))?;
+    Ok(format!(
+        "{} the note on `{id}`.\n",
+        if new.is_none() { "Cleared" } else { "Set" }
+    ))
+}
+
+/// Removes a node by hand, and its descendants only with `recursive`.
+pub fn rm(
+    project: Option<&str>,
+    id: &str,
+    reason: Option<&str>,
+    recursive: bool,
+) -> Result<String> {
+    let (mut s, _held) = open_locked(project)?;
+    stored_node(&s, id)?;
+    let desc = s.descendants(id);
+    if !desc.is_empty() && !recursive {
+        return Err(error::usage(format!(
+            "`{id}` has {} descendants; pass --recursive to remove them too",
+            desc.len()
+        )));
+    }
+    let branch = s.branch_of(id).to_string();
+    let mut body = String::new();
+    for x in std::iter::once(id.to_string()).chain(desc) {
+        s.nodes.remove(&x);
+        body += &format!("removed {branch}/{x}\n");
+    }
+    let reason = reason
+        .map(|r| r.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|r| !r.is_empty());
+    let subject = format!(
+        "rm {branch}/{id}: {}",
+        reason.as_deref().unwrap_or("removed by hand")
+    );
+    s.save_and_commit(Vec::new(), &format!("{subject}\n\n{body}"))?;
+    Ok(body)
+}
+
+pub const AGENT_INSTRUCTIONS: &str = "\
+This project has an rrecall map: a versioned map of what lives where, how it works, who owns what, \
+what was done, what is blocked and why decisions were made, as of its last run. Ask it one question \
+per call instead of reading the whole map: `rrecall ls` lists branches and ids; `rrecall show <id>` \
+prints one node with its sources (`--depth N` for more of its subtree, `--max-tokens N` to cap the size); \
+`rrecall find <text>` searches titles and bodies; `rrecall recent --since 7d` shows what changed lately; \
+`rrecall why <id>` shows when and why a node appeared. Add `--json` for JSON. \
+For the live status of a task, ask the tracker the map points to.
+";
+
+/// `rrecall builtin <id>`: what a built-in plugin's argv runs (spec §6.2).
+pub fn builtin(id: &str, entry: Option<&str>) -> Result<String> {
+    let mut input = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut input).context("reading stdin")?;
+    let entry = entry.unwrap_or_default();
+    match id {
+        "claude" | "codex" => crate::runner::run(id, &input),
+        "git-history" => crate::git_history::run(entry, &input),
+        "files" => crate::files::run(entry, &input),
+        "github" => crate::github::run(entry, &input),
+        "html" => crate::view::run(&input),
+        _ => crate::checks::run(id, &input).map(|out| out + "\n"),
+    }
+}
+
+pub fn import(project: Option<&str>, file: &Path) -> Result<String> {
+    let (mut s, _held) = open_locked(project)?;
+    let path = s.root.clone();
+    if s.nodes.len() > s.branches.len() {
+        return Err(error::usage(
+            "the map already has nodes; `rrecall import` seeds an empty map",
+        ));
+    }
+    let text =
+        std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+    let fname = file
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let usage = |line: usize, e: String| error::usage(format!("{fname} line {line}: {e}"));
+    let items = outline::parse(&text).map_err(|e| error::usage(format!("{fname}: {e}")))?;
+    let source = format!("import:{fname}");
+    node::check_source(&source)
+        .map_err(|e| error::usage(format!("{e}: rename the outline file")))?;
+
+    let mut new_branches = Vec::new();
+    let mut added = 0;
+    for item in &items {
+        let matched = s
+            .branches
+            .iter()
+            .find(|b| {
+                // limit: lowercasing is not full Unicode case folding: titles that differ only in
+                // final sigma (`ΟΣ` vs `οσ`) or other folding-only pairs stay two branches.
+                let title = item.title.to_lowercase();
+                b.id == title || b.title.to_lowercase() == title
+            })
+            .map(|b| b.id.clone());
+        let branch = match matched {
+            Some(id) if !item.detail.is_empty() => {
+                return Err(usage(
+                    item.line,
+                    format!(
+                        "`{}` is the branch `{id}`, whose question comes from {STORE_CONFIG}; drop the detail",
+                        item.title
+                    ),
+                ));
+            }
+            Some(id) => id,
+            None => {
+                let b = BranchDef {
+                    id: node::unique_slug(&item.title, |x| s.id_taken(x)),
+                    title: item.title.clone(),
+                    question: item.detail.clone(),
+                    granularity: String::new(),
+                };
+                // The same limits as a node: title 80, question as long as a body.
+                Node {
+                    parent: Some(b.id.clone()),
+                    ..new_node(&b.id, &b.title, &b.question, &source)
+                }
+                .validate()
+                .map_err(|e| usage(item.line, e))?;
+                let id = b.id.clone();
+                new_branches.push(b.clone());
+                s.add_branch(b);
+                id
+            }
+        };
+        added += add_items(&mut s, &item.children, &branch, &source)
+            .map_err(|(line, e)| usage(line, e))?;
+    }
+    let mut extra = Vec::new();
+    if !new_branches.is_empty() {
+        let old = std::fs::read_to_string(path.join(STORE_CONFIG))
+            .with_context(|| format!("reading {STORE_CONFIG}"))?;
+        let toml: String = new_branches.iter().map(config::branch_toml).collect();
+        extra.push((STORE_CONFIG.to_string(), Some(old + &toml)));
+    }
+    s.save_and_commit(
+        extra,
+        &format!(
+            "import {fname}: +{added} nodes, +{} branches",
+            new_branches.len()
+        ),
+    )?;
+    let ids: Vec<&str> = new_branches.iter().map(|b| b.id.as_str()).collect();
+    Ok(format!(
+        "Imported {added} nodes from {fname}{}\n",
+        if ids.is_empty() {
+            String::new()
+        } else {
+            format!("; new branches: {}", ids.join(", "))
+        }
+    ))
+}
+
+fn new_node(id: &str, title: &str, body: &str, source: &str) -> Node {
+    Node {
+        id: id.into(),
+        parent: None,
+        title: title.into(),
+        body: body.into(),
+        sources: vec![source.into()],
+        date: None,
+        state: None,
+        order: 0,
+        note: None,
+    }
+}
+
+/// Adds outline items under `parent` with core-assigned ids; returns how many nodes were added.
+fn add_items(
+    s: &mut Store,
+    items: &[outline::Item],
+    parent: &str,
+    source: &str,
+) -> Result<usize, (usize, String)> {
+    let mut n = 0;
+    // New nodes go after the parent's existing children (spec §3.1 `order`).
+    let base = s
+        .nodes
+        .values()
+        .filter(|x| x.parent.as_deref() == Some(parent))
+        .count();
+    for (i, item) in items.iter().enumerate() {
+        let order = base + i;
+        let id = node::unique_slug(&item.title, |x| s.id_taken(x));
+        let node = Node {
+            parent: Some(parent.into()),
+            order: order as u32,
+            ..new_node(&id, &item.title, &item.detail, source)
+        };
+        node.validate().map_err(|e| (item.line, e))?;
+        s.nodes.insert(id.clone(), node);
+        n += 1 + add_items(s, &item.children, &id, source)?;
+    }
+    Ok(n)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_names() {
+        for (url, base, gh) in [
+            (
+                "git@github.com:acme/widget.git",
+                "widget",
+                Some("acme/widget"),
+            ),
+            (
+                "https://github.com/acme/widget",
+                "widget",
+                Some("acme/widget"),
+            ),
+            (
+                "ssh://git@github.com/acme/widget.git/",
+                "widget",
+                Some("acme/widget"),
+            ),
+            ("https://example.org/x/kiln.git", "kiln", None),
+            (
+                "https://mirror.example/github.com/acme/tulip.git",
+                "tulip",
+                None,
+            ),
+            ("git@github.com.evil.example:acme/tulip.git", "tulip", None),
+            (
+                "https://user@GitHub.com:443/acme/tulip.git",
+                "tulip",
+                Some("acme/tulip"),
+            ),
+            ("git://github.com/acme/tulip", "tulip", Some("acme/tulip")),
+        ] {
+            assert_eq!(origin_basename(url), base, "{url}");
+            assert_eq!(github_repo(url).as_deref(), gh, "{url}");
+        }
+    }
+}
