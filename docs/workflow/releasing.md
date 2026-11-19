@@ -40,6 +40,7 @@ TL;DR: A `release-<ver>` branch comes off `develop`, a `hotfix-<ver>` branch off
 - Don't skip the PR back into `develop`, or the fixes made during the release are lost in the next one.
 - Don't tag with a `v` prefix, a suffix (`1.2.0-rc.1`) or a lightweight tag: plain annotated `X.Y.Z` tags only. The release workflow fails on a lightweight tag.
 - Don't publish the GitHub Release by hand: the tag push does it, and a hand-made one makes the workflow fail.
+- Don't move or delete a release tag while its workflow runs: its guard compares the tag once, so a later move can publish binaries built from another commit than the tag names. A tag ruleset on GitHub would enforce this.
 
 ## Hotfix branch (`hotfix-*`)
 ### Do

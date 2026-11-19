@@ -52,8 +52,8 @@ jobs:
       # A checkout of a tag ref does not carry the annotated tag object; fetch it explicitly.
       - run: git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}" "+refs/heads/main:refs/remotes/origin/main"
       # Publish only a tag on main, and only for the commit the build jobs checked out (the tag's
-      # commit when the workflow started): a tag on a feature or release branch, or one moved since,
-      # publishes nothing.
+      # commit when the workflow started): a tag on a feature or release branch, or one moved before
+      # the fetch above, publishes nothing. A move after that fetch is not caught (releasing.md).
       - run: |
           commit=$(git rev-parse "$GITHUB_REF_NAME^{commit}")
           built=$(git rev-parse "$GITHUB_SHA^{commit}")
