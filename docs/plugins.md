@@ -512,7 +512,7 @@ A runner is how a declarative plugin reaches an agent; rrecall ships `claude` an
 }
 ```
 
-Return the agent's JSON as `output`, what the call cost in USD (required; estimate it from token counts when the agent reports none, never report 0 for unknown) and the model the provider actually used, which goes into the lock. The core decodes `output` as the caller's own output, as strictly.
+Return the agent's JSON as `output`, what the call cost in USD (required; estimate it from token counts when the agent reports none, never report 0 for unknown) and the model the provider actually used, which goes into the lock. When the agent reports its token counts, return them as `usage` (all four keys; `input_tokens` is the input neither read from nor written to a prompt cache), which the run report sums per plugin; leave it out otherwise. The core decodes `output` as the caller's own output, as strictly.
 
 <!-- wire: runner-output -->
 ```json
@@ -532,7 +532,13 @@ Return the agent's JSON as `output`, what the call cost in USD (required; estima
     ]
   },
   "cost_usd": 0.0132,
-  "model": "claude-sonnet-4-5"
+  "model": "claude-sonnet-4-5",
+  "usage": {
+    "input_tokens": 1830,
+    "output_tokens": 412,
+    "cache_read_tokens": 0,
+    "cache_write_tokens": 2150
+  }
 }
 ```
 

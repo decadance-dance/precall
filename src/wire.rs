@@ -321,14 +321,44 @@ pub struct RunnerOutput {
     pub output: serde_json::Value,
     pub cost_usd: f64,
     pub model: String,
+    #[serde(default)]
+    pub usage: Option<Usage>,
 }
 
-/// A runner's answer: `cost_usd` a finite number of at least 0, `model` not empty.
+/// The tokens a runner call used (spec §6.8). The counts are disjoint: `input_tokens` is the
+/// input neither read from nor written to a prompt cache.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Usage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+}
+
+/// Saturating: the counts come from runners and agents, untrusted.
+impl std::ops::AddAssign for Usage {
+    fn add_assign(&mut self, o: Usage) {
+        self.input_tokens = self.input_tokens.saturating_add(o.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(o.output_tokens);
+        self.cache_read_tokens = self.cache_read_tokens.saturating_add(o.cache_read_tokens);
+        self.cache_write_tokens = self.cache_write_tokens.saturating_add(o.cache_write_tokens);
+    }
+}
+
+/// A runner's answer: `cost_usd` a finite number of at least 0, `model` not empty, `usage`
+/// absent or all four counts.
 pub fn decode_runner(plugin: &str, stdout: &str) -> Result<RunnerOutput> {
-    let obj = parse(plugin, stdout)?;
+    let mut obj = parse(plugin, stdout)?;
     no_nulls(&obj).map_err(|e| anyhow!("plugin `{plugin}`: output {e}"))?;
-    let out = RunnerOutput::deserialize(serde_json::Value::Object(obj))
+    let usage = obj
+        .remove("usage")
+        .map(Usage::deserialize)
+        .transpose()
+        .map_err(|e| anyhow!("plugin `{plugin}`: `usage` does not decode: {e}"))?;
+    let mut out = RunnerOutput::deserialize(serde_json::Value::Object(obj))
         .map_err(|e| anyhow!("plugin `{plugin}`: output does not decode: {e}"))?;
+    out.usage = usage;
     if !out.cost_usd.is_finite() || out.cost_usd < 0.0 {
         bail!(
             "plugin `{plugin}`: `cost_usd` {} is not a cost",
@@ -956,6 +986,45 @@ mod tests {
             let e = decode_runner("fake", bad).unwrap_err().to_string();
             assert!(
                 e.contains("plugin `fake`") && e.contains(want),
+                "{bad}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn runner_usage_is_optional_and_strict() {
+        let r = decode_runner("fake", r#"{"output":{},"cost_usd":0,"model":"m"}"#).unwrap();
+        assert_eq!(r.usage, None);
+        let r = decode_runner(
+            "fake",
+            r#"{"output":{},"cost_usd":0,"model":"m","usage":{"input_tokens":1,"output_tokens":2,"cache_read_tokens":3,"cache_write_tokens":4}}"#,
+        )
+        .unwrap();
+        let u = Usage {
+            input_tokens: 1,
+            output_tokens: 2,
+            cache_read_tokens: 3,
+            cache_write_tokens: 4,
+        };
+        assert_eq!(r.usage, Some(u));
+        let mut twice = u;
+        twice += u;
+        assert_eq!((twice.input_tokens, twice.cache_write_tokens), (2, 8));
+        // A runner's counts are untrusted: a sum saturates instead of overflowing.
+        twice.output_tokens = u64::MAX;
+        twice += u;
+        assert_eq!(twice.output_tokens, u64::MAX);
+        for bad in [
+            r#"{"input_tokens":1,"output_tokens":2,"cache_read_tokens":3}"#,
+            r#"{"input_tokens":-1,"output_tokens":2,"cache_read_tokens":3,"cache_write_tokens":4}"#,
+            r#"{"input_tokens":1.5,"output_tokens":2,"cache_read_tokens":3,"cache_write_tokens":4}"#,
+            r#"{"input_tokens":1,"output_tokens":2,"cache_read_tokens":3,"cache_write_tokens":4,"total":10}"#,
+            "null",
+        ] {
+            let doc = format!(r#"{{"output":{{}},"cost_usd":0,"model":"m","usage":{bad}}}"#);
+            let e = decode_runner("fake", &doc).unwrap_err().to_string();
+            assert!(
+                e.contains("plugin `fake`") && e.contains("usage"),
                 "{bad}: {e}"
             );
         }
