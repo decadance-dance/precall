@@ -307,11 +307,11 @@ fn is_mcp_tool(name: &str) -> bool {
 /// Claude Code reads it (the macOS keychain entry, or `.credentials.json` elsewhere) from
 /// `CLAUDE_SECURESTORAGE_CONFIG_DIR`, set to the user's own config dir (empty for the default
 /// `~/.claude`), and refreshes it there in place as any session does; nothing is copied or linked.
-// limit: a relative `CLAUDE_CONFIG_DIR` is made absolute against the runner's working dir; if
-// Claude Code names a keychain entry after the relative text, the call fails as not logged in.
+// limit: `main` makes a relative `CLAUDE_CONFIG_DIR` absolute against the dir rrecall started in;
+// if Claude Code names a keychain entry after the relative text, the call fails as not logged in.
 fn claude_config(dir: &Path) -> Result<Vec<(String, String)>> {
     let user = match std::env::var_os("CLAUDE_CONFIG_DIR").filter(|d| !d.is_empty()) {
-        Some(d) => utf8(&std::path::absolute(PathBuf::from(d))?)?.to_string(),
+        Some(d) => utf8(Path::new(&d))?.to_string(),
         None => String::new(),
     };
     let config = dir.join("claude-config");

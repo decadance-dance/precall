@@ -180,8 +180,13 @@ impl W {
     }
 
     fn raw(&self, args: &[&str]) -> Out {
+        self.raw_env(args, &[])
+    }
+
+    fn raw_env(&self, args: &[&str], envs: &[(&str, &str)]) -> Out {
         let o = Command::new(env!("CARGO_BIN_EXE_rrecall"))
             .args(args)
+            .envs(envs.iter().copied())
             .current_dir(self.root.join("work"))
             .env("HOME", self.root.join("home"))
             .env("XDG_DATA_HOME", self.root.join("data"))
@@ -1774,6 +1779,36 @@ fn the_builtin_slack_collector_reads_through_a_connector_runner_once_a_day() {
     assert_ne!(only_plain, snippet);
     w.config(&format!("{plain}{only_plain}{judge}"));
     w.run_code(&[], 4);
+}
+
+#[test]
+fn a_relative_claude_config_dir_is_resolved_against_the_dir_rrecall_runs_in() {
+    let w = W::new();
+    agent(&w, "ok", &json!({"proposals": []}));
+    let readme = include_str!("../README.md");
+    let snippet = readme
+        .split("```toml\n")
+        .nth(1)
+        .unwrap()
+        .split("```")
+        .next()
+        .unwrap();
+    w.config(&format!("[[plugins]]\nid = \"claude\"\n\n{snippet}"));
+    let o = w.raw_env(
+        &["--project", "kiln", "run", "--force"],
+        &[("CLAUDE_CONFIG_DIR", "login")],
+    );
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    // Plugins run in their own dir; the login is the one next to where rrecall was started.
+    let env = std::fs::read_to_string(w.root.join("home/agent/claude.env.1")).unwrap();
+    let want = format!(
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR={}",
+        std::fs::canonicalize(w.root.join("work"))
+            .unwrap()
+            .join("login")
+            .display()
+    );
+    assert!(env.lines().any(|l| l == want), "{env}");
 }
 
 // ---- Built-in judges (spec §10, §6.5) ----

@@ -92,7 +92,20 @@ enum Cmd {
     Builtin { id: String },
 }
 
+/// Plugins run in their own dir (spec §6.1), so a relative `CLAUDE_CONFIG_DIR` is made absolute
+/// against the dir rrecall was started in, before anything runs.
+fn absolute_claude_config() {
+    if let Some(d) = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|d| !d.is_empty())
+        && let Ok(abs) = std::path::absolute(&d)
+        && abs.as_os_str() != d
+    {
+        // SAFETY: the first call in `main`, before any thread starts.
+        unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", abs) };
+    }
+}
+
 fn main() -> ExitCode {
+    absolute_claude_config();
     let cli = Cli::parse();
     let p = cli.project.as_deref();
     let out = match &cli.cmd {
