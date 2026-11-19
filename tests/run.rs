@@ -917,6 +917,73 @@ fn a_missing_verdict_is_asked_once_more_with_only_its_proposal() {
     }
 }
 
+/// A runner judge `pjudge` over `repo`'s `a` and `b`, its runner answering its calls with
+/// `verdicts` (one list per call).
+fn runner_judged(verdicts: &[Value]) -> W {
+    let w = world(&props(&[
+        add("a", "layout", "Queue"),
+        add("b", "layout", "Cache"),
+    ]));
+    let outs: Vec<String> = verdicts
+        .iter()
+        .map(|v| {
+            json!({"output": {"verdicts": v}, "cost_usd": 0.01, "model": "fake-1"}).to_string()
+        })
+        .collect();
+    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    w.config(&format!(
+        "{cfg}{}{}",
+        w.inst(
+            "runner",
+            "runner",
+            &format!("scenario = \"seq\", out = {}", q(&outs.join("\n")))
+        ),
+        w.inst("pjudge", "pjudge", ""),
+    ));
+    w
+}
+
+#[test]
+fn a_judge_key_without_its_collector_counts_in_the_first_call_and_the_reask() {
+    let w = runner_judged(&[
+        json!([{"key": "a", "verdict": "accept", "reason": "ok"}]),
+        json!([{"key": "b", "verdict": "accept", "reason": "ok"}]),
+    ]);
+    w.run_code(&[], 0);
+    assert_eq!(w.calls("runner"), 2);
+    let map = w.map("layout");
+    assert!(map.contains("Queue") && map.contains("Cache"), "{map}");
+    let report = w.report();
+    for call in ["judge", "reask"] {
+        let note = format!(
+            "- bare keys: pjudge in round 1 ({call} call): 1 taken as the one key given that ends in it\n"
+        );
+        assert!(report.contains(&note), "{note}\n{report}");
+    }
+}
+
+#[test]
+fn an_ambiguous_judge_key_fails_the_whole_output() {
+    // `a` is also the proposal key of `github/a`.
+    let w = runner_judged(&[json!([
+        {"key": "a", "verdict": "accept", "reason": "ok"},
+        {"key": "repo/b", "verdict": "accept", "reason": "ok"},
+    ])]);
+    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    let github = props(&[add("a", "layout", "Log")]);
+    w.config(&cfg.replacen(&q(&props(&[])), &q(&github), 1));
+    w.run_code(&[], 5);
+    assert_eq!(w.calls("runner"), 1, "no re-ask after an invalid output");
+    let map = w.map("layout");
+    assert!(!map.contains("Queue") && !map.contains("Cache"), "{map}");
+    let report = w.report();
+    assert!(
+        report.contains("key `a` was not given; it is the proposal key of 2 keys given"),
+        "{report}"
+    );
+    assert!(!report.contains("bare keys"), "{report}");
+}
+
 #[test]
 fn a_verdict_missing_twice_drops_only_its_proposal() {
     let w = reasked(&[ACCEPT_A, r#"{"verdicts":[]}"#]);
