@@ -1171,6 +1171,13 @@ fn judge_feedback_from_a_call_that_saw_a_withheld_node_does_not_reach_a_disallow
         (theirs["reason"].as_str(), theirs["instruction"].as_str()),
         (Some("fake revise"), Some("fake instruction"))
     );
+    // An add under `layout` shows the judge the nodes there (§6.5 `nodes`), `api` among them;
+    // under `how-it-works`, where `repo` has no node, it shows none of `repo`'s.
+    let adding = |parent: &str| json!({"key": "n", "op": "add", "parent": parent, "title": "Notes", "body": "", "sources": ["note:n.md"], "reason": "noted"});
+    let v = &back(&[&adding("layout")])["n"];
+    assert!(v["reason"].as_str().unwrap().starts_with("withheld"), "{v}");
+    let v = &back(&[&adding("how-it-works")])["n"];
+    assert_eq!(v["reason"], "fake revise", "{v}");
 }
 
 /// The fake `claude` answers with `out` (see tests/fixtures/bin/claude).
