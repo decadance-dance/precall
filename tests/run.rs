@@ -1938,3 +1938,64 @@ fn an_add_whose_branch_changed_after_it_was_judged_goes_back() {
     assert!(!w.map("layout").contains("queue-2"), "{}", w.map("layout"));
     assert!(w.report().contains("judged under"), "{}", w.report());
 }
+
+#[test]
+fn an_add_a_judge_saw_without_a_destination_does_not_commit() {
+    let w = W::new();
+    let anchor = r#"{"id":"anchor","parent":"how-it-works","title":"Anchor","body":"","sources":["file:a.md"],"order":0}"#;
+    w.seed("layout", &[PARENT, QUEUE]);
+    w.seed("how-it-works", &[anchor]);
+    let fake = q(&fake());
+    w.plugin(
+        "lcol",
+        "collector",
+        &format!(
+            "[collector]\nscope = [\"layout\"]\nsource_kinds = [\"{{kind}}\"]\nfingerprint = [\"/bin/cat\", \"{{fp}}\"]\ncommand = [{fake}]\nresolve = [{}]\n",
+            q(&format!(
+                "{}/tests/fixtures/bin/fake-resolve",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+        ),
+        &format!(
+            "fp = {}\nkind = \"gh-pr\"\n",
+            q(&w.fp().to_string_lossy())
+        ),
+    );
+    let mp = json!({"key": "mp", "op": "move", "id": "parent", "parent": "anchor", "sources": ["file:p.md"], "reason": "moved"});
+    let ma = json!({"key": "ma", "op": "move", "id": "anchor", "parent": "layout", "sources": ["file:a.md"], "reason": "moved"});
+    let a = json!({"key": "q", "op": "add", "parent": "parent", "title": "Queue", "body": "", "sources": ["gh-pr:o/r#9"], "reason": "found"});
+    let say = |vs: &[(&str, &str)]| {
+        json!({"verdicts": vs.iter().map(|(k, v)| json!({"key": k, "verdict": v, "reason": format!("{v}")})).collect::<Vec<_>>()}).to_string()
+    };
+    w.config(&format!(
+        "max_rounds = 1\n{}{}{}{}{}",
+        w.inst("repo", "col", &format!("out = {}", q(&props(&[mp, ma])))),
+        w.inst("lay", "lcol", &format!("out = {}", q(&props(&[a])))),
+        w.inst(
+            "check",
+            "check",
+            &format!(
+                "out = {}",
+                q(&say(&[
+                    ("repo/mp", "accept"),
+                    ("repo/ma", "reject"),
+                    ("lay/q", "accept")
+                ]))
+            )
+        ),
+        w.inst(
+            "judge",
+            "judge",
+            &format!(
+                "out = {}",
+                q(&say(&[("repo/mp", "reject"), ("lay/q", "accept")]))
+            )
+        ),
+        w.inst("dup", "judge", "scenario = \"all\", out = \"accept\""),
+    ));
+    w.run_code(&[], 0);
+    // Without the anchor move, the parent move takes the add out of `lay`'s scope, so no judge
+    // compared it with `layout`, where it would land once the parent move is rejected.
+    assert_eq!(node_ids(&w.input("dup", 1)), ["anchor"]);
+    assert!(!w.map("layout").contains("queue-2"), "{}", w.map("layout"));
+}

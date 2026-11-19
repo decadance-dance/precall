@@ -1009,7 +1009,8 @@ impl Run {
         // Step 7: checks over the diff, then judges over what every check accepted.
         let map_ids: Vec<String> = work.nodes.keys().cloned().collect();
         // The branches each judge was shown an add or move under, by proposal key.
-        let mut judged_in: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        // `None` when the judge's batch gave it no destination (it left its collector's scope).
+        let mut judged_in: BTreeMap<String, BTreeSet<Option<String>>> = BTreeMap::new();
         for check in self.of_kind(Kind::Check) {
             let live: Vec<&Item> = valid
                 .iter()
@@ -1042,11 +1043,14 @@ impl Run {
                     .filter(|it| !dropped.contains_key(&it.key()))
                     .collect();
                 let lands = lands(work, rules, earlier, &live);
-                for (key, branch) in &lands {
+                for it in live
+                    .iter()
+                    .filter(|it| matches!(it.p.op, wire::Op::Add | wire::Op::Move))
+                {
                     judged_in
-                        .entry(key.clone())
+                        .entry(it.key())
                         .or_default()
-                        .insert(branch.clone());
+                        .insert(lands.get(&it.key()).cloned());
                 }
                 self.judge_with(
                     &judge,
@@ -1075,12 +1079,16 @@ impl Run {
                 .filter_map(|it| {
                     let shown = judged_in.get(&it.key())?;
                     let now = landed(&post, it)?;
-                    let away = shown.iter().find(|b| **b != now)?;
+                    let away = shown.iter().find(|b| b.as_deref() != Some(now.as_str()))?;
+                    let away = match away {
+                        Some(b) => format!("judged under `{b}`"),
+                        None => "judged with no place to land".to_string(),
+                    };
                     Some((
                         it.key(),
                         format!(
-                            "judged under `{away}` but lands under `{now}`, since a move it \
-                             depended on was not accepted: propose it again"
+                            "{away} but lands under `{now}`, since a move it depended on was \
+                             not accepted: propose it again"
                         ),
                     ))
                 })
