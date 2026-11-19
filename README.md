@@ -1,5 +1,5 @@
 <p align="center">
-  <img alt="rrecall: the command rrecall run &amp;&amp; rrecall open; five sources, the repo, its git history, GitHub, Slack and your own plugins, feed one run that fingerprints, collects, checks, judges, sends rejections back for at most max_rounds rounds (two by default) and commits; the run writes the map, kept in its own git repository, with the branches layout, how-it-works, people, done, blocked and decisions, where one new node lands under decisions; the commit reads run 2026-11-19T09:14Z: +3 ~1 -0 (rejected 2), for git diff and git blame; exit 0 done, 4 aborted, 5 partial" src="docs/assets/banner.svg" width="100%">
+  <img alt="rrecall: the command rrecall run &amp;&amp; rrecall open; five sources, the repo, its git history, GitHub, Slack and your own plugins, feed one run that fingerprints, collects, checks, judges, sends rejections back, up to 2 rounds by default, and commits; the run writes the map, kept in its own git repository, with the branches layout, how-it-works, people, done, blocked and decisions, where one new node lands under decisions; the commit reads run 2026-11-19T09:14Z: +3 ~1 -0 (rejected 2), for git diff and git blame; the tagline says nothing due means no model call and no change; exit 0 done, 4 aborted, 5 partial" src="docs/assets/banner.svg" width="100%">
 </p>
 
 <h3 align="center">A versioned map of a software project, built from its own sources, for coding agents and people</h3>
@@ -32,7 +32,8 @@ judges** accept or reject each change they propose, sending rejections back for 
 anything is committed. The map lives in **its own git repository**, so every change shows in
 `git diff` and `git blame`. It is **stable**: a run with no collector due calls no model and
 leaves the map byte for byte as it was (invariant **I1**), and no run removes a node without evidence.
-Coding agents query it one branch at a time; people read it as an HTML page.
+Coding agents query it from the command line, one node or branch with `rrecall show`; people read
+it as an HTML page.
 
 <p align="center">
   <img alt="The HTML view of the map of an invented project, lanternfish: a mind map with the branches Layout, How it works and People and their children, and on the right the inspector for the node Sync protocol under How it works: its body, the user's note, its source import:lanternfish-outline.txt, its four children and its history, oldest first, with the import commit and the note commit" src="docs/screenshots/html-view.png" width="90%">
@@ -45,10 +46,11 @@ Coding agents query it one branch at a time; people read it as an HTML page.
 ### 🔥 2026.11.19: rrecall 0.1.0, the first release
 - **A map that stays put**: rrecall builds the map from a project's repository, its GitHub issues
   and its Slack, and keeps it in its own git repository on your machine. A run with no collector
-  due calls no model and changes nothing; a run removes a node only with evidence that it is no
+  due calls no model and leaves the map as it was; a run removes a node only with evidence that it is no
   longer true (`rrecall rm` removes one by hand).
-- **Answers for agents and people**: `rrecall ls`, `show`, `find`, `why` and `recent` answer one
-  branch at a time in compact Markdown or JSON, `rrecall agent-instructions` prints the paragraph
+- **Answers for agents and people**: `rrecall ls` lists the tree, `show` prints one node or branch
+  with its subtree, `find`, `why` and `recent` search the map and its history, in compact Markdown
+  or JSON; `rrecall agent-instructions` prints the paragraph
   for an agent's instruction file, and `rrecall open` renders the HTML view.
 - **Collectors, checks and judges on Claude Code or Codex**: four built-in collectors, three
   checks and three judges; a rejected change goes back to its collector for at most `max_rounds`
@@ -66,14 +68,15 @@ Coding agents query it one branch at a time; people read it as an HTML page.
 ## 🚀 Key features
 
 ### 🗺️ A map that stays put
-> *Every run that changes the map is one git commit, and a run with nothing new changes nothing.*
+> *Every run that changes the map or its lock is one git commit; a run with no collector due calls no model and leaves the map as it was.*
 
 * **Its own git repository**: one JSONL file per branch, one node per line, sorted by id, so an
   unchanged node keeps a byte-identical line and `git blame` names the run that last changed it.
-  The store has no remote; rrecall never adds one and never sends the map anywhere.
+  The store stays on your machine: it has no remote, and rrecall never adds one.
 * **Nothing due, nothing spent** (I1): each collector has a cheap fingerprint (a commit, the
   newest `updatedAt`, a hash) or a `min_interval`; when none is due, the run calls no model and
-  makes no commit.
+  leaves the map as it was, and commits at most a lock change (a collector whose fingerprint
+  failed is marked unsettled).
 * **No loss without evidence**: a run's removal must cite evidence that the fact ended (an issue
   closed, a file deleted, a decision reversed); "not seen this time" is never one. A run never
   removes a node with your note, nor one whose children it would leave behind (`rrecall rm`
@@ -88,14 +91,15 @@ Coding agents query it one branch at a time; people read it as an HTML page.
 * **Fail closed**: when a check or judge fails, its proposals are dropped, not committed; a source
   that cannot be reached keeps its nodes. Either way the run exits 5 and those collectors run again next time.
 * **Costs you can see**: the run report lists every proposal with its verdicts, and the cost and
-  tokens of each plugin; `max_cost_usd` caps a run.
+  tokens of each plugin. `max_cost_usd` stops new model calls once a run's recorded spend reaches
+  it; calls already running finish, so the spend can pass it.
 
 | Kind | Built-in | What it does | Needs a model |
 |---|---|---|---|
 | collector | `files` | The repo's docs, specs, manifests and layout (`codebase`), or a folder of notes (`notes`) | yes |
 | collector | `git-history` | One `done` node per release tag, or per merged branch in a repo without tags | no (`git`) |
 | collector | `github` | Pull requests, issues and releases through `gh` | yes (`gh`) |
-| collector | `slack` | Named channels and DMs, at most once a day, through the claude.ai Slack connector | yes (`claude`) |
+| collector | `slack` | Named channels and DMs through the claude.ai Slack connector; at most daily while its setup is unchanged | yes (`claude`) |
 | check | `no-op`, `size-limits`, `secrets` | Reject rewording without a change, over-long titles and bodies, and anything that looks like a credential | no |
 | judge | `support`, `removal`, `duplicate` | Reject what the sources do not back, a removal whose evidence does not show the end, and an add that restates a node | yes |
 | runner | `claude`, `codex` | Run Claude Code (`claude -p`) or Codex (`codex exec`) for collectors and judges written as a prompt | — |
@@ -104,9 +108,9 @@ Coding agents query it one branch at a time; people read it as an HTML page.
 ### 🤖 Made for coding agents, readable by people
 > *An agent asks one question at a time and gets a compact answer; a person opens one page.*
 
-* **One branch at a time**: `ls` prints titles and ids to depth 2 (about 1,500 tokens for a
-  300-node map), `show <id> --max-tokens N` cuts at a node boundary and says what it left out,
-  and `--json` gives scripts the same nodes.
+* **Small answers**: `ls` prints titles and ids to depth 2 (about 1,500 tokens for a 300-node
+  map), `show <id>` prints one node or branch with its subtree and `--max-tokens N` cuts it at a
+  node boundary and says what it left out, and `--json` gives scripts the same nodes.
 * **Seven questions**: where something lives, how it works, who owns what, what was done, what is
   blocked and why a decision was made are branches; what was worked on lately is `rrecall recent`.
 * **Tell your agent**: `rrecall agent-instructions` prints a paragraph for `AGENTS.md` or
@@ -121,7 +125,7 @@ Coding agents query it one branch at a time; people read it as an HTML page.
   `claude` or `codex` runner; a program in any language that reads and writes JSON can be any kind.
 * **Install and trust**: `rrecall plugin add <git-url|path>`, `rrecall plugin trust <dir>` for a
   project's `.rrecall/plugins/`, `rrecall plugin list`; `rrecall doctor` checks binaries, logins
-  and access without a model call.
+  and each collector's access without a model call (one with only a `min_interval` is checked by a run).
 * **Keep a source's text where you want it**: `allowed_runners` limits which runner instances may
   receive a collector's content; hooks may deny a run or a commit.
 * **Guide and example**: the [plugin author guide](docs/plugins.md) and an example meeting-notes
@@ -130,8 +134,8 @@ Coding agents query it one branch at a time; people read it as an HTML page.
 ## ⚡ Quick start
 
 You need `git`; for runs that use a model, [`claude`](https://docs.anthropic.com/en/docs/claude-code)
-(Claude Code) or [`codex`](https://github.com/openai/codex), logged in; for the `github`
-collector, [`gh`](https://cli.github.com/), logged in. Building from source needs
+(Claude Code), logged in, the default runner (for Codex, see below); for the `github` collector,
+[`gh`](https://cli.github.com/), logged in. Building from source needs
 [rustup](https://rustup.rs/) with a stable toolchain.
 
 With Homebrew, on macOS or Linux:
@@ -159,32 +163,61 @@ Then, from inside your project's repository:
 ```bash
 rrecall init                # the map store, named after the origin remote; enables repo (files), github for a GitHub origin, the checks, judges and html view
 rrecall doctor              # can each enabled plugin run? binaries, logins, access; no model call
-rrecall run                 # collect, check, judge, commit (the first run reads everything)
+rrecall run                 # collect, check, judge, commit (the first run reads in full, within each collector's limits)
 rrecall ls                  # the branches and their nodes, to depth 2
-rrecall show <id>           # one node and its subtree, with bodies and sources
-rrecall find <text>         # nodes whose title or body matches
-rrecall why <id>            # when a node appeared and changed, and why
+rrecall show decisions      # one node or branch and its subtree, with bodies and sources
+rrecall find release        # nodes whose title or body matches
 rrecall open                # render the HTML view and open it
 rrecall agent-instructions  # a paragraph for your agent's instruction file
 ```
 
 The store lives in `$XDG_DATA_HOME/rrecall/<project>/` (`~/.local/share/rrecall/<project>/`) and
 its config in its `rrecall.toml`. `rrecall import <outline>` seeds an empty map from an indented
-outline; `rrecall status` prints the last run's summary.
+outline; `rrecall status` prints the last run's summary, and `rrecall why` with a node id from
+`ls` or `find` tells when that node appeared and changed, and why.
+
+<details>
+<summary><b>Codex instead of Claude Code</b></summary>
+<br>
+
+`init` enables the user config's default runner, `claude` unless you set another. To run
+collectors and judges on Codex, set it in `~/.config/rrecall/config.toml`
+(`$XDG_CONFIG_HOME/rrecall/config.toml`) before `rrecall init`:
+
+```toml
+runner = "codex"
+```
+
+Codex reports tokens but no cost, so the `codex` instance in the store's `rrecall.toml` needs a
+price, in USD per 1M tokens, for each model it reports; a call whose model has none fails
+([spec §6.8](docs/SPEC.md#68-runner-contract-and-what-reaches-a-model)). Replace the example with
+your model's name and prices:
+
+```toml
+[[plugins]]
+id = "codex"
+
+[plugins.params]
+prices = { "your-model" = { input = 1.25, cached_input = 0.125, output = 10.0 } }
+```
+
+</details>
 
 | Exit | Meaning |
 |---|---|
-| `0` | Done. For `run`: every collector ran and every proposal was settled (rejections are a normal outcome) |
+| `0` | Done. For `run`: every collector that was due ran and every proposal was settled (rejections are a normal outcome); a run with nothing due exits 0 too |
 | `1` | Not found, or another error (a corrupt map file, a git failure); `doctor`: a check failed |
 | `2` | Usage error |
 | `3` | No map for this project |
 | `4` | The run was aborted before its commit (a manifest error, a hook denied it, another run holds the lock); the store is unchanged |
-| `5` | The run committed what was accepted, but not everything ran (a source unreachable, the budget spent, a check or judge failed); those collectors run again next time |
+| `5` | Not everything ran (a source unreachable, the budget spent, a check or judge failed); what was accepted is committed, if anything was, and those collectors run again next time |
 
 > [!WARNING]
-> rrecall keeps the map on your machine, but collectors and judges send source text (code, issues,
-> chat messages) to the model provider of the agent that runs them, as any coding-agent session
-> does. Use `allowed_runners` to keep a source on the runners you choose.
+> The map store stays on your machine, but each model call sends the agent's provider what that
+> collector or judge reads: source text (code, issues, chat messages) and the map nodes in its
+> scope, your notes on them included ([spec §6.8](docs/SPEC.md#68-runner-contract-and-what-reaches-a-model)),
+> as any coding-agent session would. Use `allowed_runners` to keep a source's text and nodes on the
+> runners you choose.
 
 <details>
 <summary><b>Slack</b></summary>
@@ -215,7 +248,7 @@ allowed_runners = ["claude-slack", "claude"]
 params = { channels = ["eng-platform"], dms = [], lookback_days = 14 }
 ```
 
-It runs at most once a day (`min_interval = "1d"`), reads from a day before its last settled run but never further back than `lookback_days` (the first run, and `--force`, read the last `lookback_days` days) and proposes decisions, people and blockers, each citing `slack:<channel-id>/<ts>`. `allowed_runners` keeps Slack text on these two runner instances; judges can stay on the plain `claude` one. `connectors = true` runs the agent in a fresh Claude Code config dir that keeps your login: your CLAUDE.md, settings, permission rules, hooks and local plugins stay out; what your account syncs from claude.ai (its connectors and synced plugins) still loads.
+It runs at most once a day while its setup is unchanged and its last run settled (`min_interval = "1d"`; `--force`, a changed setup or an unsettled run make it due sooner), reads from a day before its last settled run but never further back than `lookback_days` (the first run, and `--force`, read the last `lookback_days` days) and proposes decisions, people and blockers, each citing `slack:<channel-id>/<ts>`. `allowed_runners` keeps Slack text on these two runner instances; judges can stay on the plain `claude` one. `connectors = true` runs the agent in a fresh Claude Code config dir that keeps your login: your CLAUDE.md, settings, permission rules, hooks and local plugins stay out; what your account syncs from claude.ai (its connectors and synced plugins) still loads.
 
 </details>
 
@@ -225,7 +258,8 @@ It runs at most once a day (`min_interval = "1d"`), reads from a day before its 
 flowchart TB
     load(["<b>rrecall run</b><br/>config · lock · manifests"])
     fp{{"<b>Fingerprint</b><br/>which collectors are due?"}}
-    idle(["<b>Nothing due</b><br/>no model call · no commit (I1)"])
+    idle(["<b>Nothing due</b><br/>no model call · map unchanged (I1)<br/>report · exit 0"])
+    abort(["<b>Aborted</b> · exit 4<br/>store unchanged"])
 
     subgraph round["max_rounds rounds"]
         direction TB
@@ -235,19 +269,21 @@ flowchart TB
         judges["<b>Judges</b><br/>support · removal · duplicate"]
     end
 
-    commit["<b>Commit</b><br/>map files and lock<br/>one git commit"]
-    view(["<b>View</b> · html<br/>report · exit 0 or 5"])
+    commit["<b>Commit</b><br/>if the map or lock changed<br/>one git commit"]
+    view(["<b>Views · report</b><br/>exit 0 or 5"])
 
     load --> fp
+    load -- "manifest error ·<br/>store locked" --> abort
     fp -- "none due" --> idle
     fp -- "due" --> collect --> core --> checks --> judges
-    judges -- "rejected or revise:<br/>back to its collector" --> collect
-    judges -- "accepted" --> commit --> view
+    judges -- "rejected or revise,<br/>while a round is left" --> collect
+    judges -- "rounds done" --> commit --> view
+    commit -- "a hook denies<br/>the commit" --> abort
 
     classDef accent fill:#ecfdf5,stroke:#10b981,color:#0f172a
     classDef verdict fill:#f8fafc,stroke:#64748b,color:#0f172a
     class collect,core,checks,judges accent
-    class commit,view,idle verdict
+    class commit,view,idle,abort verdict
     style round fill:#ecfdf5,stroke:#10b981,stroke-width:2px,color:#047857
 ```
 
@@ -259,7 +295,7 @@ flowchart TB
 - **Decide**: the core rejects what breaks an invariant before any plugin sees it; then every check
   runs over the diff and every judge over what the checks accepted, with the sources resolved.
   Two proposals that change the same node are both sent back as a conflict.
-- **Commit**: the accepted changes and the lock in one commit whose message lists each change
+- **Commit**: after the last round, the accepted changes and the lock in one commit, when either changed, whose message lists each change
   with its collector and sources (`run 2026-11-19T09:14Z: +3 ~1 -0 (rejected 2)`); the full run
   report stays in the store's `runs/`, and `rrecall status` prints its summary.
 
@@ -309,7 +345,7 @@ protocol and the CLI in full.
 
 ```bash
 bin/check                              # the merge gate: cargo fmt --check, clippy -D warnings, cargo test
-cargo test <name>                      # one test first; agents, gh and plugins are faked, no logins needed
+cargo test merge::tests               # one test or module first; agents, gh and plugins are faked, no logins needed
 RRECALL_LIVE=1 cargo test -- --ignored # live tests against your real claude and codex logins (they cost money)
 ```
 
