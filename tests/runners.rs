@@ -60,8 +60,10 @@ impl T {
             env!("CARGO_MANIFEST_DIR"),
             std::env::var("PATH").unwrap_or_default()
         );
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_rrecall"));
-        cmd.args(["builtin", id])
+        // A umask that lets other users read what the runner creates unless it says otherwise.
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "umask 022 && exec \"$0\" builtin \"$1\""])
+            .args([env!("CARGO_BIN_EXE_rrecall"), id])
             .env("PATH", path)
             .env("HOME", self.root.join("home"))
             .env("RRECALL_STATE_DIR", self.root.join("state"))
@@ -431,4 +433,40 @@ fn a_timeout_too_short_for_a_wrap_up_says_so() {
     let t = T::new("sleep", "{}");
     let o = t.call("claude", "m", 1, None);
     assert!(!o.ok && o.stderr.contains("no wrap-up"), "{}", o.stderr);
+}
+
+#[test]
+fn a_killed_turn_that_reported_its_cost_is_charged_that_cost() {
+    let t = T::new("result-sleep", r#"{"texts":{}}"#);
+    let out = json_of(&t.call("claude", "m", 15, None));
+    assert!(
+        (out["cost_usd"].as_f64().unwrap() - 0.75).abs() < 1e-9,
+        "{out}"
+    );
+}
+
+#[test]
+fn a_record_torn_by_the_kill_does_not_lose_the_wrap_up() {
+    let t = T::new("torn", r#"{"texts":{}}"#);
+    let prices = r#"{"claude-fake-1":{"input":0.5,"cached_input":0,"output":0}}"#;
+    let out = json_of(&t.call("claude", "m", 11, Some(prices)));
+    assert!(
+        (out["cost_usd"].as_f64().unwrap() - 0.6).abs() < 1e-9,
+        "{out}"
+    );
+}
+
+#[test]
+fn the_scratch_dir_and_its_files_are_owner_only() {
+    let t = T::new("perms", r#"{"texts":{}}"#);
+    json_of(&t.call("claude", "m", 60, None));
+    assert_eq!(t.rec("claude.perms"), "drwx------\n-rw-------\n");
+}
+
+#[test]
+fn a_key_twice_in_codex_usage_fails_the_call() {
+    let t = T::new("dupusage", r#"{"texts":{}}"#);
+    let prices = r#"{"m":{"input":1,"cached_input":0,"output":0}}"#;
+    let o = t.call("codex", "m", 60, Some(prices));
+    assert!(!o.ok && o.stderr.contains("duplicate key"), "{}", o.stderr);
 }

@@ -1,6 +1,7 @@
 #!/bin/sh
 # A fake `codex exec --json` for tests. Its scenario comes from files under $HOME/agent/:
-# `scenario` (ok, nolog: no session log, only `turn.completed` events; crash; sleep: never
+# `scenario` (ok, nolog: no session log, only `turn.completed` events; dupusage: like nolog,
+# its usage with a key twice; crash; sleep: never
 # answers the first turn, answers a `resume` turn) and `out` (the final message). It writes
 # the final message to the `-o` file and a session log under $CODEX_HOME/sessions. Each call N
 # records its argv to codex.argv.N, its stdin to codex.stdin.N and its environment to
@@ -32,6 +33,10 @@ answer() {
 case "$(cat "$d/scenario")" in
     ok) printf '{"type":"thread.started","thread_id":"th1"}\n'; answer log ;;
     nolog) printf '{"type":"thread.started","thread_id":"th1"}\n'; answer ;;
+    dupusage)
+        printf '{"type":"thread.started","thread_id":"th1"}\n'
+        cat "$d/out" > "$reply"
+        printf '{"type":"turn.completed","usage":{"input_tokens":1000000,"input_tokens":0,"output_tokens":0}}\n' ;;
     crash) echo "fake codex: crash" >&2; exit 2 ;;
     sleep)
         if [ $resume = yes ]; then answer log; else

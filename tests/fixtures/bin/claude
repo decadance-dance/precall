@@ -2,7 +2,10 @@
 # A fake `claude -p --output-format stream-json` for tests. The runner passes it only a
 # whitelisted environment, so its scenario comes from files under $HOME/agent/: `scenario` (ok,
 # nocost, nousage, malformed, error, sleep: prints the usage of one message, then never
-# answers the first turn, answers a `--resume` turn; sleep-always: never answers) and `out`
+# answers the first turn, answers a `--resume` turn; result-sleep: answers, then hangs until
+# killed, answers a `--resume` turn; torn: prints one message's usage and half of the next
+# record, then hangs, answers a `--resume` turn; perms: records the modes of its working dir
+# and its stdout file to claude.perms, then answers; sleep-always: never answers) and `out`
 # (the structured output to print). Each call N records its argv to claude.argv.N,
 # its stdin to claude.stdin.N, its environment to claude.env.N and its cwd to claude.cwd.N.
 d="$HOME/agent"
@@ -30,6 +33,17 @@ case "$(cat "$d/scenario")" in
             for _ in 1 2; do printf '{"type":"assistant","message":{"id":"msg1","model":"claude-fake-1","usage":{"input_tokens":1000000,"output_tokens":0}}}\n'; done
             sleep 30 & echo $! > "$d/claude.pid"; wait
         fi ;;
+    result-sleep)
+        if [ $resume = yes ]; then answer 0.25; else
+            answer 0.5; sleep 30 & wait
+        fi ;;
+    torn)
+        if [ $resume = yes ]; then answer 0.1; else
+            printf '{"type":"assistant","message":{"id":"msg1","model":"claude-fake-1","usage":{"input_tokens":1000000,"output_tokens":0}}}\n'
+            printf '{"type":"assistant"'
+            sleep 30 & wait
+        fi ;;
+    perms) ls -ld . turn1.stdout | cut -c1-10 > "$d/claude.perms"; answer 0.25 ;;
     sleep-always) sleep 30 & echo $! > "$d/claude.pid.$n"; wait ;;
     *) echo "fake claude: unknown scenario" >&2; exit 64 ;;
 esac

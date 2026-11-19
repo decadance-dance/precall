@@ -2,6 +2,7 @@
 //! the lock, back pressure, the cost cap, hooks, the commit message, the report and exit codes.
 
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -1115,44 +1116,51 @@ fn a_declarative_collector_gets_no_nodes_of_a_source_that_does_not_allow_its_run
 }
 
 #[test]
-fn judge_feedback_on_a_withheld_node_does_not_reach_a_disallowed_runner() {
-    let w = W::new();
-    w.seed("layout", &[API, AUTH, NOTED, THEIRS]);
+fn judge_feedback_from_a_call_that_saw_a_withheld_node_does_not_reach_a_disallowed_runner() {
     let cite_api = json!({"key": "a", "op": "add_source", "id": "api", "sources": ["note:api.md"], "reason": "cited"});
     let cite = json!({"key": "t", "op": "add_source", "id": "theirs", "sources": ["note:t.md"], "reason": "cited"});
-    let r1 = json!({"output": {"proposals": [cite_api, cite]}, "cost_usd": 0.0, "model": "fake-1"});
-    let r2 = json!({"output": {"proposals": []}, "cost_usd": 0.0, "model": "fake-1"});
-    w.config(&format!(
-        "{}allowed_runners = [\"runner2\"]\n{}{}{}{}",
-        w.inst("repo", "col", &format!("out = {}", q(&props(&[])))),
-        w.inst("writer", "prompted", ""),
-        w.inst(
-            "runner",
-            "runner",
-            &format!("scenario = \"seq\", out = {}", q(&format!("{r1}\n{r2}")))
-        ),
-        w.inst("runner2", "runner", ""),
-        // A command judge sees `api` as `current`; its words may quote it.
-        w.inst("judge", "judge", "scenario = \"all\", out = \"revise\""),
-    ));
-    w.run(&[]);
-    let back = w.input("runner", 2)["input"]["rejections"].clone();
-    let verdict = |key: &str| {
-        back.as_array()
+    // The verdicts `writer` gets back in round 2, by proposal key.
+    let back = |proposals: &[&Value]| -> BTreeMap<String, Value> {
+        let w = W::new();
+        w.seed("layout", &[API, AUTH, NOTED, THEIRS]);
+        let r1 = json!({"output": {"proposals": proposals}, "cost_usd": 0.0, "model": "fake-1"});
+        let r2 = json!({"output": {"proposals": []}, "cost_usd": 0.0, "model": "fake-1"});
+        w.config(&format!(
+            "{}allowed_runners = [\"runner2\"]\n{}{}{}{}",
+            w.inst("repo", "col", &format!("out = {}", q(&props(&[])))),
+            w.inst("writer", "prompted", ""),
+            w.inst(
+                "runner",
+                "runner",
+                &format!("scenario = \"seq\", out = {}", q(&format!("{r1}\n{r2}")))
+            ),
+            w.inst("runner2", "runner", ""),
+            // One command judge call sees every proposal and `api` as a `current`; its words
+            // about any of them may quote `api`.
+            w.inst("judge", "judge", "scenario = \"all\", out = \"revise\""),
+        ));
+        w.run(&[]);
+        w.input("runner", 2)["input"]["rejections"]
+            .as_array()
             .unwrap()
             .iter()
-            .find(|r| r["proposal"]["key"] == key)
-            .unwrap()["verdicts"][0]
-            .clone()
+            .map(|r| {
+                (
+                    r["proposal"]["key"].as_str().unwrap().to_string(),
+                    r["verdicts"][0].clone(),
+                )
+            })
+            .collect()
     };
-    let api = verdict("a");
-    assert_eq!(api["verdict"], "revise");
-    assert!(
-        api["reason"].as_str().unwrap().starts_with("withheld"),
-        "{api}"
-    );
-    assert!(api.get("instruction").is_none(), "{api}");
-    let theirs = verdict("t");
+    for (key, v) in back(&[&cite_api, &cite]) {
+        assert_eq!(v["verdict"], "revise", "{key}");
+        assert!(
+            v["reason"].as_str().unwrap().starts_with("withheld"),
+            "{key}: {v}"
+        );
+        assert!(v.get("instruction").is_none(), "{key}: {v}");
+    }
+    let theirs = &back(&[&cite])["t"];
     assert_eq!(
         (theirs["reason"].as_str(), theirs["instruction"].as_str()),
         (Some("fake revise"), Some("fake instruction"))

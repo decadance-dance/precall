@@ -845,11 +845,6 @@ impl Run {
             .collect();
         let mut rejections = rejections;
         for r in &mut rejections {
-            // A check or judge saw the target node and the resolved sources; its words may
-            // quote them.
-            let target = r.proposal.id.as_ref().and_then(|id| work.nodes.get(id));
-            let saw_withheld =
-                target.is_some_and(|n| !shown(&n.sources)) || !shown(&refs_of(&r.proposal));
             for v in &mut r.verdicts {
                 if v.conflict_with
                     .as_ref()
@@ -857,7 +852,9 @@ impl Run {
                 {
                     v.conflict_with = None;
                 }
-                if saw_withheld && v.by != "core" {
+                // A check or judge call saw every node and source of its batch; its words about
+                // any proposal may quote them.
+                if !shown(&v.saw) {
                     v.reason = "withheld: this verdict was given on a node or source that may \
                                 not reach this runner (`allowed_runners`)"
                         .into();
@@ -958,6 +955,7 @@ impl Run {
             reason,
             instruction: None,
             conflict_with: with,
+            saw: Vec::new(),
         };
         let mut verdicts: BTreeMap<String, Vec<RoundVerdict>> = BTreeMap::new();
         let mut dropped: BTreeMap<String, String> = BTreeMap::new();
@@ -1108,6 +1106,14 @@ impl Run {
             map_ids: map_ids.to_vec(),
             params: inst.params_json(),
         };
+        let saw: Vec<String> = input
+            .proposals
+            .iter()
+            .flat_map(|j| {
+                let current = j.current.iter().flat_map(|n| n.sources.iter().cloned());
+                refs_of(&j.proposal).into_iter().chain(current)
+            })
+            .collect();
         let kind = if texts.is_some() { "judge" } else { "check" };
         match self.verdicts_of(inst, round, &input, &keys) {
             Ok(vs) => {
@@ -1123,6 +1129,7 @@ impl Run {
                         reason: v.reason,
                         instruction: v.instruction,
                         conflict_with: None,
+                        saw: saw.clone(),
                     });
                 }
             }

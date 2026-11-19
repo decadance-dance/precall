@@ -123,6 +123,9 @@ pub struct RoundVerdict {
     /// The other proposal of a conflict (spec §4.1 step 5).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conflict_with: Option<Proposal>,
+    /// Every source the check or judge call that gave this verdict saw, its whole batch's.
+    #[serde(skip)]
+    pub saw: Vec<String>,
 }
 
 /// Resolve input (spec §6.4).
@@ -917,6 +920,7 @@ mod tests {
                     reason: "conflict".into(),
                     instruction: None,
                     conflict_with: None,
+                    saw: Vec::new(),
                 }],
             }],
             params: Params::from([("repo".into(), "o/r".into())]),

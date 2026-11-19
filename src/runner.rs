@@ -11,7 +11,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::fs::{self, File};
+use std::fs::{self, OpenOptions};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -196,6 +197,9 @@ impl Launch {
     /// kills everything it started.
     // limit: the core kills the runner's group at the caller's timeout, not the agent's; the
     // runner's own deadlines end before it (MARGIN), so only a runner killed early leaves one.
+    // limit: `allowed_runners` governs what rrecall sends the agent (input, resolved texts,
+    // feedback); a read-only agent can still read files on the machine, the store included,
+    // the same exposure as any coding-agent session there (spec §6.8).
     fn turn(
         &self,
         extra: &[String],
@@ -220,7 +224,14 @@ impl Launch {
             .envs(self.env.iter().map(|(k, v)| (k, v)))
             .current_dir(&self.cwd)
             .stdin(Stdio::piped())
-            .stdout(File::create(out).with_context(|| format!("{}", out.display()))?)
+            .stdout(
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(out)
+                    .with_context(|| format!("{}", out.display()))?,
+            )
             .stderr(Stdio::inherit())
             .process_group(0);
         process::wait(&mut cmd, self.program, stdin.as_bytes().to_vec(), timeout)
@@ -318,8 +329,7 @@ fn utf8(p: &Path) -> Result<&str> {
 /// A call's own working dir in the system temp dir, removed when the call ends: outside the
 /// map store, so the agent cannot read the map by a relative path, and outside any git
 /// repository, so it loads no project's instruction files. The agent's session log there holds
-/// source text.
-// limit: a read-only agent may still read any file by absolute path, the store included.
+/// source text, so the dir is the user's alone.
 struct Scratch(PathBuf);
 
 impl Scratch {
@@ -329,7 +339,11 @@ impl Scratch {
             std::process::id(),
             uuid_v4()
         ));
-        fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        // Created with its mode in one step, and never an existing dir (the temp dir is shared).
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&dir)
+            .with_context(|| format!("creating {}", dir.display()))?;
         // The sandboxes match real paths (macOS `/var` is `/private/var`).
         let scratch = Scratch(fs::canonicalize(&dir)?);
         if let Some(repo) = scratch.0.ancestors().find(|a| a.join(".git").exists()) {
@@ -438,9 +452,14 @@ type ClaudeTurn = (Option<Value>, BTreeMap<String, (String, Tokens)>);
 fn claude_turn(stdout: &str) -> Result<ClaudeTurn> {
     let mut result = None;
     let mut messages = BTreeMap::new();
-    for line in stdout.lines().filter(|l| !l.trim().is_empty()) {
-        let e = wire::parse_strict(line)
-            .map_err(|e| anyhow!("claude printed a line that is not one JSON document: {e}"))?;
+    let lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
+    for (i, line) in lines.iter().enumerate() {
+        let e = match wire::parse_strict(line) {
+            Ok(e) => e,
+            // A kill can cut the last record short; every complete record is decoded strictly.
+            Err(e) if e.is_eof() && i + 1 == lines.len() && !stdout.ends_with('\n') => break,
+            Err(e) => bail!("claude printed a line that is not one JSON document: {e}"),
+        };
         if e["type"] == "result" {
             result = Some(e);
         } else if e["type"] == "assistant" {
@@ -459,8 +478,8 @@ fn claude_turn(stdout: &str) -> Result<ClaudeTurn> {
 
 /// Claude's answer from the last turn's `result`: the structured output (else the result text
 /// as JSON) and the model with the most output tokens. The cost is the result's
-/// `total_cost_usd` (else an estimate from its usage) plus, for a turn killed before its
-/// result, an estimate from the usage it streamed.
+/// `total_cost_usd` (else an estimate from its usage) plus, for each killed earlier turn, its
+/// own `total_cost_usd` when it printed one, else an estimate from the usage it streamed.
 // limit: a request still in flight when a turn is killed streamed no usage and is not counted.
 fn claude_reply(
     status: ExitStatus,
@@ -505,8 +524,14 @@ fn claude_reply(
         }
     };
     for turn in earlier {
-        for (m, t) in claude_turn(turn)?.1.values() {
-            cost += estimate(prices, m, *t)?;
+        let (result, messages) = claude_turn(turn)?;
+        match result.and_then(|r| r["total_cost_usd"].as_f64()) {
+            Some(c) => cost += c,
+            None => {
+                for (m, t) in messages.values() {
+                    cost += estimate(prices, m, *t)?;
+                }
+            }
         }
     }
     Ok((output, cost, model))
@@ -526,10 +551,8 @@ fn codex_thread(events: &str) -> Option<String> {
 fn codex_usage(home: &Path, turns: &[String], requested: &str) -> Result<(Tokens, String)> {
     let (mut tokens, mut model) = (None, None);
     for log in session_logs(&home.join("sessions")) {
-        for e in fs::read_to_string(&log)?
-            .lines()
-            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        {
+        let used = |e: &Value| e["type"] == "turn_context" || e["payload"]["type"] == "token_count";
+        for e in codex_records(&fs::read_to_string(&log)?, used)? {
             let p = &e["payload"];
             if e["type"] == "turn_context" && model.is_none() {
                 model = p["model"].as_str().map(String::from);
@@ -546,9 +569,10 @@ fn codex_usage(home: &Path, turns: &[String], requested: &str) -> Result<(Tokens
         None => {
             let done: Vec<Tokens> = turns
                 .iter()
-                .flat_map(|t| t.lines())
-                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-                .filter(|e| e["type"] == "turn.completed")
+                .map(|t| codex_records(t, |e| e["type"] == "turn.completed"))
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .flatten()
                 .map(|e| {
                     codex_tokens(&e["usage"])
                         .context("codex reported a turn without its token usage")
@@ -565,6 +589,18 @@ fn codex_usage(home: &Path, turns: &[String], requested: &str) -> Result<(Tokens
         }
     };
     Ok((tokens, model_or(model, requested)?))
+}
+
+/// The JSON records of Codex output that `used` picks, decoded strictly (a key twice fails); a
+/// line that is not JSON, such as a record cut short by a kill, is skipped.
+fn codex_records(text: &str, used: fn(&Value) -> bool) -> Result<Vec<Value>> {
+    text.lines()
+        .filter(|l| serde_json::from_str::<Value>(l).is_ok_and(|e| used(&e)))
+        .map(|l| {
+            wire::parse_strict(l)
+                .map_err(|e| anyhow!("codex printed a record that is not strict JSON: {e}"))
+        })
+        .collect()
 }
 
 /// Codex counts cached input inside `input_tokens`; `None` without the counts.
