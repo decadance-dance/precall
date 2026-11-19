@@ -844,12 +844,25 @@ impl Run {
             .cloned()
             .collect();
         let mut rejections = rejections;
-        for v in rejections.iter_mut().flat_map(|r| r.verdicts.iter_mut()) {
-            if v.conflict_with
-                .as_ref()
-                .is_some_and(|p| !shown(&refs_of(p)))
-            {
-                v.conflict_with = None;
+        for r in &mut rejections {
+            // A check or judge saw the target node and the resolved sources; its words may
+            // quote them.
+            let target = r.proposal.id.as_ref().and_then(|id| work.nodes.get(id));
+            let saw_withheld =
+                target.is_some_and(|n| !shown(&n.sources)) || !shown(&refs_of(&r.proposal));
+            for v in &mut r.verdicts {
+                if v.conflict_with
+                    .as_ref()
+                    .is_some_and(|p| !shown(&refs_of(p)))
+                {
+                    v.conflict_with = None;
+                }
+                if saw_withheld && v.by != "core" {
+                    v.reason = "withheld: this verdict was given on a node or source that may \
+                                not reach this runner (`allowed_runners`)"
+                        .into();
+                    v.instruction = None;
+                }
             }
         }
         let input = CollectorInput {
@@ -1191,7 +1204,11 @@ impl Run {
                 (None, Some(prompt)) => serde_json::to_value(&input)
                     .map_err(|e| CallFail::from(anyhow::Error::from(e)))
                     .and_then(|v| self.via_runner(&inst, prompt, &name, v, wire::resolve_schema()))
-                    .map(|(out, _, _)| out),
+                    .map(|(out, runner, model)| {
+                        // The lock records a collector's runner and model; a collect call's win.
+                        self.models.entry(owner.clone()).or_insert((runner, model));
+                        out
+                    }),
                 (None, None) => continue,
             };
             match out.and_then(|o| Ok(wire::decode_texts(&inst.id, &o, &refs)?)) {

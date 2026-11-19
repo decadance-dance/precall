@@ -33,7 +33,7 @@ impl T {
             N.fetch_add(1, Ordering::SeqCst)
         ));
         let _ = std::fs::remove_dir_all(&root);
-        for d in ["home/agent", "home/.codex", "state"] {
+        for d in ["home/agent", "home/.codex", "state", "tmp"] {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
         std::fs::write(root.join("home/agent/scenario"), scenario).unwrap();
@@ -43,6 +43,18 @@ impl T {
     }
 
     fn call(&self, id: &str, model: &str, timeout: u64, prices: Option<&str>) -> Out {
+        self.call_with(id, model, timeout, prices, &[])
+    }
+
+    /// `call` with extra environment variables (`PATH` among them replaces the fake one).
+    fn call_with(
+        &self,
+        id: &str,
+        model: &str,
+        timeout: u64,
+        prices: Option<&str>,
+        env: &[(&str, String)],
+    ) -> Out {
         let path = format!(
             "{}/tests/fixtures/bin:{}",
             env!("CARGO_MANIFEST_DIR"),
@@ -53,6 +65,7 @@ impl T {
             .env("PATH", path)
             .env("HOME", self.root.join("home"))
             .env("RRECALL_STATE_DIR", self.root.join("state"))
+            .env("TMPDIR", self.root.join("tmp"))
             .env("RRECALL_RUN_ID", "r1")
             .env("GH_TOKEN", "must-not-reach-the-agent")
             .env_remove("CODEX_HOME")
@@ -62,6 +75,9 @@ impl T {
             .stderr(Stdio::piped());
         if let Some(p) = prices {
             cmd.env("RRECALL_PARAM_PRICES", p);
+        }
+        for (k, v) in env {
+            cmd.env(k, v);
         }
         let mut child = cmd.spawn().unwrap();
         let input = json!({
@@ -95,9 +111,9 @@ impl T {
         self.rec(name).lines().map(String::from).collect()
     }
 
-    /// The scratch dir of each call is gone after it.
+    /// The scratch dir of each call (in `TMPDIR`) is gone after it.
     fn no_scratch_left(&self) {
-        let left: Vec<_> = std::fs::read_dir(self.root.join("state"))
+        let left: Vec<_> = std::fs::read_dir(self.root.join("tmp"))
             .unwrap()
             .flatten()
             .map(|e| e.file_name())
@@ -140,7 +156,8 @@ fn claude_runs_read_only_with_the_prompt_on_stdin_and_reports_cost_and_model() {
     for want in ["-p", "--safe-mode", "--session-id"] {
         assert!(argv.iter().any(|a| a == want), "{want}: {argv:?}");
     }
-    assert_eq!(after(&argv, "--output-format"), "json");
+    assert_eq!(after(&argv, "--output-format"), "stream-json");
+    assert!(argv.iter().any(|a| a == "--verbose"));
     assert_eq!(after(&argv, "--tools"), "Read,Grep,Glob");
     assert_eq!(after(&argv, "--allowedTools"), "Read,Grep,Glob");
     assert_eq!(after(&argv, "--permission-mode"), "dontAsk");
@@ -159,7 +176,7 @@ fn claude_runs_read_only_with_the_prompt_on_stdin_and_reports_cost_and_model() {
         !env.contains("GH_TOKEN") && !env.contains("RRECALL_"),
         "{env}"
     );
-    assert!(t.rec("claude.cwd.1").contains("/state/call-"));
+    assert!(t.rec("claude.cwd.1").contains("/rrecall-runner-"));
     t.no_scratch_left();
 }
 
@@ -184,7 +201,11 @@ fn claude_without_a_cost_is_estimated_from_the_price_table_or_fails() {
 fn claude_malformed_output_or_an_error_fails_the_call() {
     let t = T::new("malformed", "{}");
     let o = t.call("claude", "m", 60, None);
-    assert!(!o.ok && o.stderr.contains("no JSON result"), "{}", o.stderr);
+    assert!(
+        !o.ok && o.stderr.contains("not one JSON document"),
+        "{}",
+        o.stderr
+    );
     std::fs::write(t.root.join("home/agent/scenario"), "error").unwrap();
     let o = t.call("claude", "m", 60, None);
     assert!(!o.ok && o.stderr.contains("Not logged in"), "{}", o.stderr);
@@ -195,7 +216,8 @@ fn claude_malformed_output_or_an_error_fails_the_call() {
 #[test]
 fn claude_near_the_timeout_gets_a_wrap_up_turn_in_the_same_session() {
     let t = T::new("sleep", r#"{"texts":{}}"#);
-    let out = json_of(&t.call("claude", "m", 11, None));
+    let free = r#"{"claude-fake-1":{"input":0,"cached_input":0,"output":0}}"#;
+    let out = json_of(&t.call("claude", "m", 11, Some(free)));
     assert_eq!(out["cost_usd"], 0.1);
     let (first, second) = (t.argv("claude.argv.1"), t.argv("claude.argv.2"));
     assert_eq!(after(&second, "--resume"), after(&first, "--session-id"));
@@ -235,7 +257,7 @@ fn codex_runs_read_only_in_a_clean_home_and_prices_its_tokens() {
         ["exec", "--json", "-s", "read-only", "--skip-git-repo-check"]
     );
     let dir = after(&argv, "-C");
-    assert!(dir.contains("/state/call-"), "{dir}");
+    assert!(dir.contains("/rrecall-runner-"), "{dir}");
     assert_eq!(after(&argv, "-o"), format!("{dir}/reply.txt"));
     assert_eq!(argv.last().map(String::as_str), Some("-"));
     assert!(!argv.iter().any(|a| a == "-m" || a.contains("PROMPT TEXT")));
@@ -298,4 +320,115 @@ fn codex_fails_without_a_login_or_when_it_crashes() {
         o.stderr
     );
     t.no_scratch_left();
+}
+
+/// The agent's working dir: outside the store and outside any git repository, so it can
+/// neither find the map by a relative path nor load a project's instruction files.
+fn isolated(cwd: &str, root: &std::path::Path) {
+    let cwd = std::path::Path::new(cwd.trim());
+    let state = root.join("state").canonicalize().unwrap();
+    assert!(
+        !cwd.starts_with(&state),
+        "{} is in the store",
+        cwd.display()
+    );
+    for a in cwd.ancestors() {
+        assert!(
+            !a.join(".git").exists(),
+            "{} is inside the git repository {}",
+            cwd.display(),
+            a.display()
+        );
+    }
+}
+
+#[test]
+fn the_agent_runs_outside_the_store_and_any_git_repository() {
+    let t = T::new("ok", r#"{"texts":{}}"#);
+    json_of(&t.call("claude", "m", 60, None));
+    isolated(&t.rec("claude.cwd.1"), &t.root);
+    let prices = r#"{"codex-fake-1":{"input":0,"cached_input":0,"output":0}}"#;
+    json_of(&t.call("codex", "default", 60, Some(prices)));
+    let argv = t.argv("codex.argv.1");
+    isolated(after(&argv, "-C"), &t.root);
+    // A temp dir inside a git repository is refused rather than used.
+    let repo = t.root.join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    let o = t.call_with(
+        "claude",
+        "m",
+        60,
+        None,
+        &[("TMPDIR", repo.to_string_lossy().into())],
+    );
+    assert!(!o.ok && o.stderr.contains("git repository"), "{}", o.stderr);
+    assert_eq!(
+        t.rec("claude.calls").lines().count(),
+        1,
+        "no agent was started"
+    );
+}
+
+#[test]
+fn claude_wrap_up_charges_the_killed_turn_too() {
+    let t = T::new("sleep", r#"{"texts":{}}"#);
+    // The killed turn streamed 1M input tokens of one message (twice, one per content block).
+    let prices = r#"{"claude-fake-1":{"input":0.5,"cached_input":0,"output":0}}"#;
+    let out = json_of(&t.call("claude", "m", 11, Some(prices)));
+    assert!(
+        (out["cost_usd"].as_f64().unwrap() - 0.6).abs() < 1e-9,
+        "{out}"
+    );
+    let o = t.call("claude", "m", 11, None);
+    assert!(
+        !o.ok && o.stderr.contains("`claude-fake-1`") && o.stderr.contains("`prices`"),
+        "{}",
+        o.stderr
+    );
+}
+
+#[test]
+fn an_agent_that_reports_neither_cost_nor_usage_fails_the_call() {
+    let t = T::new("nousage", r#"{"texts":{}}"#);
+    let prices = r#"{"claude-fake-1":{"input":1,"cached_input":1,"output":1}}"#;
+    let o = t.call("claude", "m", 60, Some(prices));
+    assert!(!o.ok && o.stderr.contains("usage"), "{}", o.stderr);
+}
+
+#[test]
+fn a_key_twice_in_an_agent_reply_fails_the_call() {
+    let t = T::new("ok", r#"{"texts":false,"texts":{}}"#);
+    let o = t.call("claude", "m", 60, None);
+    assert!(!o.ok && o.stderr.contains("duplicate key"), "{}", o.stderr);
+    let prices = r#"{"codex-fake-1":{"input":0,"cached_input":0,"output":0}}"#;
+    let o = t.call("codex", "default", 60, Some(prices));
+    assert!(!o.ok && o.stderr.contains("duplicate key"), "{}", o.stderr);
+}
+
+#[test]
+fn an_agent_is_never_started_through_a_shell() {
+    let t = T::new("ok", "{}");
+    let bin = t.root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let claude = bin.join("claude");
+    std::fs::write(&claude, "printf '%s\\n' '{\"type\":\"result\",\"is_error\":false,\"structured_output\":{},\"total_cost_usd\":1}'\n").unwrap();
+    std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let o = t.call_with("claude", "m", 60, None, &[("PATH", path)]);
+    assert!(
+        !o.ok && o.stderr.contains("through a shell"),
+        "{}",
+        o.stderr
+    );
+}
+
+#[test]
+fn a_timeout_too_short_for_a_wrap_up_says_so() {
+    let t = T::new("sleep", "{}");
+    let o = t.call("claude", "m", 1, None);
+    assert!(!o.ok && o.stderr.contains("no wrap-up"), "{}", o.stderr);
 }

@@ -1,8 +1,9 @@
 #!/bin/sh
-# A fake `claude -p` for tests. The runner passes it only a whitelisted environment, so its
-# scenario comes from files under $HOME/agent/: `scenario` (ok, nocost, malformed, error,
-# sleep: never answers the first turn, answers a `--resume` turn; sleep-always: never answers)
-# and `out` (the structured output to print). Each call N records its argv to claude.argv.N,
+# A fake `claude -p --output-format stream-json` for tests. The runner passes it only a
+# whitelisted environment, so its scenario comes from files under $HOME/agent/: `scenario` (ok,
+# nocost, nousage, malformed, error, sleep: prints the usage of one message, then never
+# answers the first turn, answers a `--resume` turn; sleep-always: never answers) and `out`
+# (the structured output to print). Each call N records its argv to claude.argv.N,
 # its stdin to claude.stdin.N, its environment to claude.env.N and its cwd to claude.cwd.N.
 d="$HOME/agent"
 echo call >> "$d/claude.calls"
@@ -19,11 +20,16 @@ answer() {
 }
 case "$(cat "$d/scenario")" in
     ok) answer 0.25 ;;
-    nocost) printf '{"is_error":false,"result":"x","structured_output":%s,"usage":{"input_tokens":1000000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0},"modelUsage":{"claude-fake-1":{"outputTokens":0}}}\n' "$out" ;;
+    nousage) printf '{"type":"result","is_error":false,"result":"x","structured_output":%s,"modelUsage":{"claude-fake-1":{"outputTokens":0}}}\n' "$out" ;;
+    nocost) printf '{"type":"result","is_error":false,"result":"x","structured_output":%s,"usage":{"input_tokens":1000000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0},"modelUsage":{"claude-fake-1":{"outputTokens":0}}}\n' "$out" ;;
     malformed) echo 'this is not json' ;;
-    error) printf '{"is_error":true,"result":"Not logged in"}\n'; exit 1 ;;
+    error) printf '{"type":"result","is_error":true,"result":"Not logged in"}\n'; exit 1 ;;
     sleep)
-        if [ $resume = yes ]; then answer 0.1; else sleep 30 & echo $! > "$d/claude.pid"; wait; fi ;;
+        if [ $resume = yes ]; then answer 0.1; else
+            # One message, its usage streamed twice (once per content block), as claude does.
+            for _ in 1 2; do printf '{"type":"assistant","message":{"id":"msg1","model":"claude-fake-1","usage":{"input_tokens":1000000,"output_tokens":0}}}\n'; done
+            sleep 30 & echo $! > "$d/claude.pid"; wait
+        fi ;;
     sleep-always) sleep 30 & echo $! > "$d/claude.pid.$n"; wait ;;
     *) echo "fake claude: unknown scenario" >&2; exit 64 ;;
 esac

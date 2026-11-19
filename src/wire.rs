@@ -421,6 +421,12 @@ impl<'de> serde::de::Visitor<'de> for StrictVisitor {
 }
 
 /// A plugin's output: one JSON object, no duplicate keys at any level.
+/// One JSON document, strictly: a key twice at any level is an error, where plain `Value`
+/// decoding would keep the last one.
+pub fn parse_strict(text: &str) -> Result<serde_json::Value, serde_json::Error> {
+    serde_json::from_str::<Strict>(text).map(|s| s.0)
+}
+
 fn parse(plugin: &str, stdout: &str) -> Result<serde_json::Map<String, serde_json::Value>> {
     let doc = serde_json::from_str::<Strict>(stdout)
         .map_err(|e| anyhow!("plugin `{plugin}`: output is not one JSON document: {e}"))?;

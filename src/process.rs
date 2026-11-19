@@ -240,7 +240,7 @@ fn last_line(f: &mut File) -> Result<String> {
 /// The file must be a native executable or a `#!` script whose interpreter is one: given
 /// anything else, the C library's exec falls back to `/bin/sh`, and §6.3 promises that a plugin
 /// never runs through a shell.
-fn resolve_program(
+pub fn resolve_program(
     program: &str,
     plugin_dir: &Path,
     path_var: &std::ffi::OsStr,

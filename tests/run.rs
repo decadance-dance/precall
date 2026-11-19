@@ -990,6 +990,10 @@ fn a_resolve_prompt_runs_through_its_collectors_runner_and_feeds_the_judges() {
         .unwrap()
         .path();
     assert!(run.join("runner.notes.resolve.stdout").is_file());
+    // The resolve was this collector's only model call: its runner and model go into the lock.
+    let lock = w.lock();
+    assert_eq!(lock["collectors"]["notes"]["runner"], "runner");
+    assert_eq!(lock["collectors"]["notes"]["model"], "fake-1");
     assert!(w.report().contains("$0.20"), "{}", w.report());
 }
 
@@ -1108,6 +1112,51 @@ fn a_declarative_collector_gets_no_nodes_of_a_source_that_does_not_allow_its_run
     let wv = back(&w.input("runner", 2)["input"]);
     assert_eq!(wv["reason"], "conflict");
     assert!(wv.get("conflict_with").is_none(), "{wv}");
+}
+
+#[test]
+fn judge_feedback_on_a_withheld_node_does_not_reach_a_disallowed_runner() {
+    let w = W::new();
+    w.seed("layout", &[API, AUTH, NOTED, THEIRS]);
+    let cite_api = json!({"key": "a", "op": "add_source", "id": "api", "sources": ["note:api.md"], "reason": "cited"});
+    let cite = json!({"key": "t", "op": "add_source", "id": "theirs", "sources": ["note:t.md"], "reason": "cited"});
+    let r1 = json!({"output": {"proposals": [cite_api, cite]}, "cost_usd": 0.0, "model": "fake-1"});
+    let r2 = json!({"output": {"proposals": []}, "cost_usd": 0.0, "model": "fake-1"});
+    w.config(&format!(
+        "{}allowed_runners = [\"runner2\"]\n{}{}{}{}",
+        w.inst("repo", "col", &format!("out = {}", q(&props(&[])))),
+        w.inst("writer", "prompted", ""),
+        w.inst(
+            "runner",
+            "runner",
+            &format!("scenario = \"seq\", out = {}", q(&format!("{r1}\n{r2}")))
+        ),
+        w.inst("runner2", "runner", ""),
+        // A command judge sees `api` as `current`; its words may quote it.
+        w.inst("judge", "judge", "scenario = \"all\", out = \"revise\""),
+    ));
+    w.run(&[]);
+    let back = w.input("runner", 2)["input"]["rejections"].clone();
+    let verdict = |key: &str| {
+        back.as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["proposal"]["key"] == key)
+            .unwrap()["verdicts"][0]
+            .clone()
+    };
+    let api = verdict("a");
+    assert_eq!(api["verdict"], "revise");
+    assert!(
+        api["reason"].as_str().unwrap().starts_with("withheld"),
+        "{api}"
+    );
+    assert!(api.get("instruction").is_none(), "{api}");
+    let theirs = verdict("t");
+    assert_eq!(
+        (theirs["reason"].as_str(), theirs["instruction"].as_str()),
+        (Some("fake revise"), Some("fake instruction"))
+    );
 }
 
 /// The fake `claude` answers with `out` (see tests/fixtures/bin/claude).
