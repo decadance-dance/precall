@@ -89,9 +89,29 @@ enum Cmd {
     },
     /// Print a paragraph for an agent's instruction file.
     AgentInstructions,
+    /// Check that each enabled plugin can run (binaries, logins, access); print what a run would skip.
+    Doctor,
+    /// Manage plugins: list them, install one, trust a project's plugin directory.
+    #[command(subcommand)]
+    Plugin(PluginCmd),
     /// Run a built-in plugin's entrypoint: its input on stdin, its output on stdout (spec §6.2).
     #[command(hide = true)]
     Builtin { id: String, entry: Option<String> },
+}
+
+#[derive(Subcommand)]
+enum PluginCmd {
+    /// The discovered plugins: origin, version, content hash, the instances that use them.
+    List,
+    /// Install a plugin from a git URL or a directory into the user plugin directory.
+    Add {
+        source: String,
+        /// The tag or commit to install.
+        #[arg(long = "ref")]
+        git_ref: Option<String>,
+    },
+    /// Trust a project's `.rrecall/plugins/` directory at its current content.
+    Trust { dir: std::path::PathBuf },
 }
 
 /// Plugins run in their own dir (spec §6.1), so a relative `CLAUDE_CONFIG_DIR` is made absolute
@@ -144,6 +164,12 @@ fn main() -> ExitCode {
             recursive,
         } => commands::rm(p, id, reason.as_deref(), *recursive),
         Cmd::AgentInstructions => Ok(commands::AGENT_INSTRUCTIONS.to_string()),
+        Cmd::Doctor => rrecall::doctor::doctor(p),
+        Cmd::Plugin(PluginCmd::List) => rrecall::plugin_cmd::list(p),
+        Cmd::Plugin(PluginCmd::Add { source, git_ref }) => {
+            rrecall::plugin_cmd::add(source, git_ref.as_deref())
+        }
+        Cmd::Plugin(PluginCmd::Trust { dir }) => rrecall::plugin_cmd::trust(p, dir),
         Cmd::Builtin { id, entry } => commands::builtin(id, entry.as_deref()),
     };
     match out {

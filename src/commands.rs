@@ -119,10 +119,16 @@ pub fn init(name_arg: Option<&str>, project_flag: Option<&str>) -> Result<String
     // project's entry. It is written before the store and restored if the store fails, so a
     // failure leaves nothing behind and init can run again.
     let user_path = config::user_config_path()?;
+    // Held to the end, rollback included, so a concurrent `plugin add` or `plugin trust`
+    // appends after this init and a rollback never drops its entry.
+    let _held = config::lock_user_config()?;
     let old = match std::fs::read_to_string(&user_path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         r => Some(r.with_context(|| format!("reading {}", user_path.display()))?),
     };
+    // The config as it is under the lock, which a command may have changed since it was read.
+    let user: config::UserConfig = toml::from_str(old.as_deref().unwrap_or(""))
+        .with_context(|| format!("{} does not parse", user_path.display()))?;
     let mut new = old.clone().unwrap_or_default();
     if user.runner.is_none() {
         // A top-level key goes before the first table, after a BOM, which must stay first.
@@ -147,10 +153,7 @@ pub fn init(name_arg: Option<&str>, project_flag: Option<&str>) -> Result<String
         "updating {} did not set the default runner and the project",
         user_path.display()
     );
-    if let Some(dir) = user_path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
-    std::fs::write(&user_path, &new).with_context(|| format!("writing {}", user_path.display()))?;
+    config::replace_config(&user_path, &new)?;
     let created = !path.exists();
     let made = std::fs::create_dir_all(&path)
         .with_context(|| format!("creating {}", path.display()))
@@ -177,8 +180,8 @@ pub fn init(name_arg: Option<&str>, project_flag: Option<&str>) -> Result<String
             std::fs::remove_dir_all(path.join(".git"))
         };
         let _ = match &old {
-            Some(old) => std::fs::write(&user_path, old),
-            None => std::fs::remove_file(&user_path),
+            Some(old) => config::replace_config(&user_path, old),
+            None => std::fs::remove_file(&user_path).map_err(Into::into),
         };
         return Err(e);
     }

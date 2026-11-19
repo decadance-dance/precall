@@ -317,94 +317,15 @@ impl Run {
     /// The runner and model a declarative plugin is configured with: its instance, else its
     /// manifest, else the user config (spec §6.1, §9).
     fn configured(&self, inst: &Instance) -> (Option<String>, Option<String>) {
-        if !inst.plugin.manifest.declarative() {
-            return (None, None);
-        }
-        let (runner, model) = match &inst.plugin.manifest.spec {
-            Spec::Collector(c) => (c.runner.clone(), c.model.clone()),
-            Spec::Judge(j) => (j.runner.clone(), j.model.clone()),
-            _ => (None, None),
-        };
-        (
-            inst.runner.clone().or(runner).or(self.user.runner.clone()),
-            Some(
-                inst.model
-                    .clone()
-                    .or(model)
-                    .or(self.user.model.clone())
-                    .unwrap_or_else(|| "default".into()),
-            ),
-        )
+        inst.configured(&self.user)
     }
 
-    /// The runner instance a declarative plugin calls: an enabled `[[plugins]]` instance of
-    /// kind `runner`, a built-in `claude` or `codex` included (spec §6.2, §6.8).
     fn runner_of(&self, inst: &Instance) -> Result<&Instance, String> {
-        let name = self.configured(inst).0.ok_or_else(|| {
-            format!(
-                "plugin instance `{}` has a prompt but no runner (set `runner`)",
-                inst.id
-            )
-        })?;
-        self.instances
-            .iter()
-            .find(|r| r.id == name && r.plugin.manifest.kind() == Kind::Runner)
-            .ok_or_else(|| {
-                format!(
-                    "plugin instance `{}` uses the runner `{name}`, which is not an enabled runner instance",
-                    inst.id
-                )
-            })
+        runner_of(&self.instances, &self.user, inst)
     }
 
-    /// Step 1 for `allowed_runners` (spec §6.8): every declarative plugin has a runner, every
-    /// listed runner is enabled, a collector runs on a runner it allows, and a declarative judge,
-    /// which sees every collector's proposals, runs on a runner each collector allows.
     fn check_allowed(&self) -> Result<(), String> {
-        let restricted: Vec<(&Instance, &Vec<String>)> = self
-            .instances
-            .iter()
-            .filter_map(|c| c.allowed_runners.as_ref().map(|a| (c, a)))
-            .collect();
-        for (c, allowed) in &restricted {
-            if let Some(r) = allowed.iter().find(|r| {
-                !self
-                    .instances
-                    .iter()
-                    .any(|i| &&i.id == r && i.plugin.manifest.kind() == Kind::Runner)
-            }) {
-                return Err(format!(
-                    "plugin instance `{}`: `allowed_runners` names `{r}`, which is not an enabled runner instance",
-                    c.id
-                ));
-            }
-        }
-        for inst in self
-            .instances
-            .iter()
-            .filter(|i| i.plugin.manifest.declarative())
-        {
-            let runner = &self.runner_of(inst)?.id;
-            for (c, allowed) in &restricted {
-                if allowed.contains(runner) {
-                    continue;
-                }
-                if c.id == inst.id {
-                    return Err(format!(
-                        "plugin instance `{}` runs on the runner `{runner}`, which its `allowed_runners` does not list",
-                        c.id
-                    ));
-                }
-                if inst.plugin.manifest.kind() == Kind::Judge {
-                    return Err(format!(
-                        "judge `{}` runs on the runner `{runner}`, which collector `{}` does not allow (`allowed_runners`): \
-                         the judge could never accept its proposals",
-                        inst.id, c.id
-                    ));
-                }
-            }
-        }
-        Ok(())
+        check_allowed(&self.instances, &self.user)
     }
 
     /// Whether the collector that owns source `r`'s kind keeps its content from `runner`.
@@ -1728,4 +1649,72 @@ fn plugin_label(store: &Path, plugin: &plugin::Plugin) -> String {
         Ok(rel) => rel.to_string_lossy().into_owned(),
         Err(_) => dir.to_string_lossy().into_owned(),
     }
+}
+
+/// The runner instance a declarative plugin calls: an enabled `[[plugins]]` instance of
+/// kind `runner`, a built-in `claude` or `codex` included (spec §6.2, §6.8).
+pub(crate) fn runner_of<'a>(
+    instances: &'a [Instance],
+    user: &UserConfig,
+    inst: &Instance,
+) -> Result<&'a Instance, String> {
+    let name = inst.configured(user).0.ok_or_else(|| {
+        format!(
+            "plugin instance `{}` has a prompt but no runner (set `runner`)",
+            inst.id
+        )
+    })?;
+    instances
+        .iter()
+        .find(|r| r.id == name && r.plugin.manifest.kind() == Kind::Runner)
+        .ok_or_else(|| {
+            format!(
+                "plugin instance `{}` uses the runner `{name}`, which is not an enabled runner instance",
+                inst.id
+            )
+        })
+}
+
+/// Step 1 for `allowed_runners` (spec §6.8): every declarative plugin has a runner, every
+/// listed runner is enabled, a collector runs on a runner it allows, and a declarative judge,
+/// which sees every collector's proposals, runs on a runner each collector allows.
+pub(crate) fn check_allowed(instances: &[Instance], user: &UserConfig) -> Result<(), String> {
+    let restricted: Vec<(&Instance, &Vec<String>)> = instances
+        .iter()
+        .filter_map(|c| c.allowed_runners.as_ref().map(|a| (c, a)))
+        .collect();
+    for (c, allowed) in &restricted {
+        if let Some(r) = allowed.iter().find(|r| {
+            !instances
+                .iter()
+                .any(|i| &&i.id == r && i.plugin.manifest.kind() == Kind::Runner)
+        }) {
+            return Err(format!(
+                "plugin instance `{}`: `allowed_runners` names `{r}`, which is not an enabled runner instance",
+                c.id
+            ));
+        }
+    }
+    for inst in instances.iter().filter(|i| i.plugin.manifest.declarative()) {
+        let runner = &runner_of(instances, user, inst)?.id;
+        for (c, allowed) in &restricted {
+            if allowed.contains(runner) {
+                continue;
+            }
+            if c.id == inst.id {
+                return Err(format!(
+                    "plugin instance `{}` runs on the runner `{runner}`, which its `allowed_runners` does not list",
+                    c.id
+                ));
+            }
+            if inst.plugin.manifest.kind() == Kind::Judge {
+                return Err(format!(
+                    "judge `{}` runs on the runner `{runner}`, which collector `{}` does not allow (`allowed_runners`): \
+                     the judge could never accept its proposals",
+                    inst.id, c.id
+                ));
+            }
+        }
+    }
+    Ok(())
 }

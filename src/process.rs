@@ -39,7 +39,26 @@ pub fn call(
     template: &[String],
     input: &impl Serialize,
 ) -> Result<String> {
-    run(ctx, inst, entry, template, input)
+    call_in(
+        ctx,
+        inst,
+        entry,
+        template,
+        input,
+        &ctx.store.join("state").join(&inst.id),
+    )
+}
+
+/// [`call`] with `state` as the instance's state directory instead of `<store>/state/<id>/`.
+pub fn call_in(
+    ctx: &Ctx,
+    inst: &Instance,
+    entry: &str,
+    template: &[String],
+    input: &impl Serialize,
+    state: &Path,
+) -> Result<String> {
+    run(ctx, inst, entry, template, input, state)
         .and_then(|out| String::from_utf8(out).map_err(|_| anyhow!("output is not UTF-8")))
         .with_context(|| format!("plugin `{}` ({entry})", inst.id))
 }
@@ -53,6 +72,7 @@ fn run(
     entry: &str,
     template: &[String],
     input: &impl Serialize,
+    state: &Path,
 ) -> Result<Vec<u8>> {
     let argv = inst.argv(template);
     let program = argv.first().context("empty argv")?;
@@ -60,14 +80,13 @@ fn run(
     let path_var = std::env::var_os("PATH").unwrap_or_default();
     let path = resolve_program(program, &inst.plugin.dir, &path_var, &cwd)?;
     let stdin = serde_json::to_vec(input)?;
-    let state = ctx.store.join("state").join(&inst.id);
-    std::fs::create_dir_all(&state).with_context(|| format!("creating {}", state.display()))?;
+    std::fs::create_dir_all(state).with_context(|| format!("creating {}", state.display()))?;
     std::fs::create_dir_all(&ctx.run_dir)
         .with_context(|| format!("creating {}", ctx.run_dir.display()))?;
     let log = |ext| ctx.run_dir.join(format!("{}.{entry}.{ext}", inst.id));
     let (out_path, err_path) = (log("stdout"), log("stderr"));
     let (mut out, mut err) = (unnamed(&out_path)?, unnamed(&err_path)?);
-    let status = command(ctx, inst, &argv, &path, &out, &err)
+    let status = command(ctx, inst, &argv, &path, &out, &err, state)
         .and_then(|mut cmd| wait(&mut cmd, program, stdin, inst.timeout));
     let stdout = keep(&mut out, &out_path, MAX_STDOUT)?;
     keep(&mut err, &err_path, MAX_STDOUT)?;
@@ -92,6 +111,7 @@ fn command(
     path: &Path,
     out: &File,
     err: &File,
+    state: &Path,
 ) -> Result<Command> {
     let mut cmd = Command::new(path);
     cmd.arg0(&argv[0])
@@ -114,7 +134,7 @@ fn command(
     .env("RRECALL_PROJECT", &ctx.project)
     .env("RRECALL_STORE", &ctx.store)
     .env("RRECALL_PLUGIN_DIR", &inst.plugin.dir)
-    .env("RRECALL_STATE_DIR", ctx.store.join("state").join(&inst.id))
+    .env("RRECALL_STATE_DIR", state)
     .env("RRECALL_RUN_ID", &ctx.run_id)
     .envs(inst.env_params());
     Ok(cmd)
@@ -267,6 +287,9 @@ pub fn resolve_program(
             .find(|p| is_executable(p))
             .with_context(|| format!("`{program}` is not on PATH"))?
     };
+    if !is_executable(&path) {
+        bail!("`{program}` is not an executable file");
+    }
     let head = read_head(&path).with_context(|| format!("cannot start `{program}`"))?;
     if let Some(line) = head.strip_prefix(b"#!") {
         let line = line.split(|b| *b == b'\n').next().unwrap_or_default();
@@ -366,7 +389,8 @@ pub fn run_hooks(
         }
         if !event.can_deny() {
             // The event ignores output, so only the process itself can fail.
-            if let Err(e) = run(ctx, inst, &entry, &h.command, &input) {
+            let state = ctx.store.join("state").join(&inst.id);
+            if let Err(e) = run(ctx, inst, &entry, &h.command, &input, &state) {
                 warnings.push(format!(
                     "hook `{}` failed on `{name}`: plugin `{}` ({name}): {e:#}",
                     inst.id, inst.id
