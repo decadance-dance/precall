@@ -6,7 +6,7 @@
 
 use crate::error;
 use crate::process::{self, TimedOut};
-use crate::wire::{self, RunnerInput};
+use crate::wire::{self, RunnerInput, Usage};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -152,7 +152,7 @@ pub fn run(id: &str, stdin: &str) -> Result<String> {
         }
         r => r?,
     };
-    let (output, cost, model) = match agent {
+    let (output, cost, model, usage) = match agent {
         Agent::Claude => {
             let stdouts = turns
                 .iter()
@@ -175,10 +175,15 @@ pub fn run(id: &str, stdin: &str) -> Result<String> {
                 parse_reply(&reply)?,
                 estimate(&prices, &model, tokens)?,
                 model,
+                Some(tokens),
             )
         }
     };
-    Ok(json!({"output": output, "cost_usd": cost, "model": model}).to_string() + "\n")
+    let mut doc = json!({"output": output, "cost_usd": cost, "model": model});
+    if let Some(u) = usage {
+        doc["usage"] = json!(u);
+    }
+    Ok(doc.to_string() + "\n")
 }
 
 /// The main turn's deadline and the wrap-up turn's.
@@ -603,14 +608,6 @@ impl Drop for Scratch {
     }
 }
 
-/// Token counts: input not read from a cache, input read from a cache, output.
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
-struct Tokens {
-    input: u64,
-    cached: u64,
-    output: u64,
-}
-
 /// USD per 1M tokens of one model (the runner's param `prices`).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -640,8 +637,9 @@ fn prices_from_env() -> Result<Prices> {
     Ok(prices)
 }
 
-/// The cost of `t` tokens of `model` from the price table: the agent reported none.
-fn estimate(prices: &Prices, model: &str, t: Tokens) -> Result<f64> {
+/// The cost of `t` tokens of `model` from the price table (cache writes priced as input): the
+/// agent reported none.
+fn estimate(prices: &Prices, model: &str, t: Usage) -> Result<f64> {
     let p = prices.get(model).with_context(|| {
         format!(
             "the agent reported no cost and the runner's param `prices` has no price for the model \
@@ -649,7 +647,9 @@ fn estimate(prices: &Prices, model: &str, t: Tokens) -> Result<f64> {
         )
     })?;
     Ok(
-        (t.input as f64 * p.input + t.cached as f64 * p.cached_input + t.output as f64 * p.output)
+        ((t.input_tokens as f64 + t.cache_write_tokens as f64) * p.input
+            + t.cache_read_tokens as f64 * p.cached_input
+            + t.output_tokens as f64 * p.output)
             / 1e6,
     )
 }
@@ -675,19 +675,20 @@ fn parse_reply(text: &str) -> Result<Value> {
         .map_err(|e| anyhow!("the agent's final message is not one JSON document: {e}"))
 }
 
-/// Claude's input tokens (cache writes count as input) and output; `None` without the counts.
-fn claude_tokens(u: &Value) -> Option<Tokens> {
+/// Claude's token counts; `None` without the input and output counts.
+fn claude_tokens(u: &Value) -> Option<Usage> {
     let n = |k: &str| u[k].as_u64().unwrap_or(0);
-    Some(Tokens {
-        input: u["input_tokens"].as_u64()? + n("cache_creation_input_tokens"),
-        cached: n("cache_read_input_tokens"),
-        output: u["output_tokens"].as_u64()?,
+    Some(Usage {
+        input_tokens: u["input_tokens"].as_u64()?,
+        output_tokens: u["output_tokens"].as_u64()?,
+        cache_read_tokens: n("cache_read_input_tokens"),
+        cache_write_tokens: n("cache_creation_input_tokens"),
     })
 }
 
 /// One `--output-format stream-json` turn: its `result` event, if it got that far, and the
 /// model and usage of each assistant message by id (claude repeats a message per content block).
-type ClaudeTurn = (Option<Value>, BTreeMap<String, (String, Tokens)>);
+type ClaudeTurn = (Option<Value>, BTreeMap<String, (String, Usage)>);
 
 fn claude_turn(stdout: &str) -> Result<ClaudeTurn> {
     let mut result = None;
@@ -719,14 +720,15 @@ fn claude_turn(stdout: &str) -> Result<ClaudeTurn> {
 /// Claude's answer from the last turn's `result`: the structured output (else the result text
 /// as JSON) and the model with the most output tokens. The cost is the result's
 /// `total_cost_usd` (else an estimate from its usage) plus, for each killed earlier turn, its
-/// own `total_cost_usd` when it printed one, else an estimate from the usage it streamed.
+/// own `total_cost_usd` when it printed one, else an estimate from the usage it streamed. The
+/// usage is the result's, plus each killed turn's result usage, else the usage it streamed.
 // limit: a request still in flight when a turn is killed streamed no usage and is not counted.
 fn claude_reply(
     status: ExitStatus,
     turns: &[String],
     requested: &str,
     prices: &Prices,
-) -> Result<(Value, f64, String)> {
+) -> Result<(Value, f64, String, Option<Usage>)> {
     let (last, earlier) = turns.split_last().context("no claude turn")?;
     let out = claude_turn(last)?
         .0
@@ -755,17 +757,15 @@ fn claude_reply(
             .map(|(name, _)| name.clone())
     });
     let model = model_or(found, requested)?;
-    let mut cost = match out["total_cost_usd"].as_f64() {
-        Some(c) => c,
-        None => {
-            let t = claude_tokens(&out["usage"])
-                .context("claude reported neither a cost nor its token usage")?;
-            estimate(prices, &model, t)?
-        }
+    let mut usage = claude_tokens(&out["usage"]);
+    let mut cost = match (out["total_cost_usd"].as_f64(), usage) {
+        (Some(c), _) => c,
+        (None, Some(t)) => estimate(prices, &model, t)?,
+        (None, None) => bail!("claude reported neither a cost nor its token usage"),
     };
     for turn in earlier {
         let (result, messages) = claude_turn(turn)?;
-        match result.and_then(|r| r["total_cost_usd"].as_f64()) {
+        match result.as_ref().and_then(|r| r["total_cost_usd"].as_f64()) {
             Some(c) => cost += c,
             None => {
                 for (m, t) in messages.values() {
@@ -773,8 +773,16 @@ fn claude_reply(
                 }
             }
         }
+        match result.and_then(|r| claude_tokens(&r["usage"])) {
+            Some(t) => *usage.get_or_insert_default() += t,
+            None => {
+                for (_, t) in messages.values() {
+                    *usage.get_or_insert_default() += *t;
+                }
+            }
+        }
     }
-    Ok((output, cost, model))
+    Ok((output, cost, model, usage))
 }
 
 /// The thread id from Codex's `thread.started` event.
@@ -787,8 +795,9 @@ fn codex_thread(events: &str) -> Option<String> {
 }
 
 /// The tokens and the model of a Codex call: from its session log in `home` (the whole
-/// session, a killed turn included), else the `turn.completed` events of the turns' stdout.
-fn codex_usage(home: &Path, turns: &[String], requested: &str) -> Result<(Tokens, String)> {
+/// session, a killed turn included), else the last `turn.completed` event of the turns' stdout,
+/// which holds the thread's running total (a resumed turn's includes the turns before it).
+fn codex_usage(home: &Path, turns: &[String], requested: &str) -> Result<(Usage, String)> {
     let (mut tokens, mut model) = (None, None);
     for log in session_logs(&home.join("sessions")) {
         let used = |e: &Value| e["type"] == "turn_context" || e["payload"]["type"] == "token_count";
@@ -807,7 +816,7 @@ fn codex_usage(home: &Path, turns: &[String], requested: &str) -> Result<(Tokens
     let tokens = match tokens {
         Some(t) => t,
         None => {
-            let done: Vec<Tokens> = turns
+            let done: Vec<Usage> = turns
                 .iter()
                 .map(|t| codex_records(t, |e| e["type"] == "turn.completed"))
                 .collect::<Result<Vec<_>>>()?
@@ -818,14 +827,9 @@ fn codex_usage(home: &Path, turns: &[String], requested: &str) -> Result<(Tokens
                         .context("codex reported a turn without its token usage")
                 })
                 .collect::<Result<_>>()?;
-            if done.is_empty() {
-                bail!("codex reported no token counts to estimate its cost from");
-            }
-            done.iter().fold(Tokens::default(), |a, t| Tokens {
-                input: a.input + t.input,
-                cached: a.cached + t.cached,
-                output: a.output + t.output,
-            })
+            *done
+                .last()
+                .context("codex reported no token counts to estimate its cost from")?
         }
     };
     Ok((tokens, model_or(model, requested)?))
@@ -843,13 +847,19 @@ fn codex_records(text: &str, used: fn(&Value) -> bool) -> Result<Vec<Value>> {
         .collect()
 }
 
-/// Codex counts cached input inside `input_tokens`; `None` without the counts.
-fn codex_tokens(u: &Value) -> Option<Tokens> {
-    let cached = u["cached_input_tokens"].as_u64().unwrap_or(0);
-    Some(Tokens {
-        input: u["input_tokens"].as_u64()?.saturating_sub(cached),
-        cached,
-        output: u["output_tokens"].as_u64()?,
+/// Codex counts cache reads and writes inside `input_tokens`; older records have no cache
+/// writes. `None` without the counts.
+fn codex_tokens(u: &Value) -> Option<Usage> {
+    let n = |k: &str| u[k].as_u64().unwrap_or(0);
+    let (read, write) = (n("cached_input_tokens"), n("cache_write_input_tokens"));
+    Some(Usage {
+        input_tokens: u["input_tokens"]
+            .as_u64()?
+            .saturating_sub(read)
+            .saturating_sub(write),
+        output_tokens: u["output_tokens"].as_u64()?,
+        cache_read_tokens: read,
+        cache_write_tokens: write,
     })
 }
 
@@ -898,6 +908,15 @@ mod tests {
         ExitStatus::from_raw(0)
     }
 
+    fn u(input: u64, output: u64, read: u64, write: u64) -> Usage {
+        Usage {
+            input_tokens: input,
+            output_tokens: output,
+            cache_read_tokens: read,
+            cache_write_tokens: write,
+        }
+    }
+
     fn prices() -> Prices {
         serde_json::from_str(r#"{"m1": {"input": 1, "cached_input": 0.1, "output": 10}}"#).unwrap()
     }
@@ -912,12 +931,11 @@ mod tests {
 
     #[test]
     fn a_cost_is_estimated_from_tokens_or_names_the_missing_model() {
-        let t = Tokens {
-            input: 1_000_000,
-            cached: 1_000_000,
-            output: 1_000_000,
-        };
+        // Cache writes are priced as input.
+        let t = u(500_000, 1_000_000, 1_000_000, 500_000);
         assert!((estimate(&prices(), "m1", t).unwrap() - 11.1).abs() < 1e-9);
+        // Counts an agent reports are not trusted to fit a sum.
+        assert!(estimate(&prices(), "m1", u(u64::MAX, 0, 0, u64::MAX)).unwrap() > 0.0);
         let e = estimate(&prices(), "m2", t).unwrap_err().to_string();
         assert!(e.contains("`m2`") && e.contains("`prices`"), "{e}");
     }
@@ -945,13 +963,15 @@ mod tests {
             "\n",
             r#"{"type":"result","is_error":false,"result":"done","structured_output":{"proposals":[]},"total_cost_usd":0.5,"modelUsage":{"small":{"outputTokens":3},"big":{"outputTokens":90}}}"#,
         );
-        let (o, c, m) = reply(&[out], "default").unwrap();
+        let (o, c, m, n) = reply(&[out], "default").unwrap();
         assert_eq!((o, c, m.as_str()), (json!({"proposals": []}), 0.5, "big"));
+        assert_eq!(n, None);
 
         let no_cost = r#"{"type":"result","is_error":false,"result":"```json\n{\"verdicts\":[]}\n```","usage":{"input_tokens":100,"cache_creation_input_tokens":900000,"cache_read_input_tokens":0,"output_tokens":0}}"#;
-        let (o, c, m) = reply(&[no_cost], "m1").unwrap();
+        let (o, c, m, n) = reply(&[no_cost], "m1").unwrap();
         assert_eq!((o, m.as_str()), (json!({"verdicts": []}), "m1"));
         assert!((c - 0.9001).abs() < 1e-9, "{c}");
+        assert_eq!(n, Some(u(100, 0, 0, 900_000)));
 
         // A killed turn adds what it streamed, each message once.
         let killed = concat!(
@@ -959,8 +979,14 @@ mod tests {
             "\n",
             r#"{"type":"assistant","message":{"id":"a","model":"m1","usage":{"input_tokens":1000000,"output_tokens":0}}}"#,
         );
-        let (_, c, _) = reply(&[killed, out], "default").unwrap();
+        let (_, c, _, n) = reply(&[killed, out], "default").unwrap();
         assert!((c - 1.5).abs() < 1e-9, "{c}");
+        assert_eq!(n, Some(u(1_000_000, 0, 0, 0)));
+        let (_, _, _, n) = reply(&[killed, no_cost], "m1").unwrap();
+        assert_eq!(n, Some(u(1_000_100, 0, 0, 900_000)));
+        // A killed turn that printed its result counts the result's usage, not the messages'.
+        let (_, _, _, n) = reply(&[&format!("{killed}\n{no_cost}"), out], "m1").unwrap();
+        assert_eq!(n, Some(u(100, 0, 0, 900_000)));
 
         let no_model = r#"{"type":"result","is_error":false,"result":"{}","total_cost_usd":0}"#;
         assert!(
@@ -992,6 +1018,15 @@ mod tests {
                 .to_string()
                 .contains("duplicate key")
         );
+    }
+
+    #[test]
+    fn codex_input_excludes_its_cache_reads_and_writes() {
+        let v = json!({"input_tokens": 100, "cached_input_tokens": 30, "cache_write_input_tokens": 20, "output_tokens": 5});
+        assert_eq!(codex_tokens(&v), Some(u(50, 5, 30, 20)));
+        // Older records have no cache writes.
+        let v = json!({"input_tokens": 100, "cached_input_tokens": 30, "output_tokens": 5});
+        assert_eq!(codex_tokens(&v), Some(u(70, 5, 30, 0)));
     }
 
     #[test]
@@ -1027,32 +1062,14 @@ mod tests {
         )
         .unwrap();
         let (t, m) = codex_usage(&home, &[], "default").unwrap();
-        assert_eq!(
-            (t, m.as_str()),
-            (
-                Tokens {
-                    input: 20,
-                    cached: 10,
-                    output: 5
-                },
-                "m1"
-            )
-        );
+        assert_eq!((t, m.as_str()), (u(20, 5, 10, 0), "m1"));
         fs::remove_dir_all(&home).unwrap();
 
+        // Each `turn.completed` holds the thread's running total: the last one counts.
         let ev = "{\"type\":\"thread.started\",\"thread_id\":\"th1\"}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":7,\"cached_input_tokens\":2,\"output_tokens\":1}}\n";
-        let (t, m) = codex_usage(&home, &[ev.into(), ev.into()], "m9").unwrap();
-        assert_eq!(
-            (t, m.as_str()),
-            (
-                Tokens {
-                    input: 10,
-                    cached: 4,
-                    output: 2
-                },
-                "m9"
-            )
-        );
+        let later = "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":9,\"cached_input_tokens\":3,\"output_tokens\":2}}\n";
+        let (t, m) = codex_usage(&home, &[ev.into(), later.into()], "m9").unwrap();
+        assert_eq!((t, m.as_str()), (u(6, 2, 3, 0), "m9"));
         assert_eq!(codex_thread(ev).as_deref(), Some("th1"));
         assert!(codex_usage(&home, &[], "m9").is_err());
     }

@@ -35,7 +35,7 @@ acls() {
 }
 for a in "$@"; do [ "$a" = --resume ] && resume=yes; done
 answer() {
-    printf '{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"s","structured_output":%s,"total_cost_usd":%s,"usage":{"input_tokens":1,"output_tokens":2},"modelUsage":{"claude-fake-small":{"outputTokens":1},"claude-fake-1":{"outputTokens":2}}}\n' "$out" "$1"
+    printf '{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"s","structured_output":%s,"total_cost_usd":%s,"usage":{"input_tokens":1,"cache_creation_input_tokens":3,"cache_read_input_tokens":4,"output_tokens":2},"modelUsage":{"claude-fake-small":{"outputTokens":1},"claude-fake-1":{"outputTokens":2}}}\n' "$out" "$1"
 }
 case "$(cat "$d/scenario")" in
     ok) answer 0.25 ;;
