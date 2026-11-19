@@ -917,6 +917,79 @@ fn a_missing_verdict_is_asked_once_more_with_only_its_proposal() {
     }
 }
 
+/// A runner judge `pjudge` over `repo`'s `a` and `b`, its runner answering its calls with
+/// `verdicts` (one list per call).
+fn runner_judged(verdicts: &[Value]) -> W {
+    let w = world(&props(&[
+        add("a", "layout", "Queue"),
+        add("b", "layout", "Cache"),
+    ]));
+    let outs: Vec<String> = verdicts
+        .iter()
+        .map(|v| {
+            json!({"output": {"verdicts": v}, "cost_usd": 0.01, "model": "fake-1"}).to_string()
+        })
+        .collect();
+    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    w.config(&format!(
+        "{cfg}{}{}",
+        w.inst(
+            "runner",
+            "runner",
+            &format!("scenario = \"seq\", out = {}", q(&outs.join("\n")))
+        ),
+        w.inst("pjudge", "pjudge", ""),
+    ));
+    w
+}
+
+#[test]
+fn a_judge_key_without_its_collector_counts_in_the_first_call_and_the_reask() {
+    let w = runner_judged(&[
+        json!([{"key": "a", "verdict": "accept", "reason": "ok"}]),
+        json!([{"key": "b", "verdict": "accept", "reason": "ok"}]),
+    ]);
+    w.run_code(&[], 0);
+    assert_eq!(w.calls("runner"), 2);
+    let env = std::fs::read_to_string(w.rec("runner")).unwrap();
+    assert!(
+        !env.contains("RRECALL_AGENT_DIR"),
+        "a plugin runner gets none: {env}"
+    );
+    assert!(!logs(&w).iter().any(|l| l.ends_with(".agent")));
+    let map = w.map("layout");
+    assert!(map.contains("Queue") && map.contains("Cache"), "{map}");
+    let report = w.report();
+    for call in ["judge", "reask"] {
+        let note = format!(
+            "- bare keys: pjudge in round 1 ({call} call): 1 taken as the one key given that ends in it\n"
+        );
+        assert!(report.contains(&note), "{note}\n{report}");
+    }
+}
+
+#[test]
+fn an_ambiguous_judge_key_fails_the_whole_output() {
+    // `a` is also the proposal key of `github/a`.
+    let w = runner_judged(&[json!([
+        {"key": "a", "verdict": "accept", "reason": "ok"},
+        {"key": "repo/b", "verdict": "accept", "reason": "ok"},
+    ])]);
+    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    let github = props(&[add("a", "layout", "Log")]);
+    w.config(&cfg.replacen(&q(&props(&[])), &q(&github), 1));
+    w.run_code(&[], 5);
+    assert_eq!(w.calls("runner"), 1, "no re-ask after an invalid output");
+    let map = w.map("layout");
+    assert!(!map.contains("Queue") && !map.contains("Cache"), "{map}");
+    let report = w.report();
+    assert!(
+        report.contains("key `a` was not given; it is the proposal key of 2 keys given"),
+        "{report}"
+    );
+    assert!(!report.contains("bare keys"), "{report}");
+}
+
 #[test]
 fn a_verdict_missing_twice_drops_only_its_proposal() {
     let w = reasked(&[ACCEPT_A, r#"{"verdicts":[]}"#]);
@@ -1921,6 +1994,40 @@ fn the_builtin_claude_runner_runs_a_declarative_collector() {
     assert!(argv.contains("\n--model\nopus-test\n"), "{argv}");
     let stdin = std::fs::read_to_string(w.root.join("home/agent/claude.stdin.1")).unwrap();
     assert!(stdin.starts_with(rrecall::wire::PREAMBLE) && stdin.contains("Propose changes."));
+    // What the agent streamed, next to the call's stdout and stderr (spec §6.3, §6.8).
+    let logs = logs(&w);
+    for ext in ["stdout", "stderr", "agent"] {
+        let log = format!("claude.writer.collect.{ext}");
+        assert!(logs.contains(&log), "{log}: {logs:?}");
+    }
+}
+
+#[test]
+fn a_runner_the_core_kills_at_the_timeout_still_leaves_its_agent_log() {
+    let w = world(&props(&[add("a", "layout", "Queue")]));
+    let tok = format!("ghp_{}", "aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3z5A");
+    agent(&w, "stop-runner", &json!(format!("streamed {tok}")));
+    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    w.config(&format!(
+        "{cfg}{}runner = \"claude\"\ntimeout = \"2s\"\n\n[[plugins]]\nid = \"claude\"\n",
+        w.inst("pjudge", "pjudge", ""),
+    ));
+    let o = w.run_code(&[], 5);
+    assert!(o.stderr.contains("timed out after 2s"), "{}", o.stderr);
+    let runs = w.store().join("runs");
+    let last = std::fs::read_dir(&runs)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .max()
+        .unwrap();
+    let log = std::fs::read_to_string(last.join("claude.pjudge.judge.agent")).unwrap();
+    assert!(
+        log.starts_with("== turn1.stdout ==\n")
+            && log.contains("streamed [redacted:github-token]")
+            && !log.contains(&tok),
+        "{log}"
+    );
 }
 
 #[test]

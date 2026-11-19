@@ -12,6 +12,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
+use std::io::Read;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -118,14 +119,68 @@ pub fn run(id: &str, stdin: &str) -> Result<String> {
         Agent::Codex => Access::default(),
     };
     let scratch = Scratch::create()?;
-    let dir = &scratch.0;
+    // The core's agent dir (spec §6.8): the turns stream there, so the core keeps them even
+    // when it kills this runner.
+    let logs = std::env::var_os(process::AGENT_DIR).map(PathBuf::from);
+    let turns = logs.as_deref().unwrap_or(&scratch.0);
+    let out = answer(agent, &input, &scratch.0, turns, &access, &prices);
+    if let Some(logs) = &logs
+        && let Err(e) = export(&scratch.0, logs)
+    {
+        eprintln!(
+            "rrecall: the agent's files were not kept in {}: {e:#}",
+            logs.display()
+        );
+    }
+    out
+}
+
+/// Copies Codex's final message and session logs from the call's directory `dir` to the agent
+/// dir `logs`: regular files only, never through a link, each at most what the log keeps.
+fn export(dir: &Path, logs: &Path) -> Result<()> {
+    let mut files = vec![("reply.txt".to_string(), dir.join("reply.txt"))];
+    for (i, p) in session_logs(&dir.join("codex-home"))
+        .into_iter()
+        .enumerate()
+    {
+        files.push((format!("session{}.jsonl", i + 1), p));
+    }
+    for (name, p) in files {
+        let Some(f) = process::open_regular(&p) else {
+            continue;
+        };
+        let to = logs.join(name);
+        let mut out = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&to)
+            .with_context(|| format!("{}", to.display()))?;
+        std::io::copy(
+            &mut f.take(process::AGENT_LOG_CAP + process::OVERLAP),
+            &mut out,
+        )?;
+    }
+    Ok(())
+}
+
+/// The call itself, in its directory `dir`, each turn's stdout in `turns`: the runner output
+/// document.
+fn answer(
+    agent: Agent,
+    input: &RunnerInput,
+    dir: &Path,
+    turns_dir: &Path,
+    access: &Access,
+    prices: &Prices,
+) -> Result<String> {
     let launch = match agent {
-        Agent::Claude => claude_launch(&input, dir, &access)?,
-        Agent::Codex => codex_launch(&input, dir)?,
+        Agent::Claude => claude_launch(input, dir, access)?,
+        Agent::Codex => codex_launch(input, dir)?,
     };
     let session = uuid_v4();
     let (main, wrap) = split(Duration::from_secs(input.timeout));
-    let mut turns = vec![dir.join("turn1.stdout")];
+    let mut turns = vec![turns_dir.join("turn1.stdout")];
     let start = match agent {
         Agent::Claude => vec!["--session-id".into(), session.clone()],
         Agent::Codex => vec!["-".into()],
@@ -145,7 +200,7 @@ pub fn run(id: &str, stdin: &str) -> Result<String> {
                     vec!["resume".into(), thread, "-".into()]
                 }
             };
-            turns.push(dir.join("turn2.stdout"));
+            turns.push(turns_dir.join("turn2.stdout"));
             launch
                 .turn(&resume, WRAP_UP, &turns[1], wrap)
                 .with_context(|| format!("{e}; wrap-up turn"))?
@@ -158,7 +213,7 @@ pub fn run(id: &str, stdin: &str) -> Result<String> {
                 .iter()
                 .map(fs::read_to_string)
                 .collect::<Result<Vec<_>, _>>()?;
-            claude_reply(status, &stdouts, &input.model, &prices)?
+            claude_reply(status, &stdouts, &input.model, prices)?
         }
         Agent::Codex => {
             if !status.success() {
@@ -173,7 +228,7 @@ pub fn run(id: &str, stdin: &str) -> Result<String> {
             let (tokens, model) = codex_usage(&dir.join("codex-home"), &events, &input.model)?;
             (
                 parse_reply(&reply)?,
-                estimate(&prices, &model, tokens)?,
+                estimate(prices, &model, tokens)?,
                 model,
                 Some(tokens),
             )
@@ -485,13 +540,13 @@ fn utf8(p: &Path) -> Result<&str> {
 /// the call ends: outside the map store, so the agent cannot read the map by a relative path,
 /// and outside any git repository, so it loads no project's instruction files. The agent's
 /// session log there holds source text, so the dir is the user's alone.
-struct Scratch(PathBuf);
+pub(crate) struct Scratch(pub(crate) PathBuf);
 
 /// A scratch dir's name: the prefix, the pid of the runner that made it, and a random part.
 const SCRATCH_PREFIX: &str = "agent-";
 
 impl Scratch {
-    fn create() -> Result<Scratch> {
+    pub(crate) fn create() -> Result<Scratch> {
         let private = private_dir()?;
         sweep(&private);
         let name = format!("{SCRATCH_PREFIX}{}-{}", std::process::id(), uuid_v4());
@@ -799,7 +854,7 @@ fn codex_thread(events: &str) -> Option<String> {
 /// which holds the thread's running total (a resumed turn's includes the turns before it).
 fn codex_usage(home: &Path, turns: &[String], requested: &str) -> Result<(Usage, String)> {
     let (mut tokens, mut model) = (None, None);
-    for log in session_logs(&home.join("sessions")) {
+    for log in session_logs(home) {
         let used = |e: &Value| e["type"] == "turn_context" || e["payload"]["type"] == "token_count";
         for e in codex_records(&fs::read_to_string(&log)?, used)? {
             let p = &e["payload"];
@@ -863,17 +918,31 @@ fn codex_tokens(u: &Value) -> Option<Usage> {
     })
 }
 
-/// Every `*.jsonl` under `dir`, sorted: a run-scoped home holds one session.
-fn session_logs(dir: &Path) -> Vec<PathBuf> {
+/// Every `*.jsonl` under the run-scoped home's `sessions`, sorted (it holds one session); none
+/// when the home is a link.
+fn session_logs(home: &Path) -> Vec<PathBuf> {
+    if !fs::symlink_metadata(home).is_ok_and(|m| m.is_dir()) {
+        return Vec::new();
+    }
+    jsonl_in(&home.join("sessions"))
+}
+
+/// The `.jsonl` regular files under `dir`, a real directory, never through a link.
+fn jsonl_in(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
+    if !fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir()) {
+        return out;
+    }
     let Ok(entries) = fs::read_dir(dir) else {
         return out;
     };
     for e in entries.flatten() {
-        let p = e.path();
-        if p.is_dir() {
-            out.extend(session_logs(&p));
-        } else if p.extension().is_some_and(|x| x == "jsonl") {
+        let (p, Ok(t)) = (e.path(), e.file_type()) else {
+            continue;
+        };
+        if t.is_dir() {
+            out.extend(jsonl_in(&p));
+        } else if t.is_file() && p.extension().is_some_and(|x| x == "jsonl") {
             out.push(p);
         }
     }

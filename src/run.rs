@@ -1158,10 +1158,11 @@ impl Run {
                 }
             }
             let mut ask = |run: &mut Run,
-                           name: String,
+                           call: &str,
                            batch: &[&Item],
                            verdicts: &mut BTreeMap<String, Vec<RoundVerdict>>,
-                           dropped: &mut BTreeMap<String, String>| {
+                           dropped: &mut BTreeMap<String, String>|
+             -> Result<Vec<String>, String> {
                 // Every batch gets the nodes of the branches it lands in, applied alone.
                 let lands = lands(work, rules, earlier, batch);
                 for it in batch
@@ -1173,9 +1174,9 @@ impl Run {
                         .or_default()
                         .insert(judge.id.clone(), lands.get(&it.key()).cloned());
                 }
-                run.judge_with(
+                let (missing, bare) = run.judge_with(
                     &judge,
-                    &name,
+                    &entry(call, round),
                     work,
                     batch,
                     texts.as_ref(),
@@ -1183,15 +1184,17 @@ impl Run {
                     &lands,
                     verdicts,
                     dropped,
-                )
+                )?;
+                if bare > 0 {
+                    run.judge_notes.push(format!(
+                        "bare keys: {} in round {round} ({call} call): {bare} taken as the one \
+                         key given that ends in it",
+                        judge.id
+                    ));
+                }
+                Ok(missing)
             };
-            let Ok(missing) = ask(
-                self,
-                entry("judge", round),
-                &batch,
-                &mut verdicts,
-                &mut dropped,
-            ) else {
+            let Ok(missing) = ask(self, "judge", &batch, &mut verdicts, &mut dropped) else {
                 continue;
             };
             if missing.is_empty() {
@@ -1202,13 +1205,7 @@ impl Run {
                 .copied()
                 .filter(|it| missing.contains(&it.key()))
                 .collect();
-            let follow_up = ask(
-                self,
-                entry("reask", round),
-                &again,
-                &mut verdicts,
-                &mut dropped,
-            );
+            let follow_up = ask(self, "reask", &again, &mut verdicts, &mut dropped);
             let head = format!(
                 "re-asked: {} in round {round}: {}",
                 judge.id,
@@ -1317,8 +1314,8 @@ impl Run {
 
     /// One check or judge call over `live`, logged as `name`: its verdicts that are not `accept`
     /// go to `verdicts`, the others to `accepts` for the report. It returns the keys a judge's
-    /// valid output left out; a failure drops everything it was given and returns why
-    /// ("budget" when the cap refused it) (spec §6.5).
+    /// valid output left out and how many of its keys were bare (spec §6.5); a failure drops
+    /// everything it was given and returns why ("budget" when the cap refused it).
     #[allow(clippy::too_many_arguments)]
     fn judge_with(
         &mut self,
@@ -1331,9 +1328,9 @@ impl Run {
         lands: &BTreeMap<String, String>,
         verdicts: &mut BTreeMap<String, Vec<RoundVerdict>>,
         dropped: &mut BTreeMap<String, String>,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<(Vec<String>, usize), String> {
         if live.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), 0));
         }
         let keys: Vec<String> = live.iter().map(|it| it.key()).collect();
         let branches: BTreeSet<&str> = live
@@ -1389,7 +1386,7 @@ impl Run {
             .collect();
         let kind = if texts.is_some() { "judge" } else { "check" };
         match self.verdicts_of(inst, name, &input, &keys) {
-            Ok((vs, missing)) => {
+            Ok((vs, missing, bare)) => {
                 for mut v in vs {
                     if v.verdict == VerdictKind::Accept && unbacked.contains(v.key.as_str()) {
                         v.verdict = VerdictKind::Reject;
@@ -1411,7 +1408,7 @@ impl Run {
                         saw: saw.clone(),
                     });
                 }
-                Ok(missing)
+                Ok((missing, bare))
             }
             Err(f) => {
                 let why = match f {
@@ -1429,15 +1426,15 @@ impl Run {
         }
     }
 
-    /// The verdicts of one call logged as `name`, and the keys a judge left out; a check that
-    /// leaves one out fails (spec §6.5).
+    /// The verdicts of one call logged as `name`, the keys a judge left out and how many of its
+    /// keys were bare; a check that leaves one out fails (spec §6.5).
     fn verdicts_of(
         &self,
         inst: &Instance,
         name: &str,
         input: &JudgeInput,
         keys: &[String],
-    ) -> Result<(Vec<Verdict>, Vec<String>), CallFail> {
+    ) -> Result<(Vec<Verdict>, Vec<String>, usize), CallFail> {
         let (cmd, prompt) = match &inst.plugin.manifest.spec {
             Spec::Check(c) => (Some(&c.command), None),
             Spec::Judge(j) => (j.command.as_ref(), j.prompt.as_deref()),
@@ -1453,7 +1450,7 @@ impl Run {
             (None, None) => return Err(CallFail::Error("neither `command` nor `prompt`".into())),
         };
         if matches!(inst.plugin.manifest.spec, Spec::Check(_)) {
-            return Ok((wire::decode_verdicts(&inst.id, &out, keys)?, Vec::new()));
+            return Ok((wire::decode_verdicts(&inst.id, &out, keys)?, Vec::new(), 0));
         }
         Ok(wire::decode_verdicts_given(&inst.id, &out, keys)?)
     }

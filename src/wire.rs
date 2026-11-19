@@ -607,7 +607,7 @@ fn checked_proposals(plugin: &str, props: Vec<Proposal>) -> Result<Vec<Proposal>
 /// A check's or judge's output (spec §6.5): exactly one verdict per key given, returned in
 /// the order of `keys`. Anything else, a key left out included, fails the whole output.
 pub fn decode_verdicts(plugin: &str, stdout: &str, keys: &[String]) -> Result<Vec<Verdict>> {
-    let (verdicts, missing) = decode_verdicts_given(plugin, stdout, keys)?;
+    let (verdicts, missing, _) = verdicts_in(plugin, stdout, keys, false)?;
     match missing.first() {
         Some(k) => bail!("plugin `{plugin}`: no verdict for `{k}`"),
         None => Ok(verdicts),
@@ -615,23 +615,51 @@ pub fn decode_verdicts(plugin: &str, stdout: &str, keys: &[String]) -> Result<Ve
 }
 
 /// A judge's output (spec §6.5), which may leave keys out: the verdicts given, in the order of
-/// `keys`, and the keys without one. Anything else wrong fails the whole output.
+/// `keys`, the keys without one, and how many verdicts named only the `<proposal key>` part of
+/// exactly one key given and were taken as that key. Anything else wrong fails the whole output.
 pub fn decode_verdicts_given(
     plugin: &str,
     stdout: &str,
     keys: &[String],
-) -> Result<(Vec<Verdict>, Vec<String>)> {
+) -> Result<(Vec<Verdict>, Vec<String>, usize)> {
+    verdicts_in(plugin, stdout, keys, true)
+}
+
+fn verdicts_in(
+    plugin: &str,
+    stdout: &str,
+    keys: &[String],
+    bare_keys: bool,
+) -> Result<(Vec<Verdict>, Vec<String>, usize)> {
     let mut by_key = BTreeMap::new();
-    for (i, v) in decode_items::<Verdict>(plugin, stdout, "verdicts")?
+    let mut bare = 0;
+    for (i, mut v) in decode_items::<Verdict>(plugin, stdout, "verdicts")?
         .into_iter()
         .enumerate()
     {
         let n = i + 1;
         if !keys.contains(&v.key) {
-            bail!(
-                "plugin `{plugin}`: verdict {n}: key `{}` was not given",
-                v.key
-            );
+            // Instance ids hold no `/`, so a key given splits at its first one.
+            let ends: Vec<&String> = keys
+                .iter()
+                .filter(|k| k.split_once('/').is_some_and(|(_, p)| p == v.key))
+                .collect();
+            match ends[..] {
+                [full] if bare_keys => {
+                    v.key = full.clone();
+                    bare += 1;
+                }
+                [] | [_] => bail!(
+                    "plugin `{plugin}`: verdict {n}: key `{}` was not given",
+                    v.key
+                ),
+                _ => bail!(
+                    "plugin `{plugin}`: verdict {n}: key `{}` was not given; it is the proposal \
+                     key of {} keys given",
+                    v.key,
+                    ends.len()
+                ),
+            }
         }
         if v.verdict == VerdictKind::Revise && v.instruction.is_none() {
             bail!(
@@ -654,7 +682,7 @@ pub fn decode_verdicts_given(
             v
         })
         .collect();
-    Ok((verdicts, missing))
+    Ok((verdicts, missing, bare))
 }
 
 /// A `resolve` entrypoint's output (spec §6.4): every reference asked for, `None` when it
@@ -807,14 +835,66 @@ mod tests {
     fn a_judge_may_leave_keys_out_but_not_break_the_rest() {
         let keys = ["gh/a".to_string(), "gh/b".to_string(), "gh/c".to_string()];
         let some = r#"{"verdicts":[{"key":"gh/c","verdict":"reject","reason":"no"},{"key":"gh/a","verdict":"accept","reason":""}]}"#;
-        let (v, missing) = decode_verdicts_given("support", some, &keys).unwrap();
+        let (v, missing, bare) = decode_verdicts_given("support", some, &keys).unwrap();
         let got: Vec<&str> = v.iter().map(|v| v.key.as_str()).collect();
         assert_eq!(got, ["gh/a", "gh/c"]);
         assert_eq!(missing, ["gh/b"]);
+        assert_eq!(bare, 0);
         // A key not given still fails the whole output, even with another left out.
         let bad = r#"{"verdicts":[{"key":"gh/z","verdict":"accept","reason":""}]}"#;
         let e = decode_verdicts_given("support", bad, &keys).unwrap_err();
         assert!(e.to_string().contains("`gh/z`"), "{e}");
+    }
+
+    #[test]
+    fn a_judge_key_without_its_collector_counts_only_when_one_key_given_ends_in_it() {
+        let keys = [
+            "repo/semantic-fallback".to_string(),
+            "repo/a/b".to_string(),
+            "gh/x".to_string(),
+            "repo/x".to_string(),
+        ];
+        // `a/b` is the proposal part of `repo/a/b` only: instance ids hold no `/`.
+        let out = r#"{"verdicts":[{"key":"semantic-fallback","verdict":"accept","reason":""},{"key":"a/b","verdict":"revise","reason":"r","instruction":"i"},{"key":"gh/x","verdict":"reject","reason":"no"}]}"#;
+        let (v, missing, bare) = decode_verdicts_given("support", out, &keys).unwrap();
+        let got: Vec<&str> = v.iter().map(|v| v.key.as_str()).collect();
+        assert_eq!(got, ["repo/semantic-fallback", "repo/a/b", "gh/x"]);
+        assert_eq!(missing, ["repo/x"]);
+        assert_eq!(bare, 2);
+        for (bad, want) in [
+            // Ambiguous: `x` is the proposal part of `gh/x` and of `repo/x`.
+            (
+                r#"{"verdicts":[{"key":"x","verdict":"accept","reason":""}]}"#,
+                "verdict 1: key `x` was not given; it is the proposal key of 2 keys given",
+            ),
+            (
+                r#"{"verdicts":[{"key":"nope","verdict":"accept","reason":""}]}"#,
+                "verdict 1: key `nope` was not given",
+            ),
+            // A bare and a full key for the same proposal.
+            (
+                r#"{"verdicts":[{"key":"repo/semantic-fallback","verdict":"accept","reason":""},{"key":"semantic-fallback","verdict":"accept","reason":""}]}"#,
+                "verdict 2: key `repo/semantic-fallback` twice",
+            ),
+            (
+                r#"{"verdicts":[{"key":"semantic-fallback","verdict":"revise","reason":"r"}]}"#,
+                "verdict 1 (key `repo/semantic-fallback`): `revise` needs an `instruction`",
+            ),
+        ] {
+            let e = decode_verdicts_given("support", bad, &keys)
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains(want), "{bad}: {e}");
+        }
+        // A check is held to the keys given, as before.
+        let e = decode_verdicts(
+            "secrets",
+            r#"{"verdicts":[{"key":"semantic-fallback","verdict":"accept","reason":""}]}"#,
+            &keys[..1],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("key `semantic-fallback` was not given"), "{e}");
     }
 
     #[test]
