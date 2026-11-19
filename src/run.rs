@@ -554,6 +554,9 @@ impl Run {
             .unwrap_or_else(|_| self.ctx.store.clone());
         for (inst, fp) in &due {
             if self.unsettled.contains_key(&inst.id) {
+                if let Some(e) = lock.collectors.get_mut(&inst.id) {
+                    e.unsettled = true;
+                }
                 continue;
             }
             let interval = Self::collector_spec(inst)
@@ -572,6 +575,7 @@ impl Run {
                     runner,
                     model,
                     settled_at: interval.then(|| lock::fmt_utc(self.t0)),
+                    unsettled: false,
                 },
             );
         }
@@ -715,7 +719,7 @@ impl Run {
         let Some(last) = old
             .collectors
             .get(&inst.id)
-            .filter(|l| l.fingerprint == combined)
+            .filter(|l| l.fingerprint == combined && !l.unsettled)
         else {
             return Due::Yes(combined);
         };

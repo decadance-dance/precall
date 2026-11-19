@@ -653,6 +653,38 @@ fn i10_a_judge_that_times_out_drops_its_proposals_and_leaves_the_collector_unset
     assert!(w.map("layout").contains("queue"));
 }
 
+#[test]
+fn i10_a_forced_run_that_drops_proposals_makes_the_collector_due_again() {
+    let w = world(&props(&[]));
+    let seq = format!("{}\n{}", props(&[]), props(&[add("a", "layout", "Queue")]));
+    let repo = w.inst(
+        "repo",
+        "col",
+        &format!("scenario = \"seq\", out = {}", q(&seq)),
+    );
+    let judge = w.inst("judge", "judge", "scenario = \"sleep\"");
+    w.config(&format!("{repo}{judge}timeout = \"1s\"\n"));
+    w.run_code(&[], 0);
+    let settled = w.lock()["collectors"]["repo"].clone();
+    w.run_code(&["--force"], 5);
+    assert_eq!(w.calls("repo"), 2);
+    let entry = &w.lock()["collectors"]["repo"];
+    assert_eq!(
+        entry["fingerprint"], settled["fingerprint"],
+        "the settled one stays"
+    );
+    assert_eq!(entry["unsettled"], true, "{entry}");
+    w.config(&repo);
+    w.run_code(&[], 0);
+    assert_eq!(
+        w.calls("repo"),
+        3,
+        "an unchanged fingerprint does not hide the failure"
+    );
+    assert!(w.map("layout").contains("queue"), "{}", w.map("layout"));
+    assert!(w.lock()["collectors"]["repo"].get("unsettled").is_none());
+}
+
 // ---- Back pressure, parents, the commit message (spec §4.1, §4.3) ----
 
 #[test]

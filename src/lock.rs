@@ -32,6 +32,10 @@ pub struct CollectorLock {
     /// Only for a `min_interval` collector, so a fingerprinted one rewrites nothing when it re-settles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settled_at: Option<String>,
+    /// The latest attempt did not settle (spec §4.2, I10): the collector is due on the next run
+    /// whatever its fingerprint or interval, while the fields above keep the last settled run.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unsettled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -206,6 +210,7 @@ mod tests {
                 runner: None,
                 model: Some("m".into()),
                 settled_at: None,
+                unsettled: false,
             },
         );
         l.plugins.insert(

@@ -133,14 +133,14 @@ The run id is the start time in UTC, `YYYY-MM-DDTHHMMSSZ` (`-2`, `-3`, ... when 
 
 ### 4.2 Lock file and settled collectors
 
-`rrecall.lock` records, per collector: the combined fingerprint of its last **settled** run, the plugin's source and content hash, the runner and model used (as returned by the runner), and the time of the last settled run (used only for `min_interval`). A collector's run is settled when it ran without failure and every proposal it made ended accepted, or rejected by checks and judges that themselves ran. A collector whose proposals were dropped because a check or judge failed, or because the budget ran out, is not settled: its lock entry does not advance, and the next run collects it again. Per check, judge and view the lock records the plugin's source and content hash. The lock is tracked, so the history shows when a plugin or prompt changed, and a diff after a prompt change is attributed to it.
+`rrecall.lock` records, per collector: the combined fingerprint of its last **settled** run, the plugin's source and content hash, the runner and model used (as returned by the runner), and the time of the last settled run (used only for `min_interval`). A collector's run is settled when it ran without failure and every proposal it made ended accepted, or rejected by checks and judges that themselves ran. A collector whose proposals were dropped because a check or judge failed, or because the budget ran out, is not settled: its lock entry does not advance, and the next run collects it again. The entry records that with `"unsettled": true`, so the next run collects it whatever its fingerprint or `min_interval` says (also after a `--force` run whose attempt failed); the next settled run drops the mark. Per check, judge and view the lock records the plugin's source and content hash. The lock is tracked, so the history shows when a plugin or prompt changed, and a diff after a prompt change is attributed to it.
 
 The file is JSON with two-space indentation, keys in this order, a final newline:
 
 ```json
 {
   "collectors": {
-    "<instance>": { "fingerprint": "sha256:...", "plugin": "plugins/files", "hash": "sha256:...", "runner": "claude", "model": "...", "settled_at": "2026-11-25T09:14:00Z" }
+    "<instance>": { "fingerprint": "sha256:...", "plugin": "plugins/files", "hash": "sha256:...", "runner": "claude", "model": "...", "settled_at": "2026-11-25T09:14:00Z", "unsettled": true }
   },
   "plugins": {
     "<instance>": { "plugin": "...", "hash": "sha256:..." }
@@ -150,6 +150,7 @@ The file is JSON with two-space indentation, keys in this order, a final newline
 
 - `plugin` is the plugin directory, relative to the store when inside it, else absolute; `hash` its content hash (§6.7). A built-in plugin (§6.2) has no directory of its own: `plugin` is `builtin` and `hash` is `sha256:<hex>` over the rrecall version and the plugin's manifest, so an upgrade of rrecall shows in the lock.
 - `runner` and `model` only for a collector a runner ran; `settled_at` (UTC) only for a `min_interval` collector, so a forced run of a fingerprinted collector over unchanged sources rewrites nothing.
+- `unsettled` only while the collector's latest attempt has not settled.
 - `plugins` lists the check, judge and view instances. Entries of instances no longer configured are dropped whenever the lock is written.
 
 ### 4.3 Commit message
