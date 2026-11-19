@@ -6,6 +6,7 @@ use crate::history;
 use crate::lock;
 use crate::node::{self, Node};
 use crate::outline;
+use crate::plugin;
 use crate::query;
 use crate::store::{self, Store};
 use anyhow::{Context, Result};
@@ -81,8 +82,15 @@ pub fn init(name_arg: Option<&str>, project_flag: Option<&str>) -> Result<String
     cfg += "[[plugins]]\nid = \"no-op\"\n\n[[plugins]]\nid = \"size-limits\"\n\n[[plugins]]\nid = \"secrets\"\n";
     cfg += "\n# The built-in judges (spec §10). They call the user config's default runner unless an entry sets `runner`.\n";
     cfg += "[[plugins]]\nid = \"support\"\n\n[[plugins]]\nid = \"removal\"\n\n[[plugins]]\nid = \"duplicate\"\n";
-    // The user's default runner, or `claude`, which init makes the default below.
+    // The user's default runner, or `claude`, which init makes the default below. The default
+    // is an instance id (spec §9): init enables it only as the plugin of that id.
     let runner = user.runner.clone().unwrap_or_else(|| "claude".into());
+    if !plugin::finds_runner(&user, top.as_deref().map(Path::new), &path, &runner)? {
+        return Err(error::usage(format!(
+            "the user config's default runner `{runner}` is no runner plugin rrecall can find, so init cannot enable it: set `runner` in {} to a runner plugin id (`claude`, `codex`), or add the instance to the store's config after init",
+            config::user_config_path()?.display()
+        )));
+    }
     cfg += &format!(
         "\n# The runner the judges call (spec §6.8).\n[[plugins]]\nid = {}\n",
         config::toml_str(&runner)

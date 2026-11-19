@@ -1235,3 +1235,31 @@ fn init_keeps_a_bom_prefixed_user_config_valid() {
     assert!(user.contains("runner = \"claude\"\n"), "{user:?}");
     e.ok(&["--project", "kiln", "ls"]);
 }
+
+#[test]
+fn init_refuses_a_default_runner_it_cannot_find_and_enables_one_it_finds() {
+    let e = Env::new();
+    let dir = e.user_config().parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(&dir).unwrap();
+    // `fast` is an instance id another store enabled (spec §9): no plugin of that id exists.
+    std::fs::write(e.user_config(), "runner = \"fast\"\n").unwrap();
+    let o = e.run(&["init", "kiln"]);
+    assert_eq!(o.code, 2, "{}", o.stderr);
+    assert!(o.stderr.contains("`fast`"), "{}", o.stderr);
+    assert!(!e.store("kiln").exists(), "nothing is created");
+    assert_eq!(
+        std::fs::read_to_string(e.user_config()).unwrap(),
+        "runner = \"fast\"\n"
+    );
+    // A runner plugin `fast` in the user plugin directory is enabled by its id.
+    let plugin = dir.join("plugins/fast");
+    std::fs::create_dir_all(&plugin).unwrap();
+    std::fs::write(
+        plugin.join("rrecall-plugin.toml"),
+        "id = \"fast\"\nname = \"Fast\"\nversion = \"0.1.0\"\nmin_rrecall = \"0.1.0\"\nkind = \"runner\"\n\n[runner]\ncommand = [\"/bin/cat\"]\n",
+    )
+    .unwrap();
+    e.ok(&["init", "kiln"]);
+    let cfg = std::fs::read_to_string(e.store("kiln").join("rrecall.toml")).unwrap();
+    assert!(cfg.ends_with("[[plugins]]\nid = \"fast\"\n"), "{cfg}");
+}

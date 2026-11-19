@@ -900,6 +900,29 @@ pub fn owner<'a>(instances: &'a [Instance], kind: &str) -> Option<&'a Instance> 
         .find(|i| i.source_kinds.iter().any(|k| k == kind))
 }
 
+/// Whether `init` finds a runner plugin `id` to enable for a new store (spec §2): among the
+/// built-ins, the user plugin directory and `repo`'s trusted `.rrecall/plugins/`.
+pub fn finds_runner(
+    user: &UserConfig,
+    repo: Option<&Path>,
+    store: &Path,
+    id: &str,
+) -> Result<bool> {
+    let user_plugins = config::user_config_path()?
+        .parent()
+        .map(|d| d.join("plugins"))
+        .context("the user config has no directory")?;
+    let cfg = StoreConfig {
+        repo: repo.map(Path::to_path_buf),
+        ..StoreConfig::default()
+    };
+    let mut plugins = builtin()?;
+    plugins.extend(discover(&places(user, &cfg, store, &user_plugins)?.dirs)?);
+    Ok(plugins
+        .get(id)
+        .is_some_and(|p| p.manifest.kind() == Kind::Runner))
+}
+
 /// Step 1 of a run (spec §4.1): the store's enabled plugin instances. Any error exits 4.
 pub fn load(store: &Path) -> Result<Vec<Instance>> {
     let user = (|| -> Result<(UserConfig, PathBuf)> {
