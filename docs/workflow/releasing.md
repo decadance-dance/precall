@@ -26,9 +26,9 @@ TL;DR: A `release-<ver>` branch comes off `develop`, a `hotfix-<ver>` branch off
   The workflow builds the binaries first (macOS arm64 and x86_64, Linux x86_64 and arm64), then publishes the Release with `rrecall-<ver>-<target>.tar.gz` for each, `SHA256SUMS`, and `rrecall.rb`: the Homebrew formula for this version, written by `bin/formula` from those checksums. Check the published Release (`gh release view 1.2.0`); a failed workflow run (a failed build, a lightweight tag, a tag that differs from `version` in `Cargo.toml`) leaves none.
 - Then the maintainer updates the Homebrew tap, the repository `decadance-dance/homebrew-tap` (`brew install decadance-dance/tap/rrecall`): its `Formula/rrecall.rb` becomes the Release's `rrecall.rb`, which carries the new version, the URLs and the sha256 of each binary.
   ```
-  cd <tap checkout> && git pull
+  cd <tap checkout> && git pull && mkdir -p Formula
   gh release download 1.2.0 -R decadance-dance/rrecall -p rrecall.rb -O Formula/rrecall.rb --clobber
-  git commit -am "rrecall 1.2.0" && git push
+  git add Formula/rrecall.rb && git commit -m "rrecall 1.2.0" && git push
   brew update && brew upgrade rrecall && brew test rrecall   # brew install decadance-dance/tap/rrecall the first time
   ```
 - Then open a PR from the same branch into `develop` (`gh pr create --base develop --head release-1.2.0 --title "Release 1.2.0 into develop" --body "Closes #<release issue>"`). If it conflicts, branch `merge/1.2.0` off `develop`, merge `release-1.2.0` into it, resolve, and PR `merge/1.2.0` into `develop` with the same title.
@@ -71,7 +71,7 @@ git push -u origin release-1.2.0 && gh pr create --draft --base main --title "Re
 # maintainer:
 gh pr merge <pr> -R decadance-dance/rrecall --merge
 git checkout main && git pull && git tag -a 1.2.0 --cleanup=verbatim -F "$NOTES" && git push origin 1.2.0   # the push builds the binaries and publishes the Release
-# in the tap checkout: gh release download 1.2.0 -R decadance-dance/rrecall -p rrecall.rb -O Formula/rrecall.rb --clobber, commit, push
+# in the tap checkout: gh release download 1.2.0 -R decadance-dance/rrecall -p rrecall.rb -O Formula/rrecall.rb --clobber, git add, commit, push
 gh pr create --base develop --head release-1.2.0 --title "Release 1.2.0 into develop" --body "Closes #<r>"
 gh pr merge <develop pr> -R decadance-dance/rrecall --merge
 git push origin --delete release-1.2.0 && git branch -d release-1.2.0
