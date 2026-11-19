@@ -609,6 +609,27 @@ pub fn places(
     Ok(Places { dirs, untrusted })
 }
 
+/// The content hash the lock records for `plugin` (spec §4.2, §6.7): a built-in has no
+/// directory of its own, so its hash covers the rrecall version and its manifest.
+pub fn plugin_hash(plugin: &Plugin) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    if !plugin.builtin {
+        return content_hash(&plugin.dir);
+    }
+    let mut text = None;
+    for t in crate::checks::MANIFESTS {
+        if parse_manifest(t, &plugin.dir, "built in")?.id == plugin.manifest.id {
+            text = Some(t);
+        }
+    }
+    let text = text.with_context(|| format!("no built-in plugin `{}`", plugin.manifest.id))?;
+    let mut h = Sha256::new();
+    h.update(format!("rrecall {}\0", env!("CARGO_PKG_VERSION")));
+    h.update(text);
+    let hex: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    Ok(format!("sha256:{hex}"))
+}
+
 /// `sha256:<hex>` over every entry under `dir`: its relative path, type, exec bit and content
 /// (a symlink by its target, not followed).
 pub fn content_hash(dir: &Path) -> Result<String> {

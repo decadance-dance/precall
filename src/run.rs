@@ -344,7 +344,7 @@ impl Run {
                 inst.plugin.manifest.kind(),
                 Kind::Collector | Kind::Check | Kind::Judge | Kind::View
             ) {
-                let h = plugin::content_hash(&inst.plugin.dir).map_err(ab)?;
+                let h = plugin::plugin_hash(&inst.plugin).map_err(ab)?;
                 self.hashes.insert(inst.id.clone(), h);
             }
         }
@@ -567,7 +567,7 @@ impl Run {
                 inst.id.clone(),
                 CollectorLock {
                     fingerprint: fp.clone(),
-                    plugin: plugin_label(&root, &inst.plugin.dir),
+                    plugin: plugin_label(&root, &inst.plugin),
                     hash: self.hashes.get(&inst.id).cloned().unwrap_or_default(),
                     runner,
                     model,
@@ -594,7 +594,7 @@ impl Run {
                 (
                     i.id.clone(),
                     PluginLock {
-                        plugin: plugin_label(&root, &i.plugin.dir),
+                        plugin: plugin_label(&root, &i.plugin),
                         hash: self.hashes.get(&i.id).cloned().unwrap_or_default(),
                     },
                 )
@@ -1327,10 +1327,16 @@ fn describe(p: &Proposal) -> String {
     s
 }
 
-/// A plugin directory as the lock records it: relative to the store when inside it.
-// limit: built-in plugins (#6) get their own label once they ship inside the binary.
-fn plugin_label(store: &Path, dir: &Path) -> String {
-    let dir: PathBuf = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+/// A plugin's source as the lock records it: `builtin` for one inside the binary, else its
+/// directory, relative to the store when inside it.
+fn plugin_label(store: &Path, plugin: &plugin::Plugin) -> String {
+    if plugin.builtin {
+        return "builtin".into();
+    }
+    let dir: PathBuf = plugin
+        .dir
+        .canonicalize()
+        .unwrap_or_else(|_| plugin.dir.clone());
     match dir.strip_prefix(store) {
         Ok(rel) => rel.to_string_lossy().into_owned(),
         Err(_) => dir.to_string_lossy().into_owned(),

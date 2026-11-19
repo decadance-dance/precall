@@ -408,6 +408,26 @@ fn a_changed_fingerprint_collects_again_and_force_ignores_fingerprints() {
 }
 
 #[test]
+fn the_lock_names_a_builtin_check_builtin_and_hashes_its_manifest() {
+    let w = W::new();
+    w.config(&format!(
+        "{}\n[[plugins]]\nid = \"no-op\"\n\n[[plugins]]\nid = \"secrets\"\n",
+        w.inst(
+            "repo",
+            "col",
+            &format!("out = {}", q(&props(&[add("a", "layout", "Queue")])))
+        ),
+    ));
+    w.run_code(&[], 0);
+    let lock = w.lock();
+    // A built-in has no directory of its own: never the directory the binary lives in.
+    assert_eq!(lock["plugins"]["no-op"]["plugin"], "builtin", "{lock}");
+    let h = lock["plugins"]["no-op"]["hash"].as_str().unwrap();
+    assert!(h.starts_with("sha256:") && h.len() == 7 + 64, "{h}");
+    assert_ne!(h, lock["plugins"]["secrets"]["hash"].as_str().unwrap());
+}
+
+#[test]
 fn only_runs_one_collector_instance() {
     let w = world(&props(&[]));
     w.run_code(&["--only", "github"], 0);

@@ -148,7 +148,7 @@ The file is JSON with two-space indentation, keys in this order, a final newline
 }
 ```
 
-- `plugin` is the plugin directory, relative to the store when inside it, else absolute; `hash` its content hash (§6.7).
+- `plugin` is the plugin directory, relative to the store when inside it, else absolute; `hash` its content hash (§6.7). A built-in plugin (§6.2) has no directory of its own: `plugin` is `builtin` and `hash` is `sha256:<hex>` over the rrecall version and the plugin's manifest, so an upgrade of rrecall shows in the lock.
 - `runner` and `model` only for a collector a runner ran; `settled_at` (UTC) only for a `min_interval` collector, so a forced run of a fingerprinted collector over unchanged sources rewrites nothing.
 - `plugins` lists the check, judge and view instances. Entries of instances no longer configured are dropped whenever the lock is written.
 
