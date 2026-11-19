@@ -1786,6 +1786,30 @@ fn the_builtin_slack_collector_reads_through_a_connector_runner_once_a_day() {
     // Due once a day: a second run calls no agent.
     w.run_code(&[], 0);
     assert_eq!(agent_rec("claude.calls").lines().count(), 2);
+    // A day later the agent reads from the settled run, with the overlap and the cap.
+    assert!(collect.contains("\"since\": null"), "the first run reads its whole window");
+    assert!(
+        collect.contains("one day before `since.at`") && collect.contains("`lookback_days`"),
+        "{collect}"
+    );
+    let at = w.lock()["collectors"]["slack"]["settled_at"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let text = std::fs::read_to_string(w.store().join("rrecall.lock")).unwrap();
+    std::fs::write(
+        w.store().join("rrecall.lock"),
+        text.replace(&at, "2026-11-01T00:00:00Z"),
+    )
+    .unwrap();
+    w.commit("a day later", &["rrecall.lock"]);
+    std::fs::write(w.root.join("home/agent/out.3"), r#"{"proposals": []}"#).unwrap();
+    w.run_code(&[], 0);
+    let again = agent_rec("claude.stdin.3");
+    assert!(
+        again.contains("\"at\": \"2026-11-01T00:00:00Z\""),
+        "{again}"
+    );
     // Slack text may not reach a runner its list leaves out.
     let only_plain = snippet.replace(
         "allowed_runners = [\"claude-slack\", \"claude\"]",
