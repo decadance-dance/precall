@@ -16,13 +16,12 @@ mac_arm=$(sha aarch64-apple-darwin)
 mac_intel=$(sha x86_64-apple-darwin)
 linux_arm=$(sha aarch64-unknown-linux-musl)
 linux_intel=$(sha x86_64-unknown-linux-musl)
-url='https://github.com/decadance-dance/rrecall/releases/download/#{version}/rrecall-#{version}'
+url="https://github.com/decadance-dance/rrecall/releases/download/$ver/rrecall-$ver"
 
 cat <<EOF
 class Rrecall < Formula
   desc "Keeps a versioned map of a software project and answers questions about it"
   homepage "https://github.com/decadance-dance/rrecall"
-  version "$ver"
   license "Apache-2.0"
 
   on_macos do
