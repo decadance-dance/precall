@@ -6,7 +6,7 @@
 # killed, answers a `--resume` turn; torn: prints one message's usage and half of the next
 # record, then hangs, answers a `--resume` turn; perms: records the modes of its working dir
 # and its stdout file to claude.perms, then answers; sleep-always: never answers) and `out`
-# (the structured output to print). Each call N records its argv to claude.argv.N,
+# (the structured output to print; `out.N`, when present, for call N). Each call N records its argv to claude.argv.N,
 # its stdin to claude.stdin.N, its environment to claude.env.N and its cwd to claude.cwd.N.
 d="$HOME/agent"
 echo call >> "$d/claude.calls"
@@ -15,7 +15,7 @@ printf '%s\n' "$@" > "$d/claude.argv.$n"
 cat > "$d/claude.stdin.$n"
 env | sort > "$d/claude.env.$n"
 pwd -P > "$d/claude.cwd.$n"
-out=$(cat "$d/out" 2>/dev/null || echo '{}')
+out=$(cat "$d/out.$n" 2>/dev/null || cat "$d/out" 2>/dev/null || echo '{}')
 resume=no
 for a in "$@"; do [ "$a" = --resume ] && resume=yes; done
 answer() {
