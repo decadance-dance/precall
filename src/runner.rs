@@ -646,10 +646,12 @@ fn estimate(prices: &Prices, model: &str, t: Usage) -> Result<f64> {
              `{model}` (USD per 1M tokens: input, cached_input, output)"
         )
     })?;
-    Ok(((t.input_tokens + t.cache_write_tokens) as f64 * p.input
-        + t.cache_read_tokens as f64 * p.cached_input
-        + t.output_tokens as f64 * p.output)
-        / 1e6)
+    Ok(
+        ((t.input_tokens as f64 + t.cache_write_tokens as f64) * p.input
+            + t.cache_read_tokens as f64 * p.cached_input
+            + t.output_tokens as f64 * p.output)
+            / 1e6,
+    )
 }
 
 /// The model a call ran on, else the requested one when it names one.
@@ -793,7 +795,8 @@ fn codex_thread(events: &str) -> Option<String> {
 }
 
 /// The tokens and the model of a Codex call: from its session log in `home` (the whole
-/// session, a killed turn included), else the `turn.completed` events of the turns' stdout.
+/// session, a killed turn included), else the last `turn.completed` event of the turns' stdout,
+/// which holds the thread's running total (a resumed turn's includes the turns before it).
 fn codex_usage(home: &Path, turns: &[String], requested: &str) -> Result<(Usage, String)> {
     let (mut tokens, mut model) = (None, None);
     for log in session_logs(&home.join("sessions")) {
@@ -824,13 +827,9 @@ fn codex_usage(home: &Path, turns: &[String], requested: &str) -> Result<(Usage,
                         .context("codex reported a turn without its token usage")
                 })
                 .collect::<Result<_>>()?;
-            if done.is_empty() {
-                bail!("codex reported no token counts to estimate its cost from");
-            }
-            done.into_iter().fold(Usage::default(), |mut a, t| {
-                a += t;
-                a
-            })
+            *done
+                .last()
+                .context("codex reported no token counts to estimate its cost from")?
         }
     };
     Ok((tokens, model_or(model, requested)?))
@@ -848,15 +847,19 @@ fn codex_records(text: &str, used: fn(&Value) -> bool) -> Result<Vec<Value>> {
         .collect()
 }
 
-/// Codex counts cached input inside `input_tokens` and reports no cache writes; `None` without
-/// the counts.
+/// Codex counts cache reads and writes inside `input_tokens`; older records have no cache
+/// writes. `None` without the counts.
 fn codex_tokens(u: &Value) -> Option<Usage> {
-    let cached = u["cached_input_tokens"].as_u64().unwrap_or(0);
+    let n = |k: &str| u[k].as_u64().unwrap_or(0);
+    let (read, write) = (n("cached_input_tokens"), n("cache_write_input_tokens"));
     Some(Usage {
-        input_tokens: u["input_tokens"].as_u64()?.saturating_sub(cached),
+        input_tokens: u["input_tokens"]
+            .as_u64()?
+            .saturating_sub(read)
+            .saturating_sub(write),
         output_tokens: u["output_tokens"].as_u64()?,
-        cache_read_tokens: cached,
-        cache_write_tokens: 0,
+        cache_read_tokens: read,
+        cache_write_tokens: write,
     })
 }
 
@@ -931,6 +934,8 @@ mod tests {
         // Cache writes are priced as input.
         let t = u(500_000, 1_000_000, 1_000_000, 500_000);
         assert!((estimate(&prices(), "m1", t).unwrap() - 11.1).abs() < 1e-9);
+        // Counts an agent reports are not trusted to fit a sum.
+        assert!(estimate(&prices(), "m1", u(u64::MAX, 0, 0, u64::MAX)).unwrap() > 0.0);
         let e = estimate(&prices(), "m2", t).unwrap_err().to_string();
         assert!(e.contains("`m2`") && e.contains("`prices`"), "{e}");
     }
@@ -1016,6 +1021,15 @@ mod tests {
     }
 
     #[test]
+    fn codex_input_excludes_its_cache_reads_and_writes() {
+        let v = json!({"input_tokens": 100, "cached_input_tokens": 30, "cache_write_input_tokens": 20, "output_tokens": 5});
+        assert_eq!(codex_tokens(&v), Some(u(50, 5, 30, 20)));
+        // Older records have no cache writes.
+        let v = json!({"input_tokens": 100, "cached_input_tokens": 30, "output_tokens": 5});
+        assert_eq!(codex_tokens(&v), Some(u(70, 5, 30, 0)));
+    }
+
+    #[test]
     fn only_a_generated_scratch_name_yields_a_pid() {
         let id = uuid_v4();
         assert_eq!(scratch_pid(&format!("agent-42-{id}")), Some(42));
@@ -1051,9 +1065,11 @@ mod tests {
         assert_eq!((t, m.as_str()), (u(20, 5, 10, 0), "m1"));
         fs::remove_dir_all(&home).unwrap();
 
+        // Each `turn.completed` holds the thread's running total: the last one counts.
         let ev = "{\"type\":\"thread.started\",\"thread_id\":\"th1\"}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":7,\"cached_input_tokens\":2,\"output_tokens\":1}}\n";
-        let (t, m) = codex_usage(&home, &[ev.into(), ev.into()], "m9").unwrap();
-        assert_eq!((t, m.as_str()), (u(10, 2, 4, 0), "m9"));
+        let later = "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":9,\"cached_input_tokens\":3,\"output_tokens\":2}}\n";
+        let (t, m) = codex_usage(&home, &[ev.into(), later.into()], "m9").unwrap();
+        assert_eq!((t, m.as_str()), (u(6, 2, 3, 0), "m9"));
         assert_eq!(codex_thread(ev).as_deref(), Some("th1"));
         assert!(codex_usage(&home, &[], "m9").is_err());
     }

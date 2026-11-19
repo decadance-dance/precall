@@ -337,13 +337,14 @@ fn codex_runs_read_only_in_a_clean_home_and_prices_its_tokens() {
     let t = T::new("ok", r#"{"texts":{"note:a":null}}"#);
     let prices = r#"{"codex-fake-1":{"input":1,"cached_input":0.1,"output":10}}"#;
     let out = json_of(&t.call("codex", "default", 60, Some(prices)));
-    // From the session log: 0.5M uncached input, 1M cached, 0.1M output.
+    // From the session log: 0.3M uncached input, 1M cache reads, 0.2M cache writes (priced as
+    // input), 0.1M output.
     assert_eq!(out["model"], "codex-fake-1");
     assert!(
         (out["cost_usd"].as_f64().unwrap() - 1.6).abs() < 1e-9,
         "{out}"
     );
-    assert_eq!(out["usage"], usage(500_000, 100_000, 1_000_000, 0));
+    assert_eq!(out["usage"], usage(300_000, 100_000, 1_000_000, 200_000));
     assert_eq!(out["output"], json!({"texts": {"note:a": null}}));
     let argv = t.argv("codex.argv.1");
     assert_eq!(
@@ -384,6 +385,19 @@ fn codex_without_a_session_log_counts_its_turn_events_and_the_requested_model() 
     assert_eq!(after(&t.argv("codex.argv.1"), "-m"), "m7");
     let o = t.call("codex", "m7", 60, None);
     assert!(!o.ok && o.stderr.contains("`m7`"), "{}", o.stderr);
+}
+
+#[test]
+fn codex_without_a_session_log_counts_a_resumed_threads_last_running_total_once() {
+    let t = T::new("nolog-sleep", r#"{"texts":{}}"#);
+    let prices = r#"{"m":{"input":1,"cached_input":1,"output":1}}"#;
+    let out = json_of(&t.call("codex", "m", WRAP_TIMEOUT, Some(prices)));
+    // The resumed turn's total already holds the first turn's 100 input and 20 output.
+    assert_eq!(out["usage"], usage(21, 21, 84, 0));
+    assert!(
+        (out["cost_usd"].as_f64().unwrap() - 0.000126).abs() < 1e-12,
+        "{out}"
+    );
 }
 
 #[test]

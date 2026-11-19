@@ -1167,14 +1167,27 @@ fn a_runner_reports_the_model_that_goes_into_the_lock() {
 fn the_report_sums_each_plugins_tokens_over_its_rounds_and_calls() {
     let w = W::new();
     w.seed("layout", &[API]);
+    let fake = q(&fake());
+    w.plugin(
+        "rcol",
+        "collector",
+        &format!(
+            "[collector]\nscope = {SCOPE}\nsource_kinds = [\"{{kind}}\"]\nfingerprint = [\"/bin/cat\", \"{{fp}}\"]\ncommand = [{fake}]\nresolve_prompt = \"p.md\"\nrunner = \"runner\"\n"
+        ),
+        &format!("fp = {}\nkind = \"note\"\n", q(&w.fp().to_string_lossy())),
+    );
     let update = json!({"key": "u", "op": "update", "id": "api", "title": "API", "body": "HTTP API, v2.", "sources": ["file:api.md"], "reason": "v2"});
     let cite = json!({"key": "s", "op": "add_source", "id": "api", "sources": ["note:api.md"], "reason": "cited"});
     let usage = |i: u64, o: u64, r: u64, c: u64| json!({"input_tokens": i, "output_tokens": o, "cache_read_tokens": r, "cache_write_tokens": c});
-    // Both change `api`, so both go back and `writer` runs a second round.
+    // `repo` and `writer` both change `api`, so both go back and `writer` runs a second round.
     let r1 = json!({"output": {"proposals": [cite]}, "cost_usd": 0.0, "model": "fake-1", "usage": usage(100, 20, 1000, 5)});
     let r2 = json!({"output": {"proposals": []}, "cost_usd": 0.0, "model": "fake-1", "usage": usage(10, 2, 300, 0)});
+    // `notes` makes no collect call through a runner: its only runner call is its resolve, which
+    // feeds the judge.
+    let memo = json!({"key": "a", "op": "add", "parent": "layout", "title": "Queue", "body": "", "sources": ["memo:queue.md"], "reason": "noted"});
+    let texts = json!({"output": {"texts": {"memo:queue.md": "The queue."}}, "cost_usd": 0.0, "model": "fake-1", "usage": usage(7, 3, 0, 1)});
     w.config(&format!(
-        "{}{}{}",
+        "{}{}{}{}runner = \"runner2\"\n{}{}",
         w.inst("repo", "col", &format!("out = {}", q(&props(&[update])))),
         w.inst("writer", "prompted", ""),
         w.inst(
@@ -1182,14 +1195,54 @@ fn the_report_sums_each_plugins_tokens_over_its_rounds_and_calls() {
             "runner",
             &format!("scenario = \"seq\", out = {}", q(&format!("{r1}\n{r2}")))
         ),
+        w.inst(
+            "notes",
+            "rcol",
+            &format!("out = {}, kind = \"memo\"", q(&props(&[memo])))
+        ),
+        w.inst(
+            "runner2",
+            "runner",
+            &format!("out = {}", q(&texts.to_string()))
+        ),
+        w.inst("judge", "judge", "scenario = \"all\", out = \"accept\""),
     ));
     w.run(&[]);
     assert_eq!(w.input("runner", 2)["input"]["round"], 2);
+    assert_eq!(
+        w.input("runner2", 1)["input"],
+        json!({"refs": ["memo:queue.md"]})
+    );
     // Input is every input token: uncached, read from and written to a cache.
     let report = w.report();
     assert!(
-        report.contains("\n- tokens: input 1415 (cached 1300), output 22; writer: input 1415 (cached 1300), output 22\n"),
+        report.contains("\n- tokens: input 1423 (cached 1300), output 25; notes: input 8 (cached 0), output 3; writer: input 1415 (cached 1300), output 22\n"),
         "{report}"
+    );
+}
+
+#[test]
+fn token_counts_too_large_to_add_do_not_break_the_report() {
+    let w = W::new();
+    let reply = json!({
+        "output": {"proposals": []}, "cost_usd": 0.0, "model": "m",
+        "usage": {"input_tokens": u64::MAX, "cache_read_tokens": 1, "cache_write_tokens": 0, "output_tokens": 0},
+    });
+    w.config(&format!(
+        "{}{}",
+        w.inst("writer", "prompted", ""),
+        w.inst(
+            "runner",
+            "runner",
+            &format!("out = {}", q(&reply.to_string()))
+        ),
+    ));
+    w.run_code(&[], 0);
+    assert!(
+        w.report()
+            .contains("- tokens: input 18446744073709551616 (cached 1), output 0;"),
+        "{}",
+        w.report()
     );
 }
 

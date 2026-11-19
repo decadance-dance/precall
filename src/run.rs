@@ -207,7 +207,7 @@ impl Budget {
 fn tokens_line(u: &Usage) -> String {
     format!(
         "input {} (cached {}), output {}",
-        u.input_tokens + u.cache_read_tokens + u.cache_write_tokens,
+        u.input_tokens as u128 + u.cache_read_tokens as u128 + u.cache_write_tokens as u128,
         u.cache_read_tokens,
         u.output_tokens
     )

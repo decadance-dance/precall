@@ -336,12 +336,13 @@ pub struct Usage {
     pub cache_write_tokens: u64,
 }
 
+/// Saturating: the counts come from runners and agents, untrusted.
 impl std::ops::AddAssign for Usage {
     fn add_assign(&mut self, o: Usage) {
-        self.input_tokens += o.input_tokens;
-        self.output_tokens += o.output_tokens;
-        self.cache_read_tokens += o.cache_read_tokens;
-        self.cache_write_tokens += o.cache_write_tokens;
+        self.input_tokens = self.input_tokens.saturating_add(o.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(o.output_tokens);
+        self.cache_read_tokens = self.cache_read_tokens.saturating_add(o.cache_read_tokens);
+        self.cache_write_tokens = self.cache_write_tokens.saturating_add(o.cache_write_tokens);
     }
 }
 
@@ -1009,6 +1010,10 @@ mod tests {
         let mut twice = u;
         twice += u;
         assert_eq!((twice.input_tokens, twice.cache_write_tokens), (2, 8));
+        // A runner's counts are untrusted: a sum saturates instead of overflowing.
+        twice.output_tokens = u64::MAX;
+        twice += u;
+        assert_eq!(twice.output_tokens, u64::MAX);
         for bad in [
             r#"{"input_tokens":1,"output_tokens":2,"cache_read_tokens":3}"#,
             r#"{"input_tokens":-1,"output_tokens":2,"cache_read_tokens":3,"cache_write_tokens":4}"#,
