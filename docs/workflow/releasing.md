@@ -20,10 +20,11 @@ TL;DR: A `release-<ver>` branch comes off `develop`, a `hotfix-<ver>` branch off
 - After that PR merges, the maintainer tags `main` and pushes the tag; the push publishes the GitHub Release (`.github/workflows/release.yml`: title = the version, body = the tag message body as written; `--cleanup=verbatim` keeps its `##` headings):
   ```
   NOTES=/path/to/RELEASE-1.2.0.md   # the edited draft, outside the repo
-  git checkout main && git pull --ff-only &&
-    git tag -a 1.2.0 --cleanup=verbatim -F "$NOTES" && git push origin 1.2.0
+  git fetch origin &&
+    git merge-base --is-ancestor origin/release-1.2.0 origin/main &&
+    git tag -a --cleanup=verbatim -F "$NOTES" 1.2.0 origin/main && git push origin 1.2.0
   ```
-  The `&&` chain tags nothing when the checkout or the pull fails, so a stale `main` or the release branch never gets the tag.
+  It tags the fetched `origin/main`, not the local `main`, and only once that contains the release branch (the merge-base check exits 1 otherwise), so a stale or diverged local `main` never gets the tag; the `&&` chain stops at the first failure.
   The workflow builds the binaries first (macOS arm64 and x86_64, Linux x86_64 and arm64), then publishes the Release with `rrecall-<ver>-<target>.tar.gz` for each, `SHA256SUMS`, and `rrecall.rb`: the Homebrew formula for this version, written by `bin/formula` from those checksums. Check the published Release (`gh release view 1.2.0`); a failed workflow run (a failed build, a lightweight tag, a tag that differs from `version` in `Cargo.toml`) leaves none.
 - Then the maintainer updates the Homebrew tap, the repository `decadance-dance/homebrew-tap` (`brew install decadance-dance/tap/rrecall`): its `Formula/rrecall.rb` becomes the Release's `rrecall.rb`, which carries the new version, the URLs and the sha256 of each binary.
   ```
@@ -74,7 +75,8 @@ git push -u origin release-1.2.0 && gh pr create --draft --base main --title "Re
 # ci-ok green, cross-model review done: tick the checklist, then gh pr ready
 # maintainer:
 gh pr merge <pr> -R decadance-dance/rrecall --merge
-git checkout main && git pull --ff-only && git tag -a 1.2.0 --cleanup=verbatim -F "$NOTES" && git push origin 1.2.0   # the push builds the binaries and publishes the Release
+git fetch origin && git merge-base --is-ancestor origin/release-1.2.0 origin/main &&
+  git tag -a --cleanup=verbatim -F "$NOTES" 1.2.0 origin/main && git push origin 1.2.0   # the push builds the binaries and publishes the Release
 # in a subshell in the tap checkout ("$TAP"): gh release download 1.2.0 -R decadance-dance/rrecall -p rrecall.rb -O Formula/rrecall.rb --clobber, git add, commit, push
 gh pr create --base develop --head release-1.2.0 --title "Release 1.2.0 into develop" --body "Closes #<r>"
 gh pr merge <develop pr> -R decadance-dance/rrecall --merge
