@@ -126,7 +126,7 @@ fn live_builtin_judges_agree_with_their_labeled_sets() {
             "claude",
             None,
             &json!({
-                "prompt": rrecall::wire::render_prompt(prompt, &input, &schema),
+                "prompt": rrecall::wire::render_prompt(&prompt, &input, &schema),
                 "input": input,
                 "output_schema": schema,
                 "model": model,

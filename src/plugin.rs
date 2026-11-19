@@ -258,11 +258,16 @@ fn builtin_prompts() -> impl Iterator<Item = (&'static str, &'static str, &'stat
     crate::judges::PROMPTS.into_iter()
 }
 
-/// The text of built-in plugin `id`'s prompt file `file`.
-pub fn builtin_prompt(id: &str, file: &str) -> Option<&'static str> {
+/// The text of built-in plugin `id`'s prompt file `file`, with LF line ends whatever the
+/// checkout it was built from used.
+pub fn builtin_prompt(id: &str, file: &str) -> Option<String> {
     builtin_prompts()
         .find(|(i, f, _)| *i == id && *f == file)
-        .map(|(_, _, text)| text)
+        .map(|(_, _, text)| lf(text))
+}
+
+fn lf(text: &str) -> String {
+    text.replace("\r\n", "\n")
 }
 
 fn check_manifest(raw: RawManifest, dir: Option<&Path>) -> Result<Manifest, String> {
@@ -641,7 +646,6 @@ pub fn places(
 /// The content hash the lock records for `plugin` (spec §4.2, §6.7): a built-in has no
 /// directory of its own, so its hash covers the rrecall version, its manifest and its prompts.
 pub fn plugin_hash(plugin: &Plugin) -> Result<String> {
-    use sha2::{Digest, Sha256};
     if !plugin.builtin {
         return content_hash(&plugin.dir);
     }
@@ -653,16 +657,27 @@ pub fn plugin_hash(plugin: &Plugin) -> Result<String> {
         }
     }
     let text = text.with_context(|| format!("no built-in plugin `{id}`"))?;
+    let prompts: Vec<(&str, &str)> = builtin_prompts()
+        .filter(|(i, _, _)| i == id)
+        .map(|(_, file, prompt)| (file, prompt))
+        .collect();
+    Ok(builtin_hash(text, &prompts))
+}
+
+/// `sha256:<hex>` over the rrecall version, a built-in `manifest` and its `prompts` as (file
+/// name, text), by name. Line ends are LF first, so a CRLF checkout builds the same lock.
+fn builtin_hash(manifest: &str, prompts: &[(&str, &str)]) -> String {
+    use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(format!("rrecall {}\0", env!("CARGO_PKG_VERSION")));
-    h.update(text);
-    let mut prompts: Vec<_> = builtin_prompts().filter(|(i, _, _)| i == id).collect();
+    h.update(lf(manifest));
+    let mut prompts = prompts.to_vec();
     prompts.sort();
-    for (_, file, prompt) in prompts {
-        h.update(format!("\0{file}\0{prompt}"));
+    for (file, prompt) in prompts {
+        h.update(format!("\0{file}\0{}", lf(prompt)));
     }
     let hex: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
-    Ok(format!("sha256:{hex}"))
+    format!("sha256:{hex}")
 }
 
 /// `sha256:<hex>` over every entry under `dir`: its relative path, type, exec bit and content
@@ -1547,6 +1562,28 @@ repo = ""
     }
 
     #[test]
+    fn a_builtin_hash_and_prompt_do_not_depend_on_the_checkouts_line_endings() {
+        let manifest = builtin_manifests()
+            .find(|t| t.starts_with("id = \"support\""))
+            .unwrap();
+        let prompt = include_str!("judges/support.md");
+        let crlf = |t: &str| t.replace("\r\n", "\n").replace('\n', "\r\n");
+        assert_eq!(
+            builtin_hash(manifest, &[("support.md", prompt)]),
+            builtin_hash(&crlf(manifest), &[("support.md", &crlf(prompt))])
+        );
+        assert_ne!(
+            builtin_hash(manifest, &[("support.md", prompt)]),
+            builtin_hash(manifest, &[("support.md", "another prompt")])
+        );
+        assert!(
+            !builtin_prompt("support", "support.md")
+                .unwrap()
+                .contains('\r')
+        );
+    }
+
+    #[test]
     fn builtin_judges_are_declarative_with_embedded_prompts_their_hash_covers() {
         let plugins = builtin().unwrap();
         for id in ["support", "removal", "duplicate"] {
@@ -1565,28 +1602,18 @@ repo = ""
             assert!(!p.dir.join(file).exists(), "{id}: the prompt is not a file");
         }
         assert_eq!(builtin_prompt("support", "removal.md"), None);
-        // The hash covers the embedded prompt, not only the version and the manifest.
-        use sha2::{Digest, Sha256};
-        let manifest = builtin_manifests()
-            .find(|t| t.starts_with("id = \"support\""))
-            .unwrap();
-        let mut h = Sha256::new();
-        h.update(format!("rrecall {}\0", env!("CARGO_PKG_VERSION")));
-        h.update(manifest);
-        let without: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        // The hash covers the embedded prompt, not only the version and the manifest; a check
+        // has no prompt.
+        let manifest = |id: &str| {
+            builtin_manifests()
+                .find(|t| t.starts_with(&format!("id = \"{id}\"")))
+                .unwrap()
+        };
         let hash = plugin_hash(&plugins["support"]).unwrap();
-        assert!(hash.starts_with("sha256:") && hash != format!("sha256:{without}"));
-        // A check has no prompt, so its hash stays version and manifest.
-        let manifest = builtin_manifests()
-            .find(|t| t.starts_with("id = \"secrets\""))
-            .unwrap();
-        let mut h = Sha256::new();
-        h.update(format!("rrecall {}\0", env!("CARGO_PKG_VERSION")));
-        h.update(manifest);
-        let hex: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        assert_ne!(hash, builtin_hash(manifest("support"), &[]));
         assert_eq!(
             plugin_hash(&plugins["secrets"]).unwrap(),
-            format!("sha256:{hex}")
+            builtin_hash(manifest("secrets"), &[])
         );
     }
 
