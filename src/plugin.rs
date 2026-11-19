@@ -1558,10 +1558,17 @@ repo = ""
         ] {
             let e = load(empty).unwrap_err();
             assert!(
-                e.contains("`slack`") && (e.contains("`channels`") || e.contains("`dms`")),
+                e.contains("`slack`") && (e.contains("`channels") || e.contains("`dms")),
                 "{empty}: {e}"
             );
         }
+        // The entry may hold private text: the error names the field and index, not the value.
+        let e = load("channels = [\"eng\"], dms = [\"U1\", { note = \"fixture-private-value\" }]")
+            .unwrap_err();
+        assert!(
+            e.contains("`dms[1]`") && !e.contains("fixture-private-value"),
+            "{e}"
+        );
         load("channels = [\"eng-platform\"]").unwrap();
         load("dms = [\"U0123ABCDEF\"]").unwrap();
     }

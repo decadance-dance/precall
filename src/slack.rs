@@ -35,15 +35,17 @@ pub const PROMPTS: [(&str, &str, &str); 2] = [
 pub fn check_params(params: &toml::Table) -> Result<(), String> {
     let mut named = 0;
     for k in ["channels", "dms"] {
-        for v in params
+        for (i, v) in params
             .get(k)
             .and_then(|v| v.as_array())
             .into_iter()
             .flatten()
+            .enumerate()
         {
             match v.as_str() {
                 Some(t) if !t.trim().is_empty() => named += 1,
-                _ => return Err(format!("`{k}` entries must be names or ids, not {v}")),
+                // Never the value: a wrong entry may hold private text.
+                _ => return Err(format!("`{k}[{i}]` must be a nonblank name or id")),
             }
         }
     }
