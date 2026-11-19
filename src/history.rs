@@ -27,8 +27,25 @@ impl Commit {
 
 const FORMAT: &str = "--format=%H%x1f%ad%x1f%s%x1f%b%x1e";
 
+/// How `why` and the html view diff the map, whatever the user's git config says, so both see
+/// the same raw JSONL lines: no color, no external diff or text converter, and a node whose
+/// line moves to another branch file counts as touched (no rename detection).
+const RAW_DIFF: [&str; 4] = [
+    "--no-color",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--no-renames",
+];
+
 fn log(store: &Store, args: &[&str]) -> Result<Vec<Commit>> {
-    let mut all = vec!["log", "--no-color", FORMAT, "--date=short"];
+    // Messages come back as UTF-8 whatever `i18n.logOutputEncoding` says.
+    let mut all = vec![
+        "log",
+        "--no-color",
+        "--encoding=UTF-8",
+        FORMAT,
+        "--date=short",
+    ];
     all.extend_from_slice(args);
     let out = git(&store.root, &all)?;
     Ok(out
@@ -71,12 +88,16 @@ pub fn why(store: &Store, id: &str, as_json: bool) -> Result<String> {
         log(
             store,
             &[
-                "--reverse",
-                "-G",
-                &format!("^[{{]\"id\":\"{id}\","),
-                "--",
-                "map",
-            ],
+                &RAW_DIFF[..],
+                &[
+                    "--reverse",
+                    "-G",
+                    &format!("^[{{]\"id\":\"{id}\","),
+                    "--",
+                    "map",
+                ],
+            ]
+            .concat(),
         )?
     };
     let commits: Vec<Commit> = commits.into_iter().map(|c| mentioning(c, id)).collect();
@@ -164,18 +185,11 @@ pub fn map_history(store: &Store) -> Result<MapHistory> {
     let patches = git(
         &store.root,
         &[
-            "log",
-            "--reverse",
-            "-p",
-            // The parser below reads the patch as git prints it plainly, whatever the config says.
-            "--no-color",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--unified=0",
-            "--format=%x1e%H",
-            "--",
-            "map",
-        ],
+            &["log", "--reverse", "-p"][..],
+            &RAW_DIFF,
+            &["--unified=0", "--format=%x1e%H", "--", "map"],
+        ]
+        .concat(),
     )?;
     for rec in patches.split('\x1e').skip(1) {
         let mut lines = rec.lines();

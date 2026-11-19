@@ -1328,7 +1328,8 @@ fn init_that_cannot_write_the_user_config_leaves_nothing_and_can_be_retried() {
 const NOTE: &str =
     "Ask the fetcher's owner about <b>polls</b> & </script> https://example.invalid/polls";
 
-/// What in a page's own code would load something or turn data into markup.
+/// What in a page's own code would load something or turn data into markup, lowercase: HTML
+/// and CSS take these tokens in any case (`URL(`, `<IMG`).
 const LOADS: [&str; 29] = [
     "http://",
     "https://",
@@ -1350,14 +1351,14 @@ const LOADS: [&str; 29] = [
     "url(",
     "@font-face",
     "fetch(",
-    "XMLHttpRequest",
-    "WebSocket",
-    "EventSource",
-    "sendBeacon",
+    "xmlhttprequest",
+    "websocket",
+    "eventsource",
+    "sendbeacon",
     "import(",
-    "Worker(",
-    "innerHTML",
-    "outerHTML",
+    "worker(",
+    "innerhtml",
+    "outerhtml",
     "document.write",
 ];
 
@@ -1415,7 +1416,7 @@ fn open_renders_one_self_contained_page_and_opens_it() {
     let page = std::fs::read_to_string(&page_path).unwrap();
     // Nothing loads from the network: the page's own markup, style and script hold no URL and
     // nothing that fetches a resource or turns text into markup.
-    let code = page_code(&page);
+    let code = page_code(&page).to_lowercase();
     for bad in LOADS {
         assert!(!code.contains(bad), "the page's code holds `{bad}`");
     }
@@ -1518,10 +1519,25 @@ fn open_reports_a_browser_that_fails_and_keeps_the_page() {
 }
 
 #[test]
-fn the_page_does_not_depend_on_the_users_git_color_or_abbrev_settings() {
+fn the_page_and_why_do_not_depend_on_the_users_git_settings() {
     let e = fixture_env();
     let store = e.store("lanternfish");
     q(&e, &["note", "fetcher", "A note."]);
+    // A non-ASCII subject, read back as UTF-8 whatever the log encoding is.
+    git(
+        &store,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.invalid",
+            "commit",
+            "-q",
+            "--amend",
+            "-m",
+            "note café",
+        ],
+    );
     q(&e, &["open"]);
     let page_path = store.join("views/index.html");
     let before = std::fs::read_to_string(&page_path).unwrap();
@@ -1530,9 +1546,15 @@ fn the_page_does_not_depend_on_the_users_git_color_or_abbrev_settings() {
         ("color.ui", "always"),
         ("color.diff", "always"),
         ("core.abbrev", "20"),
+        ("i18n.logOutputEncoding", "ISO-8859-1"),
+        ("diff.maptext.textconv", "wc -l"),
     ] {
         git(&store, &["config", key, value]);
     }
+    // A text converter on the map files: `why` and the page still read the raw lines.
+    let attrs = store.join(".gitattributes");
+    let text = std::fs::read_to_string(&attrs).unwrap();
+    std::fs::write(&attrs, format!("{text}map/*.jsonl diff=maptext\n")).unwrap();
     q(&e, &["open"]);
     let after = std::fs::read_to_string(&page_path).unwrap();
     assert!(before == after, "the settings changed the page");
@@ -1540,6 +1562,7 @@ fn the_page_does_not_depend_on_the_users_git_color_or_abbrev_settings() {
     let fetcher = page_node(&page_data(&after), "fetcher").clone();
     let history = fetcher["history"].as_array().unwrap();
     assert_eq!(history.len(), 2, "{fetcher}");
+    assert_eq!(history[1]["subject"], "note café");
     assert!(
         history
             .iter()
@@ -1573,4 +1596,51 @@ fn a_render_reads_the_config_history_once_for_all_branches() {
     // Two revisions of the config (init and import), whatever the number of branches.
     assert_eq!(count("show"), 2, "{text}");
     assert!(count("log") <= 4, "{} git log calls", count("log"));
+}
+
+#[test]
+fn a_node_whose_line_moves_to_another_branch_file_is_touched_whatever_diff_renames_says() {
+    let e = Env::new();
+    e.ok(&["init", "kiln"]);
+    let outline: String = std::iter::once("Layout\n  Queue | The job queue.\n".to_string())
+        .chain((1..=20).map(|i| format!("    Entry {i} | Entry number {i}.\n")))
+        .collect();
+    let file = e.write("outline.txt", &outline);
+    e.ok(&["--project", "kiln", "import", file.to_str().unwrap()]);
+    // A run moves the whole subtree: map/layout.jsonl becomes map/how-it-works.jsonl, which
+    // git can take for a rename.
+    let store = e.store("kiln");
+    let text = std::fs::read_to_string(store.join("map/layout.jsonl")).unwrap();
+    let moved = text.replace(r#""parent":"layout""#, r#""parent":"how-it-works""#);
+    assert_ne!(moved, text);
+    std::fs::remove_file(store.join("map/layout.jsonl")).unwrap();
+    std::fs::write(store.join("map/how-it-works.jsonl"), moved).unwrap();
+    git(&store, &["add", "-A", "map"]);
+    git(
+        &store,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "run move queue",
+        ],
+    );
+    let mut seen = Vec::new();
+    for setting in ["true", "false"] {
+        git(&store, &["config", "diff.renames", setting]);
+        e.ok(&["--project", "kiln", "open"]);
+        let page = std::fs::read_to_string(store.join("views/index.html")).unwrap();
+        let why = e.ok(&["--project", "kiln", "why", "entry-1"]);
+        seen.push((page, why));
+    }
+    assert!(seen[0] == seen[1], "diff.renames changed the page or why");
+    let data = page_data(&seen[0].0);
+    let entry = page_node(&data, "entry-1");
+    assert_eq!(entry["changed"], true, "{entry}");
+    assert_eq!(entry["history"][1]["subject"], "run move queue", "{entry}");
+    assert!(seen[0].1.contains(" run move queue\n"), "{}", seen[0].1);
 }
