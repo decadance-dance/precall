@@ -87,6 +87,9 @@ enum Cmd {
     },
     /// Print a paragraph for an agent's instruction file.
     AgentInstructions,
+    /// Run a built-in check plugin: check input on stdin, verdicts on stdout (spec §6.2, §6.5).
+    #[command(hide = true)]
+    Builtin { id: String },
 }
 
 fn main() -> ExitCode {
@@ -125,6 +128,7 @@ fn main() -> ExitCode {
             recursive,
         } => commands::rm(p, id, reason.as_deref(), *recursive),
         Cmd::AgentInstructions => Ok(commands::AGENT_INSTRUCTIONS.to_string()),
+        Cmd::Builtin { id } => commands::builtin(id),
     };
     match out {
         Ok(text) => {

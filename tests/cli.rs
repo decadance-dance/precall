@@ -141,6 +141,9 @@ fn init_creates_store_with_default_skeleton_and_found_sources() {
         cfg.contains("repo = \"lanternfish-dev/lanternfish\""),
         "{cfg}"
     );
+    // The built-in checks run after the sources, in this order.
+    let checks = "[[plugins]]\nid = \"no-op\"\n\n[[plugins]]\nid = \"size-limits\"\n\n[[plugins]]\nid = \"secrets\"\n";
+    assert!(cfg.ends_with(checks), "{cfg}");
     assert_eq!(
         std::fs::read_to_string(store.join(".gitignore")).unwrap(),
         "cache/\nruns/\nviews/\nstate/\n"
@@ -198,8 +201,12 @@ fn init_names_and_store_overrides() {
     assert!(!e.store("kiln").exists());
     let cfg = std::fs::read_to_string(custom.join("rrecall.toml")).unwrap();
     assert!(
-        !cfg.contains("[[plugins]]") && !cfg.contains("repo ="),
+        !cfg.contains("use = ") && !cfg.contains("repo ="),
         "no sources found outside a repo: {cfg}"
+    );
+    assert!(
+        cfg.contains("id = \"no-op\"") && cfg.contains("id = \"secrets\""),
+        "the checks are enabled anyway: {cfg}"
     );
     // A branch added in the config appears as a branch.
     let extra = "\n[[skeleton.branch]]\nid = \"services\"\ntitle = \"Services\"\nquestion = \"Which services run?\"\n";

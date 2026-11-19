@@ -1,3 +1,4 @@
+pub mod checks;
 pub mod commands;
 pub mod config;
 pub mod error;
@@ -10,6 +11,7 @@ pub mod plugin;
 pub mod process;
 pub mod query;
 pub mod run;
+pub mod secrets;
 pub mod store;
 pub mod wire;
 #[cfg(test)]
