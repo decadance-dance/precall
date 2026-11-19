@@ -312,7 +312,10 @@ For the live status of a task, ask the tracker the map points to.
 pub fn builtin(id: &str) -> Result<String> {
     let mut input = String::new();
     std::io::Read::read_to_string(&mut std::io::stdin(), &mut input).context("reading stdin")?;
-    crate::checks::run(id, &input).map(|out| out + "\n")
+    match id {
+        "claude" | "codex" => crate::runner::run(id, &input),
+        _ => crate::checks::run(id, &input).map(|out| out + "\n"),
+    }
 }
 
 pub fn import(project: Option<&str>, file: &Path) -> Result<String> {

@@ -120,9 +120,21 @@ fn command(
     Ok(cmd)
 }
 
+/// A child killed at its timeout: callers tell it from other failures (a runner's wrap-up).
+#[derive(Debug)]
+pub struct TimedOut(pub String);
+
+impl std::fmt::Display for TimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for TimedOut {}
+
 /// Starts `cmd`, writes `stdin` to it and waits until `timeout`, when it kills the child's
-/// process group.
-fn wait(
+/// process group (`cmd` must lead its own group) and fails with [`TimedOut`].
+pub fn wait(
     cmd: &mut Command,
     program: &str,
     stdin: Vec<u8>,
@@ -144,7 +156,7 @@ fn wait(
             let killed = kill_group(&mut child)
                 .map(|()| String::new())
                 .unwrap_or_else(|e| format!("; killing its process group failed: {e}"));
-            bail!("timed out after {timeout:?}{killed}");
+            return Err(TimedOut(format!("timed out after {timeout:?}{killed}")).into());
         }
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -228,7 +240,7 @@ fn last_line(f: &mut File) -> Result<String> {
 /// The file must be a native executable or a `#!` script whose interpreter is one: given
 /// anything else, the C library's exec falls back to `/bin/sh`, and §6.3 promises that a plugin
 /// never runs through a shell.
-fn resolve_program(
+pub fn resolve_program(
     program: &str,
     plugin_dir: &Path,
     path_var: &std::ffi::OsStr,

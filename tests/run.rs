@@ -2,6 +2,7 @@
 //! the lock, back pressure, the cost cap, hooks, the commit message, the report and exit codes.
 
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -10,6 +11,15 @@ fn fake() -> String {
     format!(
         "{}/tests/fixtures/bin/fake-plugin",
         env!("CARGO_MANIFEST_DIR")
+    )
+}
+
+/// `PATH` with the fake `claude` and `codex` first.
+fn agents_path() -> String {
+    format!(
+        "{}/tests/fixtures/bin:{}",
+        env!("CARGO_MANIFEST_DIR"),
+        std::env::var("PATH").unwrap_or_default()
     )
 }
 
@@ -55,7 +65,6 @@ impl W {
         std::fs::write(w.fp(), "v1").unwrap();
         let fake = q(&fake());
         let fp = q(&w.fp().to_string_lossy());
-        let common = "scenario = \"ok\"\nout = \"\"\nrecord = \"\"\n";
         for (id, kind, table, extra) in [
             (
                 "col",
@@ -132,18 +141,24 @@ impl W {
                 String::new(),
             ),
         ] {
-            let d = w.store().join("plugins").join(id);
-            std::fs::create_dir_all(&d).unwrap();
-            std::fs::write(d.join("p.md"), "Propose changes.\n").unwrap();
-            std::fs::write(
-                d.join("rrecall-plugin.toml"),
-                format!(
-                    "id = \"{id}\"\nname = \"Fake {id}\"\nversion = \"0.1.0\"\nmin_rrecall = \"0.1.0\"\nkind = \"{kind}\"\n\n{table}\n[params]\n{common}{extra}"
-                ),
-            )
-            .unwrap();
+            w.plugin(id, kind, &table, &extra);
         }
         w
+    }
+
+    /// Writes the store plugin `id` with a `p.md` prompt and the fake's common params.
+    fn plugin(&self, id: &str, kind: &str, table: &str, extra: &str) {
+        let common = "scenario = \"ok\"\nout = \"\"\nrecord = \"\"\n";
+        let d = self.store().join("plugins").join(id);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("p.md"), "Propose changes.\n").unwrap();
+        std::fs::write(
+            d.join("rrecall-plugin.toml"),
+            format!(
+                "id = \"{id}\"\nname = \"Fake {id}\"\nversion = \"0.1.0\"\nmin_rrecall = \"0.1.0\"\nkind = \"{kind}\"\n\n{table}\n[params]\n{common}{extra}"
+            ),
+        )
+        .unwrap();
     }
 
     fn store(&self) -> PathBuf {
@@ -165,6 +180,8 @@ impl W {
             .env("HOME", self.root.join("home"))
             .env("XDG_DATA_HOME", self.root.join("data"))
             .env("XDG_CONFIG_HOME", self.root.join("config"))
+            .env("PATH", agents_path())
+            .env_remove("CODEX_HOME")
             .env_remove("RRECALL_PROJECT")
             .env_remove("GIT_DIR")
             .output()
@@ -886,7 +903,13 @@ fn the_budget_stops_runner_calls_and_leaves_the_collector_unsettled() {
     .unwrap();
     assert!(lock["collectors"].get("writer").is_none());
     let input = w.input("runner", 1);
-    assert_eq!(input["prompt"], "Propose changes.\n");
+    let prompt = input["prompt"].as_str().unwrap();
+    assert!(prompt.starts_with(rrecall::wire::PREAMBLE), "{prompt}");
+    assert!(
+        prompt.contains("Propose changes.\n\n## Input\n"),
+        "{prompt}"
+    );
+    assert_eq!(input["output_schema"], rrecall::wire::collect_schema());
     assert_eq!(input["model"], "fake-model");
     assert_eq!(input["read_only"], true);
     assert_eq!(input["input"]["round"], 1);
@@ -917,6 +940,279 @@ fn a_runner_reports_the_model_that_goes_into_the_lock() {
         lock["collectors"]["writer"]["model"],
         "fake-1 api_key=[redacted:high-entropy-assignment]"
     );
+}
+
+#[test]
+fn a_resolve_prompt_runs_through_its_collectors_runner_and_feeds_the_judges() {
+    let w = W::new();
+    let fake = q(&fake());
+    w.plugin(
+        "rcol",
+        "collector",
+        &format!(
+            "[collector]\nscope = {SCOPE}\nsource_kinds = [\"{{kind}}\"]\nfingerprint = [\"/bin/cat\", \"{{fp}}\"]\ncommand = [{fake}]\nresolve_prompt = \"p.md\"\nrunner = \"runner\"\n"
+        ),
+        &format!("fp = {}\nkind = \"note\"\n", q(&w.fp().to_string_lossy())),
+    );
+    let texts = json!({"output": {"texts": {"note:queue.md": "The queue."}}, "cost_usd": 0.2, "model": "fake-1"});
+    w.config(&format!(
+        "{}{}{}",
+        w.inst(
+            "notes",
+            "rcol",
+            &format!("out = {}", q(&props(&[note_add()])))
+        ),
+        w.inst(
+            "runner",
+            "runner",
+            &format!("out = {}", q(&texts.to_string()))
+        ),
+        w.inst("judge", "judge", "scenario = \"all\", out = \"accept\""),
+    ));
+    w.run_code(&[], 0);
+    assert_eq!(
+        w.input("judge", 1)["proposals"][0]["sources"],
+        json!({"note:queue.md": "The queue."})
+    );
+    let input = w.input("runner", 1);
+    assert!(
+        input["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("\"note:queue.md\"")
+    );
+    assert_eq!(input["input"], json!({"refs": ["note:queue.md"]}));
+    assert_eq!(input["output_schema"], rrecall::wire::resolve_schema());
+    let runs = w.store().join("runs");
+    let run = std::fs::read_dir(&runs)
+        .unwrap()
+        .flatten()
+        .next()
+        .unwrap()
+        .path();
+    assert!(run.join("runner.notes.resolve.stdout").is_file());
+    // The resolve was this collector's only model call: its runner and model go into the lock.
+    let lock = w.lock();
+    assert_eq!(lock["collectors"]["notes"]["runner"], "runner");
+    assert_eq!(lock["collectors"]["notes"]["model"], "fake-1");
+    assert!(w.report().contains("$0.20"), "{}", w.report());
+}
+
+#[test]
+fn a_resolve_refused_by_the_budget_drops_its_proposals() {
+    let w = W::new();
+    let fake = q(&fake());
+    w.plugin(
+        "rcol",
+        "collector",
+        &format!(
+            "[collector]\nscope = {SCOPE}\nsource_kinds = [\"{{kind}}\"]\nfingerprint = [\"/bin/cat\", \"{{fp}}\"]\ncommand = [{fake}]\nresolve_prompt = \"p.md\"\nrunner = \"runner\"\n"
+        ),
+        &format!("fp = {}\nkind = \"memo\"\n", q(&w.fp().to_string_lossy())),
+    );
+    let memo = json!({"key": "m", "op": "add", "parent": "layout", "title": "Memo", "body": "", "sources": ["memo:m.md"], "reason": "memo"});
+    let out = json!({"output": {"proposals": [note_add()]}, "cost_usd": 0.6, "model": "fake-1"});
+    w.config(&format!(
+        "max_cost_usd = 0.5\n{}{}{}{}",
+        w.inst("writer", "prompted", ""),
+        w.inst("notes", "rcol", &format!("out = {}", q(&props(&[memo])))),
+        w.inst(
+            "runner",
+            "runner",
+            &format!("out = {}", q(&out.to_string()))
+        ),
+        w.inst("judge", "judge", "scenario = \"all\", out = \"accept\""),
+    ));
+    w.run_code(&[], 5);
+    assert_eq!(w.calls("runner"), 1, "the resolve was refused");
+    assert!(w.map("layout").contains("Queue") && !w.map("layout").contains("Memo"));
+    assert!(w.report().contains("dropped: budget"), "{}", w.report());
+    assert!(w.lock()["collectors"].get("notes").is_none());
+}
+
+#[test]
+fn allowed_runners_refuses_a_config_that_would_give_a_source_to_another_runner() {
+    let w = W::new();
+    let runners = format!(
+        "{}{}",
+        w.inst("runner", "runner", ""),
+        w.inst("runner2", "runner", "")
+    );
+    for (cfg, want) in [
+        (
+            format!(
+                "{}allowed_runners = [\"runner2\"]\n{runners}",
+                w.inst("writer", "prompted", "")
+            ),
+            "`writer`",
+        ),
+        (
+            format!(
+                "{}allowed_runners = [\"runner\"]\n{runners}{}runner = \"runner2\"\n",
+                w.inst("repo", "col", ""),
+                w.inst("pjudge", "pjudge", "")
+            ),
+            "`pjudge`",
+        ),
+        (
+            format!(
+                "{}allowed_runners = [\"nope\"]\n{runners}",
+                w.inst("repo", "col", "")
+            ),
+            "`nope`",
+        ),
+    ] {
+        w.config(&cfg);
+        let o = w.run_code(&[], 4);
+        assert!(
+            o.stderr.contains("allowed_runners") && o.stderr.contains(want),
+            "{cfg}\n{}",
+            o.stderr
+        );
+    }
+}
+
+#[test]
+fn a_declarative_collector_gets_no_nodes_of_a_source_that_does_not_allow_its_runner() {
+    let w = W::new();
+    w.seed("layout", &[API, AUTH, NOTED, THEIRS]);
+    let update = json!({"key": "u", "op": "update", "id": "api", "title": "API", "body": "HTTP API, v2.", "sources": ["file:api.md"], "reason": "v2"});
+    let cite = json!({"key": "t", "op": "add_source", "id": "theirs", "sources": ["note:t.md"], "reason": "cited"});
+    let cite_api = json!({"key": "s", "op": "add_source", "id": "api", "sources": ["note:api.md"], "reason": "cited"});
+    let r1 = json!({"output": {"proposals": [cite_api, cite]}, "cost_usd": 0.0, "model": "fake-1"});
+    let r2 = json!({"output": {"proposals": []}, "cost_usd": 0.0, "model": "fake-1"});
+    w.config(&format!(
+        "{}allowed_runners = [\"runner2\"]\n{}{}{}",
+        w.inst("repo", "col", &format!("out = {}", q(&props(&[update])))),
+        w.inst("writer", "prompted", ""),
+        w.inst(
+            "runner",
+            "runner",
+            &format!("scenario = \"seq\", out = {}", q(&format!("{r1}\n{r2}")))
+        ),
+        w.inst("runner2", "runner", ""),
+    ));
+    w.run(&[]);
+    // `api`, `auth` and `noted` cite `file:`, which `repo` keeps from `runner`.
+    let ids = |v: &Value| -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(ids(&w.input("runner", 1)["input"]["nodes"]), ["theirs"]);
+    assert_eq!(
+        ids(&w.input("repo", 1)["nodes"]).len(),
+        4,
+        "a command collector sees all"
+    );
+    // Both changed `api` and went back; `writer` is not shown `repo`'s proposal.
+    let back = |v: &Value| v["rejections"][0]["verdicts"][0].clone();
+    assert!(back(&w.input("repo", 2))["conflict_with"].is_object());
+    let wv = back(&w.input("runner", 2)["input"]);
+    assert_eq!(wv["reason"], "conflict");
+    assert!(wv.get("conflict_with").is_none(), "{wv}");
+}
+
+#[test]
+fn judge_feedback_from_a_call_that_saw_a_withheld_node_does_not_reach_a_disallowed_runner() {
+    let cite_api = json!({"key": "a", "op": "add_source", "id": "api", "sources": ["note:api.md"], "reason": "cited"});
+    let cite = json!({"key": "t", "op": "add_source", "id": "theirs", "sources": ["note:t.md"], "reason": "cited"});
+    // The verdicts `writer` gets back in round 2, by proposal key.
+    let back = |proposals: &[&Value]| -> BTreeMap<String, Value> {
+        let w = W::new();
+        w.seed("layout", &[API, AUTH, NOTED, THEIRS]);
+        let r1 = json!({"output": {"proposals": proposals}, "cost_usd": 0.0, "model": "fake-1"});
+        let r2 = json!({"output": {"proposals": []}, "cost_usd": 0.0, "model": "fake-1"});
+        w.config(&format!(
+            "{}allowed_runners = [\"runner2\"]\n{}{}{}{}",
+            w.inst("repo", "col", &format!("out = {}", q(&props(&[])))),
+            w.inst("writer", "prompted", ""),
+            w.inst(
+                "runner",
+                "runner",
+                &format!("scenario = \"seq\", out = {}", q(&format!("{r1}\n{r2}")))
+            ),
+            w.inst("runner2", "runner", ""),
+            // One command judge call sees every proposal and `api` as a `current`; its words
+            // about any of them may quote `api`.
+            w.inst("judge", "judge", "scenario = \"all\", out = \"revise\""),
+        ));
+        w.run(&[]);
+        w.input("runner", 2)["input"]["rejections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                (
+                    r["proposal"]["key"].as_str().unwrap().to_string(),
+                    r["verdicts"][0].clone(),
+                )
+            })
+            .collect()
+    };
+    for (key, v) in back(&[&cite_api, &cite]) {
+        assert_eq!(v["verdict"], "revise", "{key}");
+        assert!(
+            v["reason"].as_str().unwrap().starts_with("withheld"),
+            "{key}: {v}"
+        );
+        assert!(v.get("instruction").is_none(), "{key}: {v}");
+    }
+    let theirs = &back(&[&cite])["t"];
+    assert_eq!(
+        (theirs["reason"].as_str(), theirs["instruction"].as_str()),
+        (Some("fake revise"), Some("fake instruction"))
+    );
+}
+
+/// The fake `claude` answers with `out` (see tests/fixtures/bin/claude).
+fn agent(w: &W, scenario: &str, out: &Value) {
+    let d = w.root.join("home/agent");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join("scenario"), scenario).unwrap();
+    std::fs::write(d.join("out"), out.to_string()).unwrap();
+}
+
+#[test]
+fn the_builtin_claude_runner_runs_a_declarative_collector() {
+    let w = W::new();
+    agent(&w, "ok", &json!({"proposals": [note_add()]}));
+    w.config(&format!(
+        "{}runner = \"claude\"\nmodel = \"opus-test\"\n\n[[plugins]]\nid = \"claude\"\n{}",
+        w.inst("writer", "prompted", ""),
+        w.inst("judge", "judge", "scenario = \"all\", out = \"accept\""),
+    ));
+    w.run_code(&[], 0);
+    assert!(w.map("layout").contains("Queue"));
+    let lock = w.lock();
+    assert_eq!(lock["collectors"]["writer"]["runner"], "claude");
+    assert_eq!(lock["collectors"]["writer"]["model"], "claude-fake-1");
+    assert!(w.report().contains("$0.25"), "{}", w.report());
+    let argv = std::fs::read_to_string(w.root.join("home/agent/claude.argv.1")).unwrap();
+    assert!(argv.contains("\n--model\nopus-test\n"), "{argv}");
+    let stdin = std::fs::read_to_string(w.root.join("home/agent/claude.stdin.1")).unwrap();
+    assert!(stdin.starts_with(rrecall::wire::PREAMBLE) && stdin.contains("Propose changes."));
+}
+
+#[test]
+fn the_cost_cap_counts_what_the_builtin_runner_reports() {
+    let w = W::new();
+    agent(&w, "ok", &json!({"proposals": [note_add()]}));
+    w.config(&format!(
+        "max_cost_usd = 0.2\n{}runner = \"claude\"\n{}runner = \"claude\"\n\n[[plugins]]\nid = \"claude\"\n",
+        w.inst("writer", "prompted", ""),
+        w.inst("pjudge", "pjudge", ""),
+    ));
+    w.run_code(&[], 5);
+    let calls = std::fs::read_to_string(w.root.join("home/agent/claude.calls")).unwrap();
+    assert_eq!(
+        calls.lines().count(),
+        1,
+        "the judge's call was refused at $0.25 of $0.20"
+    );
+    assert!(w.report().contains("budget"), "{}", w.report());
 }
 
 // ---- Hooks, the store lock, views, status, exits 4 (spec §6.6, §4.1, §2) ----

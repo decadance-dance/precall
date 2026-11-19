@@ -1,0 +1,47 @@
+#!/bin/sh
+# A fake `codex exec --json` for tests. Its scenario comes from files under $HOME/agent/:
+# `scenario` (ok, nolog: no session log, only `turn.completed` events; dupusage: like nolog,
+# its usage with a key twice; crash; sleep: never
+# answers the first turn, answers a `resume` turn) and `out` (the final message). It writes
+# the final message to the `-o` file and a session log under $CODEX_HOME/sessions. Each call N
+# records its argv to codex.argv.N, its stdin to codex.stdin.N and its environment to
+# codex.env.N.
+d="$HOME/agent"
+echo call >> "$d/codex.calls"
+n=$(wc -l < "$d/codex.calls" | tr -d ' ')
+printf '%s\n' "$@" > "$d/codex.argv.$n"
+cat > "$d/codex.stdin.$n"
+env | sort > "$d/codex.env.$n"
+reply=
+resume=no
+prev=
+for a in "$@"; do
+    [ "$prev" = -o ] && reply="$a"
+    [ "$a" = resume ] && resume=yes
+    prev="$a"
+done
+log="$CODEX_HOME/sessions/2026/11/19/rollout-2026-11-19T00-00-00-th1.jsonl"
+answer() {
+    cat "$d/out" > "$reply"
+    if [ "$1" = log ]; then
+        mkdir -p "$(dirname "$log")"
+        printf '{"type":"turn_context","payload":{"model":"codex-fake-1"}}\n' >> "$log"
+        printf '{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1500000,"cached_input_tokens":1000000,"output_tokens":100000}}}}\n' >> "$log"
+    fi
+    printf '{"type":"turn.completed","usage":{"input_tokens":1000000,"cached_input_tokens":0,"output_tokens":0}}\n'
+}
+case "$(cat "$d/scenario")" in
+    ok) printf '{"type":"thread.started","thread_id":"th1"}\n'; answer log ;;
+    nolog) printf '{"type":"thread.started","thread_id":"th1"}\n'; answer ;;
+    dupusage)
+        printf '{"type":"thread.started","thread_id":"th1"}\n'
+        cat "$d/out" > "$reply"
+        printf '{"type":"turn.completed","usage":{"input_tokens":1000000,"input_tokens":0,"output_tokens":0}}\n' ;;
+    crash) echo "fake codex: crash" >&2; exit 2 ;;
+    sleep)
+        if [ $resume = yes ]; then answer log; else
+            printf '{"type":"thread.started","thread_id":"th1"}\n'
+            sleep 30 & echo $! > "$d/codex.pid"; wait
+        fi ;;
+    *) echo "fake codex: unknown scenario" >&2; exit 64 ;;
+esac
