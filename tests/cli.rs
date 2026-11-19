@@ -141,9 +141,17 @@ fn init_creates_store_with_default_skeleton_and_found_sources() {
         cfg.contains("repo = \"lanternfish-dev/lanternfish\""),
         "{cfg}"
     );
-    // The built-in checks run after the sources, in this order.
+    // The built-in checks run after the sources, then the judges, in this order, then the
+    // runner the judges call.
     let checks = "[[plugins]]\nid = \"no-op\"\n\n[[plugins]]\nid = \"size-limits\"\n\n[[plugins]]\nid = \"secrets\"\n";
-    assert!(cfg.ends_with(checks), "{cfg}");
+    let judges = "[[plugins]]\nid = \"support\"\n\n[[plugins]]\nid = \"removal\"\n\n[[plugins]]\nid = \"duplicate\"\n";
+    let runner = "[[plugins]]\nid = \"claude\"\n";
+    let (c, j, r) = (
+        cfg.find(checks).expect(&cfg),
+        cfg.find(judges).expect(&cfg),
+        cfg.find(runner).expect(&cfg),
+    );
+    assert!(c < j && j < r && cfg.ends_with(runner), "{cfg}");
     assert_eq!(
         std::fs::read_to_string(store.join(".gitignore")).unwrap(),
         "cache/\nruns/\nviews/\nstate/\n"
@@ -165,6 +173,9 @@ fn init_creates_store_with_default_skeleton_and_found_sources() {
         user.contains("name = \"lanternfish\"") && user.contains(ORIGIN),
         "{user}"
     );
+    // The judges name no runner: the user config gets a default runner, before any table.
+    assert!(user.contains("\nrunner = \"claude\"\n"), "{user}");
+    assert!(user.find("runner =") < user.find("[[projects]]"), "{user}");
     // The origin now resolves the project from inside the repo.
     let ls = e.run_in(&repo, &["ls"]);
     assert_eq!(ls.code, 0, "{}", ls.stderr);
@@ -198,6 +209,12 @@ fn init_names_and_store_overrides() {
     .unwrap();
     e.ok(&["init", "kiln"]);
     assert!(custom.join("rrecall.toml").exists());
+    // A user config with tables but no default runner gets one at the top, and still loads.
+    let user = std::fs::read_to_string(e.user_config()).unwrap();
+    assert!(
+        user.contains("runner = \"claude\"\n") && user.find("runner =") < user.find("[[projects]]"),
+        "{user}"
+    );
     assert!(!e.store("kiln").exists());
     let cfg = std::fs::read_to_string(custom.join("rrecall.toml")).unwrap();
     assert!(
@@ -1185,4 +1202,21 @@ fn max_tokens_prints_the_full_answer_when_it_fits() {
         assert_eq!(e.ok(&args), full, "json {json}");
     }
     assert_eq!(full.matches("## ").count(), 3);
+}
+
+#[test]
+fn init_keeps_the_users_default_runner_and_enables_it() {
+    let e = Env::new();
+    std::fs::create_dir_all(e.user_config().parent().unwrap()).unwrap();
+    std::fs::write(e.user_config(), "runner = \"codex\"\n").unwrap();
+    e.ok(&["init", "kiln"]);
+    assert_eq!(
+        std::fs::read_to_string(e.user_config()).unwrap(),
+        "runner = \"codex\"\n\n[[projects]]\nname = \"kiln\"\n"
+    );
+    let cfg = std::fs::read_to_string(e.store("kiln").join("rrecall.toml")).unwrap();
+    assert!(
+        cfg.ends_with("[[plugins]]\nid = \"codex\"\n") && !cfg.contains("\"claude\""),
+        "{cfg}"
+    );
 }
