@@ -955,6 +955,55 @@ fn a_denying_commit_before_hook_leaves_the_store_unchanged() {
 }
 
 #[test]
+fn a_lock_checked_out_with_crlf_is_not_rewritten_and_no_commit_is_reported() {
+    let w = world(&props(&[]));
+    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    w.config(&format!(
+        "{cfg}{}",
+        w.inst("audit", "audit", "out = \"{}\"")
+    ));
+    w.git(&["config", "core.autocrlf", "true"]);
+    w.run_code(&[], 0);
+    std::fs::remove_file(w.store().join("rrecall.lock")).unwrap();
+    w.git(&["checkout", "--", "rrecall.lock"]);
+    let lock = std::fs::read_to_string(w.store().join("rrecall.lock")).unwrap();
+    assert!(lock.contains("\r\n"), "git checked the lock out with CRLF");
+    let (head, calls) = (w.head(), w.calls("audit"));
+    let o = w.run_code(&["--force"], 0);
+    assert_eq!(w.head(), head);
+    assert_eq!(
+        std::fs::read_to_string(w.store().join("rrecall.lock")).unwrap(),
+        lock,
+        "the checkout is left alone"
+    );
+    let events: Vec<Value> = (calls + 1..=w.calls("audit"))
+        .map(|n| w.input("audit", n)["event"].clone())
+        .collect();
+    assert!(!events.contains(&json!("commit.after")), "{events:?}");
+    assert!(!o.stdout.contains(&head[..7]), "{}", o.stdout);
+    // A lock change git's own attributes clean away: nothing lands, so nothing is reported.
+    w.git(&["config", "filter.blank.clean", "cat >/dev/null"]);
+    std::fs::write(
+        w.store().join(".gitattributes"),
+        "rrecall.lock filter=blank\n",
+    )
+    .unwrap();
+    w.commit("attributes", &[".gitattributes"]);
+    w.git(&["add", "--renormalize", "rrecall.lock"]);
+    w.git(&["commit", "-q", "-m", "blank lock"]);
+    let (head, calls) = (w.head(), w.calls("audit"));
+    std::fs::write(w.fp(), "v2").unwrap();
+    let o = w.run_code(&[], 0);
+    assert_ne!(w.lock()["collectors"]["repo"]["fingerprint"], json!(null));
+    assert_eq!(w.head(), head, "git found nothing to commit");
+    let events: Vec<Value> = (calls + 1..=w.calls("audit"))
+        .map(|n| w.input("audit", n)["event"].clone())
+        .collect();
+    assert!(!events.contains(&json!("commit.after")), "{events:?}");
+    assert!(o.stdout.contains("commit: none"), "{}", o.stdout);
+}
+
+#[test]
 fn observing_hooks_get_each_event_and_their_failures_do_not_count() {
     let w = world(&props(&[add("a", "layout", "Queue")]));
     let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();

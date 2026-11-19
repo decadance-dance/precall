@@ -607,7 +607,10 @@ impl Run {
             .collect();
         let mut changes = work.map_changes()?;
         let lock_text = lock.render();
-        let on_disk = std::fs::read_to_string(self.ctx.store.join(lock::LOCK_FILE)).ok();
+        // Line endings do not count, as for the map: a CRLF checkout of an unchanged lock stays.
+        let on_disk = std::fs::read_to_string(self.ctx.store.join(lock::LOCK_FILE))
+            .ok()
+            .map(|d| d.replace("\r\n", "\n"));
         if on_disk.as_deref() != Some(lock_text.as_str()) {
             changes.push((lock::LOCK_FILE.to_string(), Some(lock_text)));
         }
@@ -620,17 +623,19 @@ impl Run {
                 json!({"diff": diff, "message": message}),
                 "",
             )?;
-            store::write_and_commit(&self.ctx.store, &changes, &message)?;
-            let h = store::git(&self.ctx.store, &["rev-parse", "HEAD"])?
-                .trim()
-                .to_string();
-            self.commit = Some((h.clone(), message.lines().next().unwrap_or("").to_string()));
-            self.hook(
-                Event::CommitAfter,
-                json!({"commit": h, "message": message}),
-                "",
-            )?;
-            hash = Some(h);
+            // `false`: git found nothing to commit (its own normalization), so no commit to report.
+            if store::write_and_commit(&self.ctx.store, &changes, &message)? {
+                let h = store::git(&self.ctx.store, &["rev-parse", "HEAD"])?
+                    .trim()
+                    .to_string();
+                self.commit = Some((h.clone(), message.lines().next().unwrap_or("").to_string()));
+                self.hook(
+                    Event::CommitAfter,
+                    json!({"commit": h, "message": message}),
+                    "",
+                )?;
+                hash = Some(h);
+            }
         }
 
         // Step 10: views. A failure is reported only.
