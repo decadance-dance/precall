@@ -131,10 +131,10 @@ impl Scope {
     }
 
     /// The matched text files, sorted, each with what identifies its content: the blob id at
-    /// `HEAD` with git, else a hash of the file.
-    fn matched(&self) -> Result<Vec<(String, String)>> {
+    /// `rev` with git, else a hash of the file.
+    fn matched(&self, rev: &str) -> Result<Vec<(String, String)>> {
         let mut out = if self.git {
-            self.matched_at("HEAD")?
+            self.matched_at(rev)?
         } else {
             let mut out = Vec::new();
             self.walk(&self.root, &mut out)?;
@@ -192,23 +192,24 @@ impl Scope {
 
     fn fingerprint(&self) -> Result<String> {
         Ok(self
-            .matched()?
+            .matched("HEAD")?
             .iter()
             .map(|(rel, id)| format!("{id}\t{rel}\n"))
             .collect())
-    }
-
-    fn commit(&self) -> Result<String> {
-        Ok(git(&self.root, &["rev-parse", "--short=12", "HEAD"])?
-            .trim()
-            .to_string())
     }
 
     /// What the agent reads: the folder, the files in scope, how to cite them, the preset's
     /// branches; with git, the commit as the cursor and, from a settled one, what changed since.
     fn fetch(&self, input: &str) -> Result<String> {
         let input: Value = serde_json::from_str(input).context("the fetch input is no JSON")?;
-        let matched = self.matched()?;
+        // One commit for the files, the focus, the citations and the cursor, though HEAD may
+        // move while fetch runs.
+        let head = if self.git {
+            git(&self.root, &["rev-parse", "HEAD"])?.trim().to_string()
+        } else {
+            String::new()
+        };
+        let matched = self.matched(&head)?;
         let files: Vec<&str> = matched.iter().map(|(rel, _)| rel.as_str()).collect();
         let mut f = json!({
             "root": self.root.to_string_lossy(),
@@ -219,9 +220,9 @@ impl Scope {
         // limit: the agent reads the working tree, which may differ from the commit it cites.
         // limit: without git there is no cursor, so every run reads all the files.
         let cite = if self.git {
-            let c = self.commit()?;
+            let c = &head[..head.len().min(12)];
             f["commit"] = json!(c);
-            f["cursor"] = json!(git(&self.root, &["rev-parse", "HEAD"])?.trim());
+            f["cursor"] = json!(head);
             let settled = input["since"]["cursor"].as_str().filter(|c| {
                 is_sha(c)
                     && git_bytes(&self.root, &["cat-file", "-e", &format!("{c}^{{commit}}")])

@@ -763,6 +763,64 @@ fn files_with_git_returns_head_as_its_cursor_and_focuses_on_what_changed_since()
 }
 
 #[test]
+fn files_pins_one_commit_for_its_files_citations_and_cursor() {
+    // Review round 1, finding 3: HEAD moves while fetch runs.
+    let w = W::new();
+    w.commit_file("base.md", "base\n", "base");
+    let first = w.git(&["rev-parse", "HEAD"]).trim().to_string();
+    w.commit_file("middle.md", "middle\n", "middle");
+    let second = w.git(&["rev-parse", "HEAD"]).trim().to_string();
+    w.commit_file("late.md", "late\n", "late");
+    let third = w.git(&["rev-parse", "HEAD"]).trim().to_string();
+    w.git(&["reset", "-q", "--hard", &second]);
+    let real = std::env::var("PATH")
+        .unwrap()
+        .split(':')
+        .map(|d| Path::new(d).join("git"))
+        .find(|p| p.is_file())
+        .unwrap();
+    let wrap = w.root.join("gitwrap");
+    std::fs::create_dir_all(&wrap).unwrap();
+    let move_to = w.root.join("rec/move-to");
+    std::fs::write(&move_to, &third).unwrap();
+    // The first `ls-tree` moves HEAD to the third commit once it has listed the tree.
+    std::fs::write(
+        wrap.join("git"),
+        format!(
+            "#!/bin/sh\n{real} \"$@\"; rc=$?\nif [ \"$1\" = ls-tree ] && [ -f {m} ]; then {real} update-ref HEAD \"$(cat {m})\"; rm {m}; fi\nexit $rc\n",
+            real = q(&real.to_string_lossy()),
+            m = q(&move_to.to_string_lossy()),
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(wrap.join("git"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let env_path = format!("{}:{}", wrap.display(), w.path());
+    let mut env: Vec<(String, String)> = files_params(&w, true, &[])
+        .into_iter()
+        .map(|(k, v)| (format!("RRECALL_PARAM_{}", k.to_uppercase()), v))
+        .collect();
+    env.push(("PATH".into(), env_path));
+    let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let o = w.raw(
+        &["builtin", "files", "fetch"],
+        Some(&since(json!(first))),
+        &env,
+    );
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    assert!(!move_to.exists(), "HEAD moved during the fetch");
+    let f: Value = serde_json::from_str(&o.stdout).unwrap();
+    assert_eq!(f["files"], json!(["base.md", "middle.md"]));
+    assert_eq!(f["focus"]["changed"], json!(["middle.md"]));
+    assert_eq!(
+        f["cursor"],
+        second.as_str(),
+        "the commit it read, not the moved HEAD"
+    );
+    assert_eq!(f["commit"], &second[..12]);
+}
+
+#[test]
 fn files_without_git_returns_no_cursor() {
     let w = W::new();
     std::fs::write(w.repo().join("a.md"), "a\n").unwrap();
