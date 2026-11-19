@@ -942,6 +942,70 @@ fn a_forced_run_denied_before_its_commit_reports_no_drift() {
 
 // ---- The cost cap and runners (spec §9, §6.8) ----
 
+#[test]
+fn a_runner_effort_counts_in_the_setup_only_when_set() {
+    let w = W::new();
+    // A fake runner that declares `effort`, as the built-in `claude` does.
+    w.plugin(
+        "erunner",
+        "runner",
+        &format!("[runner]\ncommand = [{}]\n", q(&fake())),
+        "effort = \"\"\n",
+    );
+    let out = json!({"output": {"proposals": []}, "cost_usd": 0.0, "model": "fake-1"});
+    let with = |uses: &str, params: &str| {
+        let sep = if params.is_empty() { "" } else { ", " };
+        w.config(&format!(
+            "{}{}",
+            w.inst("writer", "prompted", ""),
+            w.inst(
+                "runner",
+                uses,
+                &format!("out = {}{sep}{params}", q(&out.to_string()))
+            )
+        ));
+    };
+    let setup = || w.lock()["collectors"]["writer"]["setup"].clone();
+    with("runner", "");
+    w.run_code(&[], 0);
+    let unset = setup();
+    with("erunner", "effort = \"\"");
+    w.run_code(&[], 0);
+    assert_eq!(
+        w.calls("runner"),
+        1,
+        "an empty effort is unset: nothing due"
+    );
+    assert_eq!(setup(), unset);
+    with("erunner", "effort = \"high\"");
+    w.run_code(&[], 0);
+    assert_eq!(w.calls("runner"), 2, "a set effort makes the collector due");
+    let high = setup();
+    assert_ne!(high, unset);
+    assert_eq!(
+        w.input("runner", 2)["since"],
+        Value::Null,
+        "a new setup reads everything"
+    );
+    with("erunner", "effort = \"low\"");
+    w.run_code(&[], 0);
+    assert_ne!(setup(), high);
+}
+
+#[test]
+fn an_unknown_claude_effort_fails_the_load_naming_the_instance() {
+    let w = W::new();
+    w.config("[[plugins]]\nid = \"claude\"\nparams = { effort = \"extreme\" }\n");
+    let o = w.run_code(&[], 4);
+    assert!(
+        o.stderr.contains("plugin instance `claude`")
+            && o.stderr
+                .contains("param `effort` must be one of low, medium, high, xhigh, max"),
+        "{}",
+        o.stderr
+    );
+}
+
 /// An add citing the kind `note`, which the `prompted` collector owns.
 fn note_add() -> Value {
     json!({"key": "a", "op": "add", "parent": "layout", "title": "Queue", "body": "", "sources": ["note:queue.md"], "reason": "noted"})

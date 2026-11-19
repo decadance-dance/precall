@@ -760,27 +760,26 @@ impl Run {
             None => None,
         };
         let (runner, model) = self.configured(inst);
-        let combined = sha256(
-            json!({
-                "fingerprint": output,
-                "plugin": self.hashes.get(&inst.id),
-                "params": inst.params_json(),
-                "runner": runner,
-                "model": model,
-            })
-            .to_string()
-            .as_bytes(),
-        );
-        let setup = sha256(
-            json!({
-                "plugin": self.hashes.get(&inst.id),
-                "params": inst.params_json(),
-                "runner": runner,
-                "model": model,
-            })
-            .to_string()
-            .as_bytes(),
-        );
+        let mut setup_parts = json!({
+            "plugin": self.hashes.get(&inst.id),
+            "params": inst.params_json(),
+            "runner": runner,
+            "model": model,
+        });
+        // The runner's effort counts like the model, but only when set: an unset one leaves
+        // every setup as it was before the param existed (spec §4.1).
+        if let Some(e) = self
+            .runner_of(inst)
+            .ok()
+            .and_then(|r| r.params.get("effort")?.as_str())
+            .filter(|e| !e.is_empty())
+        {
+            setup_parts["effort"] = e.into();
+        }
+        let setup = sha256(setup_parts.to_string().as_bytes());
+        let mut combined_parts = setup_parts;
+        combined_parts["fingerprint"] = json!(output);
+        let combined = sha256(combined_parts.to_string().as_bytes());
         let entry = old.collectors.get(&inst.id);
         // Where the last settled run stopped, unless this run reads everything (spec §4.2).
         let since = match entry {

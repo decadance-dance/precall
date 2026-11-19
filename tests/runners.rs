@@ -203,6 +203,10 @@ fn claude_runs_read_only_with_the_prompt_on_stdin_and_reports_cost_and_model() {
     assert_eq!(after(&argv, "--allowedTools"), "Read,Grep,Glob");
     assert_eq!(after(&argv, "--permission-mode"), "dontAsk");
     assert_eq!(after(&argv, "--model"), "claude-fake-1");
+    assert!(
+        !argv.iter().any(|a| a == "--effort"),
+        "no effort unless set"
+    );
     assert_eq!(
         after(&argv, "--json-schema"),
         r#"{"required":["texts"],"type":"object"}"#
@@ -270,6 +274,39 @@ fn claude_near_the_timeout_gets_a_wrap_up_turn_in_the_same_session() {
         dead(&t.rec("claude.pid")),
         "the first turn's process tree was killed"
     );
+}
+
+#[test]
+fn claude_effort_goes_after_the_model_on_both_turns_and_empty_means_unset() {
+    let t = T::new("sleep", r#"{"texts":{}}"#);
+    let free = r#"{"claude-fake-1":{"input":0,"cached_input":0,"output":0}}"#;
+    let o = t.call_with(
+        "claude",
+        "m",
+        WRAP_TIMEOUT,
+        Some(free),
+        &[("RRECALL_PARAM_EFFORT", "high".into())],
+    );
+    assert!(o.ok, "{}", o.stderr);
+    for n in [1, 2] {
+        let argv = t.argv(&format!("claude.argv.{n}"));
+        let at = argv.iter().position(|a| a == "--effort").expect("--effort");
+        assert_eq!(
+            argv[at - 2..at + 2],
+            ["--model", "m", "--effort", "high"],
+            "turn {n}"
+        );
+    }
+    let t = T::new("ok", r#"{"texts":{}}"#);
+    let o = t.call_with(
+        "claude",
+        "m",
+        60,
+        None,
+        &[("RRECALL_PARAM_EFFORT", "".into())],
+    );
+    assert!(o.ok, "{}", o.stderr);
+    assert!(!t.argv("claude.argv.1").iter().any(|a| a == "--effort"));
 }
 
 #[test]

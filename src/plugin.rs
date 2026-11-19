@@ -964,6 +964,9 @@ fn instance(
     if plugin.builtin && m.id == "slack" {
         crate::slack::check_params(&params)?;
     }
+    if plugin.builtin && m.id == "claude" {
+        crate::runner::check_params(&params)?;
+    }
     Ok(Instance {
         id: e.id.clone(),
         timeout: e.timeout.unwrap_or_else(|| m.timeout()),
