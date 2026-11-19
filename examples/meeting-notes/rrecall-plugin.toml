@@ -1,0 +1,15 @@
+id = "meeting-notes"
+name = "Meeting notes in a fixed format"
+version = "0.1.0"
+min_rrecall = "0.1.0"
+kind = "collector"
+
+[collector]
+scope = ["decisions", "blocked", "people"]
+source_kinds = ["meeting"]
+min_interval = "1d"
+prompt = "prompt.md"
+resolve_prompt = "resolve.md"
+
+[params]
+path = ""
