@@ -2,30 +2,57 @@
 //! within one path segment, `**` as a whole segment matches any number of segments, none
 //! included. Paths use `/`.
 
-/// Whether `path` matches `pattern`.
+/// Whether `path` matches `pattern`. Each pair of positions is decided once, so the work is
+/// bounded by the pattern's length times the path's, whatever the stars.
 pub fn matches(pattern: &str, path: &str) -> bool {
     let pat: Vec<&str> = pattern.split('/').collect();
     let segs: Vec<&str> = path.split('/').collect();
-    segments(&pat, &segs)
+    let mut memo = vec![None; (pat.len() + 1) * (segs.len() + 1)];
+    segments(&pat, &segs, 0, 0, &mut memo)
 }
 
-fn segments(pat: &[&str], path: &[&str]) -> bool {
-    match pat.split_first() {
-        None => path.is_empty(),
-        Some((&"**", rest)) => (0..=path.len()).any(|i| segments(rest, &path[i..])),
-        Some((p, rest)) => path
-            .split_first()
-            .is_some_and(|(s, tail)| segment(p.as_bytes(), s.as_bytes()) && segments(rest, tail)),
+fn segments(p: &[&str], s: &[&str], pi: usize, si: usize, memo: &mut [Option<bool>]) -> bool {
+    let at = pi * (s.len() + 1) + si;
+    if let Some(r) = memo[at] {
+        return r;
     }
+    let r = match p.get(pi) {
+        None => si == s.len(),
+        // `**` matches no segment, or one more and stays.
+        Some(&"**") => {
+            segments(p, s, pi + 1, si, memo) || (si < s.len() && segments(p, s, pi, si + 1, memo))
+        }
+        Some(seg) => {
+            si < s.len()
+                && segment(seg.as_bytes(), s[si].as_bytes())
+                && segments(p, s, pi + 1, si + 1, memo)
+        }
+    };
+    memo[at] = Some(r);
+    r
 }
 
 fn segment(p: &[u8], s: &[u8]) -> bool {
-    match p.split_first() {
-        None => s.is_empty(),
-        Some((b'*', rest)) => (0..=s.len()).any(|i| segment(rest, &s[i..])),
-        Some((b'?', rest)) => !s.is_empty() && segment(rest, &s[1..]),
-        Some((c, rest)) => s.first() == Some(c) && segment(rest, &s[1..]),
+    let mut memo = vec![None; (p.len() + 1) * (s.len() + 1)];
+    bytes(p, s, 0, 0, &mut memo)
+}
+
+fn bytes(p: &[u8], s: &[u8], pi: usize, si: usize, memo: &mut [Option<bool>]) -> bool {
+    let at = pi * (s.len() + 1) + si;
+    if let Some(r) = memo[at] {
+        return r;
     }
+    let r = match p.get(pi) {
+        None => si == s.len(),
+        // `*` matches nothing, or one more byte and stays.
+        Some(b'*') => {
+            bytes(p, s, pi + 1, si, memo) || (si < s.len() && bytes(p, s, pi, si + 1, memo))
+        }
+        Some(b'?') => si < s.len() && bytes(p, s, pi + 1, si + 1, memo),
+        Some(c) => s.get(si) == Some(c) && bytes(p, s, pi + 1, si + 1, memo),
+    };
+    memo[at] = Some(r);
+    r
 }
 
 #[cfg(test)]
@@ -56,5 +83,17 @@ mod tests {
         ] {
             assert_eq!(matches(pat, path), want, "{pat} {path}");
         }
+    }
+
+    #[test]
+    fn many_stars_on_a_long_name_stay_fast() {
+        // Review round 1, finding 4: this took longer than two seconds.
+        let name = format!("{}.md", "a".repeat(32));
+        let deep = vec!["d"; 40].join("/") + "/x.md";
+        let started = std::time::Instant::now();
+        assert!(!matches(&format!("{}b.md", "*".repeat(16)), &name));
+        assert!(!matches(&format!("{}y.md", "**/".repeat(20)), &deep));
+        assert!(matches(&format!("{}x.md", "**/".repeat(20)), &deep));
+        assert!(started.elapsed() < std::time::Duration::from_millis(200));
     }
 }
