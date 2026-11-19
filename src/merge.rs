@@ -127,6 +127,19 @@ fn within(s: &Store, id: &str, of: &str) -> bool {
     false
 }
 
+/// Whether `id` sits under a branch in the scope of the collector `by` (spec §6.4).
+fn in_scope(s: &Store, by: &str, g: &Grant, id: &str) -> Result<(), String> {
+    let b = s.branch_of(id);
+    if g.scope.iter().any(|x| x == b) {
+        Ok(())
+    } else {
+        Err(format!(
+            "`{id}` is under the branch `{b}`, outside the scope of `{by}` ({})",
+            g.scope.join(", ")
+        ))
+    }
+}
+
 /// The invariants of spec §5 and the rules of the proposal format, on one proposal against the
 /// map as it stands before this round. `adds` holds the keys of this collector's `add`
 /// proposals in this round; `earlier` maps the full keys of adds accepted in earlier rounds to
@@ -186,18 +199,7 @@ pub fn validate(
     if p.op == Op::Add && p.sources.is_empty() {
         return Err("`add` needs at least one source (every node names its source)".into());
     }
-    let in_scope = |id: &str| {
-        let b = work.branch_of(id);
-        if g.scope.iter().any(|x| x == b) {
-            Ok(())
-        } else {
-            Err(format!(
-                "`{id}` is under the branch `{b}`, outside the scope of `{}` ({})",
-                item.by,
-                g.scope.join(", ")
-            ))
-        }
-    };
+    let in_scope = |id: &str| in_scope(work, &item.by, &g, id);
     if let Some(id) = &p.id {
         let n = work
             .nodes
@@ -294,7 +296,42 @@ pub struct Applied {
 /// proposal key (spec §4.1 step 5). An add waits for the add its `parent_key` names; removals
 /// go last, as a set, so a node and all its children can go together (I3). A proposal whose
 /// parent did not apply fails with "parent rejected".
+///
+/// Placement is checked on the merged tree: a node added or moved in this round must end under
+/// a branch in its collector's scope, whichever proposal (a move of an ancestor by another
+/// collector) put it elsewhere. Such a proposal fails and the round is applied again without it.
 pub fn apply(
+    work: &Store,
+    rules: &Rules,
+    items: &[Item],
+    earlier: &BTreeMap<String, String>,
+) -> Applied {
+    let mut out_of_scope: BTreeMap<String, String> = BTreeMap::new();
+    loop {
+        let left: Vec<Item> = items
+            .iter()
+            .filter(|it| !out_of_scope.contains_key(&it.key()))
+            .cloned()
+            .collect();
+        let mut a = apply_round(work, rules, &left, earlier);
+        let bad: Vec<(String, String)> = a
+            .effects
+            .iter()
+            .filter(|e| matches!(e.change, "added" | "moved"))
+            .filter_map(|e| {
+                let err = in_scope(&a.store, &e.by, &rules.grant(&e.by), &e.id).err()?;
+                Some((format!("{}/{}", e.by, e.key), err))
+            })
+            .collect();
+        if bad.is_empty() {
+            a.failed.extend(out_of_scope);
+            return a;
+        }
+        out_of_scope.extend(bad);
+    }
+}
+
+fn apply_round(
     work: &Store,
     rules: &Rules,
     items: &[Item],
@@ -882,6 +919,32 @@ mod tests {
             out.store.nodes["auth"].sources,
             ["file:auth.md", "gh-pr:o/r#7"]
         );
+    }
+
+    #[test]
+    fn an_add_under_a_node_moved_out_of_its_scope_fails_in_either_order() {
+        let (_t, s) = store(&[API]);
+        let mut mv = item(
+            "repo",
+            r#"{"key":"m","op":"move","id":"api","parent":"how-it-works","sources":["file:x"]}"#,
+        );
+        let mut ad = item(
+            "github",
+            r#"{"key":"c","op":"add","parent":"api","title":"Child","body":"","sources":["gh-pr:o/r#9"]}"#,
+        );
+        for (rm, ra) in [(0, 1), (1, 0)] {
+            (mv.rank, ad.rank) = (rm, ra);
+            let out = apply(&s, &rules(), &[mv.clone(), ad.clone()], &BTreeMap::new());
+            assert!(
+                out.failed["github/c"].contains("outside the scope of `github`"),
+                "{:?}",
+                out.failed
+            );
+            assert!(!out.failed.contains_key("repo/m"), "{:?}", out.failed);
+            assert_eq!(out.store.branch_of("api"), "how-it-works");
+            assert!(!out.store.nodes.contains_key("child"));
+            assert!(out.effects.iter().all(|e| e.id != "child"));
+        }
     }
 
     #[test]
