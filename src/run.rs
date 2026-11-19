@@ -881,8 +881,8 @@ impl Run {
     }
 
     /// A declarative plugin's call through its runner (spec §6.8): the prompt rendered with the
-    /// input and the schema, the cost cap, then the runner process with the caller's timeout. Returns the output as JSON text, the runner
-    /// instance and the model it reported.
+    /// input and the schema, the cost cap, then the runner process with the caller's timeout.
+    /// Returns the output as JSON text, the runner instance and the model it reported.
     fn via_runner(
         &self,
         caller: &Instance,
@@ -1014,7 +1014,7 @@ impl Run {
             .collect();
         let judges = self.of_kind(Kind::Judge);
         if !judges.is_empty() && !judged.is_empty() {
-            let texts = self.resolve(round, &judged);
+            let texts = self.resolve(round, &judged, &mut dropped);
             for judge in judges {
                 let live: Vec<&Item> = judged
                     .iter()
@@ -1154,8 +1154,14 @@ impl Run {
     }
 
     /// The text of every reference the judged proposals cite, through each owner's `resolve`
-    /// (spec §6.4); what does not resolve is `None`.
-    fn resolve(&mut self, round: u32, items: &[&Item]) -> BTreeMap<String, Option<String>> {
+    /// (spec §6.4); what does not resolve is `None`. A `resolve_prompt` the cost cap refuses
+    /// drops the proposals citing its references with the reason "budget" (spec §9).
+    fn resolve(
+        &mut self,
+        round: u32,
+        items: &[&Item],
+        dropped: &mut BTreeMap<String, String>,
+    ) -> BTreeMap<String, Option<String>> {
         let mut by_owner: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut texts = BTreeMap::new();
         for it in items {
@@ -1190,12 +1196,16 @@ impl Run {
             };
             match out.and_then(|o| Ok(wire::decode_texts(&inst.id, &o, &refs)?)) {
                 Ok(t) => texts.extend(t),
-                Err(f) => self.warnings.push(format!(
-                    "resolve of `{owner}` failed, its references stay unresolved: {}",
-                    match f {
-                        CallFail::Budget => "budget".to_string(),
-                        CallFail::Error(e) => e,
+                Err(CallFail::Budget) => {
+                    for it in items
+                        .iter()
+                        .filter(|it| refs_of(&it.p).iter().any(|r| refs.contains(r)))
+                    {
+                        dropped.entry(it.key()).or_insert_with(|| "budget".into());
                     }
+                }
+                Err(CallFail::Error(e)) => self.warnings.push(format!(
+                    "resolve of `{owner}` failed, its references stay unresolved: {e}"
                 )),
             }
         }

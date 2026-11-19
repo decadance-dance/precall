@@ -994,6 +994,38 @@ fn a_resolve_prompt_runs_through_its_collectors_runner_and_feeds_the_judges() {
 }
 
 #[test]
+fn a_resolve_refused_by_the_budget_drops_its_proposals() {
+    let w = W::new();
+    let fake = q(&fake());
+    w.plugin(
+        "rcol",
+        "collector",
+        &format!(
+            "[collector]\nscope = {SCOPE}\nsource_kinds = [\"{{kind}}\"]\nfingerprint = [\"/bin/cat\", \"{{fp}}\"]\ncommand = [{fake}]\nresolve_prompt = \"p.md\"\nrunner = \"runner\"\n"
+        ),
+        &format!("fp = {}\nkind = \"memo\"\n", q(&w.fp().to_string_lossy())),
+    );
+    let memo = json!({"key": "m", "op": "add", "parent": "layout", "title": "Memo", "body": "", "sources": ["memo:m.md"], "reason": "memo"});
+    let out = json!({"output": {"proposals": [note_add()]}, "cost_usd": 0.6, "model": "fake-1"});
+    w.config(&format!(
+        "max_cost_usd = 0.5\n{}{}{}{}",
+        w.inst("writer", "prompted", ""),
+        w.inst("notes", "rcol", &format!("out = {}", q(&props(&[memo])))),
+        w.inst(
+            "runner",
+            "runner",
+            &format!("out = {}", q(&out.to_string()))
+        ),
+        w.inst("judge", "judge", "scenario = \"all\", out = \"accept\""),
+    ));
+    w.run_code(&[], 5);
+    assert_eq!(w.calls("runner"), 1, "the resolve was refused");
+    assert!(w.map("layout").contains("Queue") && !w.map("layout").contains("Memo"));
+    assert!(w.report().contains("dropped: budget"), "{}", w.report());
+    assert!(w.lock()["collectors"].get("notes").is_none());
+}
+
+#[test]
 fn allowed_runners_refuses_a_config_that_would_give_a_source_to_another_runner() {
     let w = W::new();
     let runners = format!(
