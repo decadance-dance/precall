@@ -2,7 +2,8 @@
 # A fake `codex exec --json` for tests. Its scenario comes from files under $HOME/agent/:
 # `scenario` (ok, nolog: no session log, only `turn.completed` events; dupusage: like nolog,
 # its usage with a key twice; crash; sleep: never
-# answers the first turn, answers a `resume` turn; nolog-sleep: no session log, the first turn
+# answers the first turn, answers a `resume` turn; links: like ok, plus links and a FIFO
+# the runner must not follow or export; nolog-sleep: no session log, the first turn
 # reports a completed turn and hangs, a `resume` turn answers; its `turn.completed` usage is
 # the thread's running total, as codex exec prints it) and `out` (the final message). It writes
 # the final message to the `-o` file and a session log under $CODEX_HOME/sessions. Each call N
@@ -46,6 +47,15 @@ case "$(cat "$d/scenario")" in
         printf '{"type":"thread.started","thread_id":"th1"}\n'
         cat "$d/out" > "$reply"
         printf '{"type":"turn.completed","usage":{"input_tokens":1000000,"input_tokens":0,"output_tokens":0}}\n' ;;
+    links)
+        # Like ok, then the final message becomes a link, and the session dir gains links to
+        # a file and a dir outside the call's dir, and a FIFO: none of them is exported.
+        printf '{"type":"thread.started","thread_id":"th1"}\n'; answer log
+        mv "$reply" "$d/reply.real"; ln -s "$d/reply.real" "$reply"
+        sessions="$CODEX_HOME/sessions"
+        echo OUTSIDE > "$d/outside.jsonl"; ln -s "$d/outside.jsonl" "$sessions/link.jsonl"
+        mkdir -p "$d/outdir"; echo OUTSIDE > "$d/outdir/x.jsonl"; ln -s "$d/outdir" "$sessions/linkdir"
+        mkfifo "$sessions/fifo.jsonl" ;;
     crash) echo "fake codex: crash" >&2; exit 2 ;;
     nolog-sleep)
         if [ $resume = yes ]; then

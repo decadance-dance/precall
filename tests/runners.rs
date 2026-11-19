@@ -814,57 +814,78 @@ fn token() -> String {
     format!("ghp_{}", "aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3z5A")
 }
 
-/// A call with `RRECALL_AGENT_LOG` set (spec §6.8), and the log it left.
-fn logged(t: &T, id: &str) -> (Out, String) {
-    let log = t.root.join("run/claude.support.judge.agent");
-    std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+/// A call with `RRECALL_AGENT_DIR` set (spec §6.8), and the files it left there.
+fn logged(t: &T, id: &str) -> (Out, std::collections::BTreeMap<String, String>) {
+    let dir = t.root.join("agent-dir");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let prices = r#"{"codex-fake-1":{"input":1,"cached_input":0.1,"output":10}}"#;
     let o = t.call_with(
         id,
         "m",
         60,
-        None,
-        &[("RRECALL_AGENT_LOG", log.to_string_lossy().into_owned())],
+        Some(prices),
+        &[("RRECALL_AGENT_DIR", dir.to_string_lossy().into_owned())],
     );
-    let text = std::fs::read_to_string(&log).unwrap_or_else(|e| panic!("{e}: {}", o.stderr));
-    (o, text)
+    let files = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| {
+            let p = e.unwrap().path();
+            let name = p.file_name().unwrap().to_string_lossy().into_owned();
+            (name, std::fs::read_to_string(&p).unwrap_or_default())
+        })
+        .collect();
+    (o, files)
 }
 
 #[test]
-fn claude_keeps_what_the_agent_streamed_redacted_in_the_agent_log() {
+fn claude_streams_each_turn_into_the_agent_dir() {
     let out = json!({"texts": {"note:a": token()}}).to_string();
     let t = T::new("ok", &out);
-    let (o, log) = logged(&t, "claude");
+    let (o, files) = logged(&t, "claude");
     assert!(o.ok, "{}", o.stderr);
-    assert!(log.contains("\"type\":\"result\""), "{log}");
-    assert!(
-        log.contains("[redacted:github-token]") && !log.contains(&token()),
-        "{log}"
-    );
-    // A call that fails keeps it too.
+    let names: Vec<&str> = files.keys().map(String::as_str).collect();
+    assert_eq!(names, ["turn1.stdout"]);
+    assert!(files["turn1.stdout"].contains("\"type\":\"result\""));
+    // A call that fails leaves its turn there too.
     std::fs::write(t.root.join("home/agent/scenario"), "malformed").unwrap();
-    let (o, log) = logged(&t, "claude");
-    assert!(!o.ok && !log.is_empty(), "{}", o.stderr);
-    t.no_scratch_left();
-}
-
-#[test]
-fn codex_keeps_its_events_session_log_and_final_message_in_the_agent_log() {
-    let t = T::new("ok", &format!("not JSON {}", token()));
-    let (o, log) = logged(&t, "codex");
-    assert!(!o.ok, "the reply does not decode: {}", o.stderr);
-    assert!(log.contains("turn.completed"), "events: {log}");
-    assert!(log.contains("token_count"), "session log: {log}");
+    let (o, files) = logged(&t, "claude");
     assert!(
-        log.contains("not JSON [redacted:github-token]"),
-        "reply: {log}"
+        !o.ok && files["turn1.stdout"].contains("not json"),
+        "{}",
+        o.stderr
     );
-    assert!(!log.contains(&token()), "{log}");
     t.no_scratch_left();
 }
 
 #[test]
-fn without_an_agent_log_path_the_runner_writes_none() {
+fn codex_exports_its_final_message_and_session_log_to_the_agent_dir() {
+    let t = T::new("ok", "not JSON");
+    let (o, files) = logged(&t, "codex");
+    assert!(!o.ok, "the reply does not decode: {}", o.stderr);
+    let names: Vec<&str> = files.keys().map(String::as_str).collect();
+    assert_eq!(names, ["reply.txt", "session1.jsonl", "turn1.stdout"]);
+    assert!(files["turn1.stdout"].contains("turn.completed"));
+    assert!(files["session1.jsonl"].contains("token_count"));
+    assert_eq!(files["reply.txt"].trim(), "not JSON");
+    t.no_scratch_left();
+}
+
+#[test]
+fn codex_exports_no_link_and_no_file_a_link_leads_to() {
+    let t = T::new("links", r#"{"texts":{"note:a":null}}"#);
+    let (o, files) = logged(&t, "codex");
+    assert!(o.ok, "{}", o.stderr);
+    let names: Vec<&str> = files.keys().map(String::as_str).collect();
+    // The final message is a link and the session dir holds links to a file and a dir outside.
+    assert_eq!(names, ["session1.jsonl", "turn1.stdout"]);
+    assert!(!files.values().any(|f| f.contains("OUTSIDE")), "{files:?}");
+    t.no_scratch_left();
+}
+
+#[test]
+fn without_an_agent_dir_the_runner_writes_none() {
     let t = T::new("ok", r#"{"texts":{"note:a":null}}"#);
     assert!(t.call("claude", "m", 60, None).ok);
-    assert!(!t.root.join("run").exists());
+    assert!(!t.root.join("agent-dir").exists());
 }

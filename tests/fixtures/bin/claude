@@ -7,7 +7,7 @@
 # record, then hangs, answers a `--resume` turn; perms: records the modes of its working dir, its parent
 # and its stdout file (with the ACL flag) and their ACL entry count to claude.perms, then
 # answers; config: the same for $CLAUDE_CONFIG_DIR plus its entries to claude.config, then answers;
-# sleep-always: never answers) and `out`
+# sleep-always: never answers; stop-runner: streams `out` in one event and stops its runner) and `out`
 # (the structured output to print; `out.N`, when present, for call N). Each call N records its argv to claude.argv.N,
 # its stdin to claude.stdin.N, its environment to claude.env.N and its cwd to claude.cwd.N.
 d="$HOME/agent"
@@ -62,5 +62,7 @@ case "$(cat "$d/scenario")" in
     perms) { modes . .. turn1.stdout; acls . .. turn1.stdout; } > "$d/claude.perms"; answer 0.25 ;;
     config) { modes "$CLAUDE_CONFIG_DIR"; acls "$CLAUDE_CONFIG_DIR"; ls -A "$CLAUDE_CONFIG_DIR"; } > "$d/claude.config"; answer 0.25 ;;
     sleep-always) sleep 30 & echo $! > "$d/claude.pid.$n"; wait ;;
+    # Streams one event holding `out`, then stops its runner, so the core's timeout kills it.
+    stop-runner) printf '{"type":"system","note":%s}\n' "$out"; kill -STOP "$PPID" ;;
     *) echo "fake claude: unknown scenario" >&2; exit 64 ;;
 esac

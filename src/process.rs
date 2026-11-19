@@ -27,9 +27,14 @@ pub struct Ctx {
 /// More stdout than this is not a plugin answer; the call fails instead of filling memory.
 const MAX_STDOUT: u64 = 64 << 20;
 
-/// The variable that gives a built-in runner the run-dir path of its call's agent log, where it
-/// keeps what the agent streamed, redacted (spec §6.8).
-pub const AGENT_LOG: &str = "RRECALL_AGENT_LOG";
+/// The variable that gives a built-in runner the private directory where its agent streams and
+/// it exports what the agent wrote; the core keeps it as the call's agent log (spec §6.8).
+pub const AGENT_DIR: &str = "RRECALL_AGENT_DIR";
+
+/// The agent log's size, its cut line included.
+// limit: the agent log keeps the first 16 MiB of what the agent streamed, redacted; a stream
+// that ends past it loses its end there, the `.stdout` keeps the runner's answer.
+pub const AGENT_LOG_CAP: u64 = 16 << 20;
 
 /// Runs `template` (an argv of `inst`'s manifest) as a child process (spec §6.3): in the plugin
 /// directory, never through a shell, `input` as JSON on stdin, the `RRECALL_*` environment, and
@@ -90,22 +95,24 @@ fn run(
     let log = |ext| ctx.run_dir.join(format!("{}.{entry}.{ext}", inst.id));
     let (out_path, err_path) = (log("stdout"), log("stderr"));
     let (mut out, mut err) = (unnamed(&out_path)?, unnamed(&err_path)?);
-    // Only the built-in runners get it: they redact what they write there, as `keep` does.
-    let agent_log = (inst.plugin.builtin && matches!(inst.plugin.manifest.spec, Spec::Runner(_)))
-        .then(|| log("agent"));
-    if let Some(p) = &agent_log {
-        // A call that fails before its agent starts leaves no stale log of an earlier one.
-        let _ = std::fs::remove_file(p);
-    }
+    // Only the built-in runners get one: a private dir outside the run dir, removed on drop, so
+    // what the agent printed never sits in the run dir as printed.
+    let agent_dir = (inst.plugin.builtin && matches!(inst.plugin.manifest.spec, Spec::Runner(_)))
+        .then(crate::runner::Scratch::create)
+        .transpose()?;
     let status = command(ctx, inst, &argv, &path, &out, &err, state).and_then(|mut cmd| {
-        match &agent_log {
-            Some(p) => cmd.env(AGENT_LOG, p),
-            None => cmd.env_remove(AGENT_LOG),
+        match &agent_dir {
+            Some(d) => cmd.env(AGENT_DIR, &d.0),
+            None => cmd.env_remove(AGENT_DIR),
         };
         wait(&mut cmd, program, stdin, inst.timeout)
     });
     let stdout = keep(&mut out, &out_path, MAX_STDOUT)?;
     keep(&mut err, &err_path, MAX_STDOUT)?;
+    // However the call ended, a timeout included: the runner may be killed mid-call.
+    if let Some(d) = &agent_dir {
+        keep_agent(&d.0, &log("agent"))?;
+    }
     let status = status.map_err(|e| anyhow!("{e:#}; stderr in {}", err_path.display()))?;
     if !status.success() {
         let last = last_line(&mut err)?;
@@ -218,14 +225,18 @@ fn keep(f: &mut File, path: &Path, cap: u64) -> Result<Vec<u8>> {
     f.seek(SeekFrom::Start(0))?;
     let mut bytes = Vec::new();
     f.take(cap + OVERLAP).read_to_end(&mut bytes)?;
-    write_log(&bytes, path, cap)?;
+    let (mut kept, cut) = redacted(&bytes, cap);
+    if cut {
+        kept += &format!("\n[log cut at {cap} bytes]\n");
+    }
+    std::fs::write(path, &kept).with_context(|| format!("writing {}", path.display()))?;
     bytes.truncate(cap as usize);
     Ok(bytes)
 }
 
-/// Writes `bytes` (read up to `cap` + [`OVERLAP`]) to `path` as a log: every credential
-/// redacted, and past `cap` bytes cut with a line saying so.
-pub fn write_log(bytes: &[u8], path: &Path, cap: u64) -> Result<()> {
+/// `bytes` (read up to `cap` + [`OVERLAP`]) up to `cap` with every credential redacted, and
+/// whether they went on past `cap`.
+fn redacted(bytes: &[u8], cap: u64) -> (String, bool) {
     let cut = bytes.len() as u64 > cap;
     // limit: a log that is not UTF-8 is kept with replacement characters, so the scanner can
     // read it, and then the cut lands near `cap`, not on it; the plugin's answer itself is
@@ -235,11 +246,62 @@ pub fn write_log(bytes: &[u8], path: &Path, cap: u64) -> Result<()> {
     while !text.is_char_boundary(limit) {
         limit -= 1;
     }
-    let mut kept = secrets::redact_until(&text, limit);
-    if cut {
-        kept += &format!("\n[log cut at {cap} bytes]\n");
+    (secrets::redact_until(&text, limit), cut)
+}
+
+/// Writes the regular files in a built-in runner's agent dir `dir` to `path`, each after a
+/// `== <name> ==` line, the turns first: redacted like the logs, and at most [`AGENT_LOG_CAP`]
+/// bytes as written, the cut line included, since a redaction can be longer than what it hides.
+fn keep_agent(dir: &Path, path: &Path) -> Result<()> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .with_context(|| format!("reading {}", dir.display()))?
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    names.sort_by_key(|n| (!n.starts_with("turn"), n.clone()));
+    let mut bytes = Vec::new();
+    for name in names {
+        let Some(f) = open_regular(&dir.join(&name)) else {
+            continue;
+        };
+        bytes.extend(format!("== {name} ==\n").into_bytes());
+        let room = (AGENT_LOG_CAP + OVERLAP).saturating_sub(bytes.len() as u64);
+        f.take(room).read_to_end(&mut bytes)?;
+        if !bytes.ends_with(b"\n") {
+            bytes.push(b'\n');
+        }
     }
-    std::fs::write(path, &kept).with_context(|| format!("writing {}", path.display()))
+    std::fs::write(path, fit_log(&bytes, AGENT_LOG_CAP))
+        .with_context(|| format!("writing {}", path.display()))
+}
+
+/// `bytes` redacted as a log of at most `cap` bytes, the line saying it was cut included.
+fn fit_log(bytes: &[u8], cap: u64) -> String {
+    let (mut kept, cut) = redacted(bytes, cap);
+    if cut || kept.len() as u64 > cap {
+        let note = format!("\n[log cut at {cap} bytes]\n");
+        // Cutting text already redacted cannot uncover a credential.
+        let mut end = (cap as usize).saturating_sub(note.len()).min(kept.len());
+        while !kept.is_char_boundary(end) {
+            end -= 1;
+        }
+        kept.truncate(end);
+        kept += &note;
+    }
+    kept
+}
+
+/// `p` opened for reading when it is a regular file itself, never through a link.
+pub fn open_regular(p: &Path) -> Option<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = File::options()
+        .read(true)
+        // Non-blocking, so a FIFO is skipped instead of waited on.
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(p)
+        .ok()?;
+    f.metadata().is_ok_and(|m| m.is_file()).then_some(f)
 }
 
 /// How far past a cut [`keep`] reads, so a credential the cut splits is still found and
@@ -782,6 +844,27 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "01234 [redacted:github-token]\n[log cut at 16 bytes]\n"
         );
+    }
+
+    #[test]
+    fn the_agent_log_fits_its_cap_as_written_with_redactions_and_the_cut_line() {
+        let tok = ["gh", "p_", "Zq3vK9mW2xR7tY5pL8nB4cD6fG1hJ0kAa2Ss"].concat();
+        let marker = "[redacted:github-token]";
+        // Each short URL credential becomes a longer marker: the text grows past the cap.
+        let short = "https://u:ab@x.invalid ".repeat(12);
+        assert!(short.len() < 300, "under the cap until redacted");
+        for input in [short, format!("{} {tok} tail", "x".repeat(280))] {
+            let kept = fit_log(input.as_bytes(), 300);
+            assert!(kept.len() <= 300, "{} bytes: {kept}", kept.len());
+            assert!(kept.ends_with("\n[log cut at 300 bytes]\n"), "{kept}");
+            assert!(
+                !kept.contains("u:ab@") && !kept.contains(&tok[4..]),
+                "{kept}"
+            );
+        }
+        // A credential the cut splits is still redacted whole, and what fits stays as it is.
+        let kept = fit_log(format!("ok {tok}").as_bytes(), 300);
+        assert_eq!(kept, format!("ok {marker}"));
     }
 
     /// While the plugin runs, its logs have no name in the run dir; after it ends, a timeout

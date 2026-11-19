@@ -953,7 +953,7 @@ fn a_judge_key_without_its_collector_counts_in_the_first_call_and_the_reask() {
     assert_eq!(w.calls("runner"), 2);
     let env = std::fs::read_to_string(w.rec("runner")).unwrap();
     assert!(
-        !env.contains("RRECALL_AGENT_LOG"),
+        !env.contains("RRECALL_AGENT_DIR"),
         "a plugin runner gets none: {env}"
     );
     assert!(!logs(&w).iter().any(|l| l.ends_with(".agent")));
@@ -2000,6 +2000,34 @@ fn the_builtin_claude_runner_runs_a_declarative_collector() {
         let log = format!("claude.writer.collect.{ext}");
         assert!(logs.contains(&log), "{log}: {logs:?}");
     }
+}
+
+#[test]
+fn a_runner_the_core_kills_at_the_timeout_still_leaves_its_agent_log() {
+    let w = world(&props(&[add("a", "layout", "Queue")]));
+    let tok = format!("ghp_{}", "aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3z5A");
+    agent(&w, "stop-runner", &json!(format!("streamed {tok}")));
+    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    w.config(&format!(
+        "{cfg}{}runner = \"claude\"\ntimeout = \"2s\"\n\n[[plugins]]\nid = \"claude\"\n",
+        w.inst("pjudge", "pjudge", ""),
+    ));
+    let o = w.run_code(&[], 5);
+    assert!(o.stderr.contains("timed out after 2s"), "{}", o.stderr);
+    let runs = w.store().join("runs");
+    let last = std::fs::read_dir(&runs)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .max()
+        .unwrap();
+    let log = std::fs::read_to_string(last.join("claude.pjudge.judge.agent")).unwrap();
+    assert!(
+        log.starts_with("== turn1.stdout ==\n")
+            && log.contains("streamed [redacted:github-token]")
+            && !log.contains(&tok),
+        "{log}"
+    );
 }
 
 #[test]
