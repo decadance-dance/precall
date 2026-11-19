@@ -2,7 +2,7 @@
 
 Why rrecall exists and what it must never become: [VISION.md](VISION.md). This document is what it does and the plan to build it. Sections are cited as `spec §N`. A change to behavior described here updates this file in the same PR.
 
-Status: milestone 1 (store and queries) built; milestone 2 next.
+Status: milestone 1 (store and queries) built; milestone 2 in progress (plugin protocol and run pipeline built).
 
 ## 1. Terms
 
@@ -28,7 +28,7 @@ Status: milestone 1 (store and queries) built; milestone 2 next.
 | --- | --- | --- |
 | Maintainer | `rrecall init [<project>]` | Creates the map store with the default skeleton and a config naming the sources found (repo path, `origin` remote), and registers the project in the user config. |
 | Maintainer | `rrecall import <outline>` | Seeds an empty map from an indented outline (`title | detail` per line). Top-level lines that match a branch title or id fill that branch; the others become new branches, added to the config in the same commit. Every imported node gets the source `import:<file>`. A map that already has nodes is a usage error. |
-| Maintainer | `rrecall run [--only <plugin>] [--force]` | Runs the pipeline (§4). `--force` ignores fingerprints and collects every source again. |
+| Maintainer | `rrecall run [--only <instance>] [--force] [--no-wait]` | Runs the pipeline (§4). `--force` ignores fingerprints and collects every source again. `--only` runs one collector instance (another id exits 2), still subject to its fingerprint unless `--force`. `--no-wait` exits 4 instead of waiting when another run holds the store lock. |
 | Maintainer | `rrecall open` | Renders the HTML view and opens it. |
 | Maintainer | `rrecall note <id> <text>` | Adds the user's annotation to a node; runs never change it. An empty text clears it. |
 | Maintainer | `rrecall rm <id> [--reason <text>] [--recursive]` | Removes a node by hand, for the cases a run may not (a node with a note or children, §5 I3). A node with children needs `--recursive`, which removes them too. |
@@ -39,7 +39,7 @@ Status: milestone 1 (store and queries) built; milestone 2 next.
 | Agent and maintainer | `rrecall find <text>` | Nodes whose title or body matches, each with its path. |
 | Agent and maintainer | `rrecall recent [--since 7d]` | What changed in the map in the window (from the map store's history) plus dated nodes in the window. |
 | Agent and maintainer | `rrecall why <id>` | When the node appeared and changed, by which runs, with which sources and commit reasons (from `git log`/`git blame` of the store). |
-| Agent and maintainer | `rrecall status` | Last run, its result, sources that were unreachable, proposals left rejected. |
+| Agent and maintainer | `rrecall status` | Last run, its result, sources that were unreachable, proposals left rejected: the `## Summary` section of the last run report (§4.4). |
 | Maintainer | `rrecall agent-instructions` | Prints a short paragraph to paste into an agent's instruction file: that the map exists and which commands answer which question. |
 
 The project is resolved from `--project`, else `RRECALL_PROJECT`, else the current directory's git `origin` remote looked up in the user config (§9). Remote URLs match as exact strings. With none of the three (no flag, no variable, no `origin` in the current directory), the command exits 2; an `origin` the user config does not list, or a project whose store does not exist, exits 3. Query commands print compact Markdown by default and JSON with `--json`.
@@ -110,20 +110,47 @@ A project adds branches in its config (`[[skeleton.branch]]` with `id`, `title`,
 
 1. **Load.** Read the user config, the store's config and lock, and every enabled plugin's manifest. A manifest error stops the run before anything is collected (exit 4).
 2. **Fingerprint.** For each collector, compute its combined fingerprint: the output of its `fingerprint` entrypoint (cheap and deterministic, for example `git rev-parse HEAD`, the newest `updatedAt` of the tracker's items, a hash of the notes folder), the plugin's content hash, its prompt's hash, its effective params, and the runner and model names as configured. A collector without a cheap fingerprint declares `min_interval` instead (§6.1) and is due when that interval has passed since its last settled run. A collector whose fingerprint equals the lock's settled one, or that is not yet due, is skipped; its nodes stay as they are.
+   - The entrypoint gets `{ "project", "run_id", "params" }` on stdin; its stdout is taken as raw text, not JSON. The combined fingerprint is `sha256:<hex>` over that output, the plugin's content hash (§6.7, which covers the prompt), the effective params and the configured runner and model.
+   - A `min_interval` collector hashes the same without an output, and is due when that hash differs from the lock's or the interval has passed.
+   - A fingerprint entrypoint that fails makes its collector unreachable: not collected, unsettled, exit 5.
+   - If no collector is due, the run stops here: it writes the report and runs no hook, check, judge or view and makes no commit (I1). Otherwise `run.before` fires once, after this step and before collecting.
 3. **Collect.** Run the remaining collectors in parallel. Each gets on stdin the current nodes in its scope and returns proposals (§6.4). A collector that fails, times out or returns output that does not decode proposes nothing; its source is reported unreachable and it stays unsettled.
 4. **Validate.** The core enforces the invariants (§5) on each proposal and rejects violations with a reason, before any plugin sees them.
 5. **Merge.** Apply the surviving proposals to a copy of the map, in plugin order, then by proposal key. Two proposals that change the same node in the same round are both rejected with the reason "conflict", each carrying the other's proposal, and go back to their collectors (step 8). If they still conflict after the last round, neither is applied.
 6. **Diff.** Compute the node diff against the current map: added, updated (which fields), moved, removed.
 7. **Check, then judge.** Run every enabled check over the diff, then every enabled judge over what the checks accepted. Each returns `accept`, `reject` with a reason, or `revise` with an instruction, per proposal. Judges get the source text resolved through the owning collector's `resolve` entrypoint (§6.4). A proposal is accepted only if every check and judge accepted it. A proposal whose parent proposal (§6.4 `parent_key`) was not accepted is rejected with the reason "parent rejected".
+   - The accepted proposals are applied again: an add whose parent was not accepted ("parent rejected"), or a removal whose child's removal or move was not accepted (I3), is rejected in turn and goes back like any rejection.
 8. **Back pressure.** Proposals rejected or marked `revise` go back to their collector with the verdicts, and steps 3 to 7 run again for those proposals only. At most `max_rounds` rounds (default 2). After the last round, what is still not accepted is dropped from this run and listed in the report.
+   - Round N > 1 calls only the collectors with proposals sent back, with those in `rejections` and the current map: proposals accepted in earlier rounds stay accepted and are applied.
+   - Only proposals whose `key` was sent back count; other keys are ignored and reported. A key sent back but not returned is withdrawn.
+   - `parent_key` may name an `add` of the same collector accepted in an earlier round.
 9. **Commit.** Write the map files (§3.2) and the lock. If either changed, commit them with a structured message (§4.3); a run that changes only the lock commits with the subject `run <time>: no map changes`. If neither changed: no commit. Write the run report to `runs/<run-id>/report.md` in every case.
 10. **Render.** Run the views (`views/`). A view failure is reported and does not change the exit code.
 
-A run takes a lock on the store; a second run on the same store waits or fails fast (`--no-wait`, exit 4).
+A run takes a lock on the store; a second run on the same store waits or fails fast (`--no-wait`, exit 4). The lock is an exclusive `flock` on `.git/rrecall-run.lock`: the OS releases it when the process ends, and it never shows in the working tree. `note`, `rm` and `import` wait for it too, so a run cannot commit its in-memory map over their change.
+
+The run id is the start time in UTC, `YYYY-MM-DDTHHMMSSZ` (`-2`, `-3`, ... when one of the same second exists), so the last run sorts last by name.
 
 ### 4.2 Lock file and settled collectors
 
 `rrecall.lock` records, per collector: the combined fingerprint of its last **settled** run, the plugin's source and content hash, the runner and model used (as returned by the runner), and the time of the last settled run (used only for `min_interval`). A collector's run is settled when it ran without failure and every proposal it made ended accepted, or rejected by checks and judges that themselves ran. A collector whose proposals were dropped because a check or judge failed, or because the budget ran out, is not settled: its lock entry does not advance, and the next run collects it again. Per check, judge and view the lock records the plugin's source and content hash. The lock is tracked, so the history shows when a plugin or prompt changed, and a diff after a prompt change is attributed to it.
+
+The file is JSON with two-space indentation, keys in this order, a final newline:
+
+```json
+{
+  "collectors": {
+    "<instance>": { "fingerprint": "sha256:...", "plugin": "plugins/files", "hash": "sha256:...", "runner": "claude", "model": "...", "settled_at": "2026-11-25T09:14:00Z" }
+  },
+  "plugins": {
+    "<instance>": { "plugin": "...", "hash": "sha256:..." }
+  }
+}
+```
+
+- `plugin` is the plugin directory, relative to the store when inside it, else absolute; `hash` its content hash (§6.7).
+- `runner` and `model` only for a collector a runner ran; `settled_at` (UTC) only for a `min_interval` collector, so a forced run of a fingerprinted collector over unchanged sources rewrites nothing.
+- `plugins` lists the check, judge and view instances. Entries of instances no longer configured are dropped whenever the lock is written.
 
 ### 4.3 Commit message
 
@@ -137,9 +164,15 @@ rejected 3, see runs/<run-id>/report.md
 unreachable: chat (login expired)
 ```
 
+- One line per change, columns aligned: `added|updated|moved|removed <branch>/<id>`, then `(<fields>)` for an update or `(from <old parent>)` for a move, `by <collector>`, the proposal's one-line `reason` and its sources in brackets; a removal shows `evidence: <reason> [<evidence>]`. An `add_source` shows as an update of `sources`.
+- The subject counts `+added ~updated-or-moved -removed`, and `(rejected N)` when proposals were left rejected.
+- After the changes: `rejected N, see runs/<run-id>/report.md`, `unreachable: <id> (<first line of the error>), ...`, and `unsettled: <id> (<why>), ...` for collectors left unsettled for another reason.
+
 ### 4.4 Run report
 
 Untracked Markdown in `runs/<run-id>/`: every proposal with its verdicts per round, unreachable sources with the error, unsettled collectors and why, cost per plugin, wall time. `rrecall status` summarizes the last one.
+
+It starts with `# Run <run-id>` and a `## Summary` section (result and exit code, commit, collected and skipped collectors, unreachable and unsettled ones, the count left rejected, cost, wall time), then `## Proposals` (one `### <collector>/<key>` per proposal, its outcome and verdicts per round) and `## Warnings` (hooks, views, resolve). `rrecall status` prints the summary; `rrecall run` prints it too.
 
 ## 5. Stability rules
 
@@ -243,7 +276,7 @@ params = { path = "/home/me/notes/myproject", preset = "notes", ref_kind = "note
 ### 6.3 Process contract
 
 - The argv runs in the plugin's directory as its own process group, never through a shell: the program must be a native executable, or a script whose `#!` line names a native interpreter by absolute path (`#!/bin/sh`, `#!/usr/bin/env python3`), since the C library would hand any other file to `/bin/sh`. At the timeout the whole group is killed.
-- Input: one JSON document on stdin. Output: one JSON document on stdout. Logs: stderr. Both are kept in the run dir as `runs/<run-id>/<instance>.<entrypoint>.stdout` and `.stderr`. A non-zero exit, a timeout or more than 64 MiB of stdout is a failure.
+- Input: one JSON document on stdin. Output: one JSON document on stdout. Logs: stderr. Both are kept in the run dir as `runs/<run-id>/<instance>.<entrypoint>.stdout` and `.stderr`; from round 2 on (§4.1 step 8) the entrypoint gets `.<round>` appended, a runner call logs as `<runner>.<caller>.<entrypoint>`, and a hook as `<hook>.<event>`, with `.<collector>` for `collect.after` and `.<round>` from round 2. A non-zero exit, a timeout or more than 64 MiB of stdout is a failure.
 - Environment: rrecall's own, plus `RRECALL_BIN` (the rrecall binary), `RRECALL_PROJECT`, `RRECALL_STORE`, `RRECALL_PLUGIN_DIR`, `RRECALL_STATE_DIR` (the instance's own persistent directory, `<store>/state/<instance-id>/`, created before the call), `RRECALL_RUN_ID`, and each param as `RRECALL_PARAM_<NAME>`: the name upper-cased with `-` as `_`, a string as it is, any other value as JSON. Two params that map to one variable are a manifest error; `RRECALL_PARAM_*` variables in rrecall's own environment are not passed on.
 - A plugin reads the map through the CLI (`$RRECALL_BIN show <id> --json`); there is no other API.
 - Output is untrusted. Decoding is strict on shape (the document is one JSON object; unknown fields, a key twice at any level, wrong types, `null` for a field (only an unresolved text may be `null`), a missing required field such as `sources`): one item that does not decode rejects the whole output, naming the plugin and the item. Rule violations in well-formed proposals (a removal without evidence, a change to another collector's node) are rejected per proposal by the invariants (§5), with a reason the collector sees in the next round.
@@ -257,6 +290,15 @@ Output: `{ "proposals": [ { "key", "op": "add" | "update" | "move" | "remove" | 
 - Required by `op`: `add` needs `title`, `body` and exactly one of `parent` and `parent_key`; `move` needs `id` and exactly one of `parent` and `parent_key`; `update`, `remove` and `add_source` need `id`. A proposal that lacks one does not decode.
 - A new node's parent is either an existing `id` (`parent`) or another proposal's `key` (`parent_key`), so a collector can add a parent and its children at once.
 - `reason` is one line that goes into the commit message. `evidence` is a source reference, required for `remove`.
+
+Besides the invariants of §5, the core rejects a proposal (step 4) when:
+- it carries a field its op does not take: `add` takes `parent` or `parent_key`, `title`, `body`, `date`, `state`; `update` takes `id`, `title`, `body`, `date`, `state`; `move` takes `id` and `parent` or `parent_key`; `remove` takes `id` and `evidence`; `add_source` takes `id` (all take `sources`). An `add` with `id` breaks I4; an `update` with a parent is a `move`.
+- a source or the evidence is malformed, of a kind no enabled collector owns, or of the core's kinds `config` and `import`;
+- an `update` or `add_source` has no sources, or one not of the collector's own kinds. An `update` replaces the collector's own sources and keeps the others where they are, so resending the same sources changes no byte; `add_source` appends;
+- its target or new parent is not in the map, or sits under a branch outside the collector's `scope`; a `move` would put a node under itself;
+- the merged node breaks a limit of §3.1.
+
+Any two proposals on one node `id` in one round conflict (I9), `add_source` included.
 
 Resolve: the `resolve` entrypoint gets `{ "refs": [references] }` and returns `{ "texts": { "<ref>": "<text or null>" } }`; a reference it omits is unresolved, and one it was not asked for fails the output. A reference that does not resolve is passed to judges as unresolved, and a judge may not accept a claim whose only sources are unresolved.
 
@@ -277,7 +319,18 @@ Input: `{ "proposals": [ { "key", "proposal", "current"?: <node>, "sources": { "
 
 Only `*.before` events can deny, and a hook on them fails closed. Hooks run in config order with a timeout (default 30s).
 
-A hook gets `{ "event", "project", "run_id", "data" }`, `data` being the event's payload. On a `*.before` event it prints `{}` to allow or `{ "deny": "<reason>" }` to deny; a non-zero exit, a timeout or any other output denies too, and the first deny aborts the run (exit 4) without running the hooks after it. On the other events its output is ignored and a failure is reported without changing the run.
+A hook gets `{ "event", "project", "run_id", "data" }`, `data` being the event's payload:
+
+| Event | `data` |
+| --- | --- |
+| `run.before` | `{ "collectors": [the due collector ids], "force" }` |
+| `collect.after` | `{ "collector", "round", "proposals" }`, per collector and round |
+| `diff.after` | `{ "round", "diff" }` |
+| `commit.before` | `{ "diff", "message" }`: the run's whole diff and the commit message |
+| `commit.after` | `{ "commit", "message" }` |
+| `view.render` | `{ "commit" }` (`null` when the run made none), before the views run |
+
+A diff entry is `{ "change": "added" | "updated" | "moved" | "removed", "id", "parent", "fields"?, "by", "key" }`: `parent` is the parent after the change (before it, for a removal), `fields` the updated fields, `by` the collector instance and `key` its proposal key. A view gets `{ "project", "run_id", "params" }` on stdin. On a `*.before` event it prints `{}` to allow or `{ "deny": "<reason>" }` to deny; a non-zero exit, a timeout or any other output denies too, and the first deny aborts the run (exit 4) without running the hooks after it. On the other events its output is ignored and a failure is reported without changing the run.
 
 ### 6.7 Installing and trusting
 
@@ -287,7 +340,9 @@ A hook gets `{ "event", "project", "run_id", "data" }`, `data` being the event's
 
 ### 6.8 Runner contract and what reaches a model
 
-A runner gets `{ "prompt", "input", "output_schema", "model", "timeout", "read_only": true }` and returns `{ "output": <JSON matching the schema>, "cost_usd", "model" }`.
+A runner gets `{ "prompt", "input", "output_schema", "model", "timeout", "read_only": true }` (`timeout` in seconds, the caller's) and returns `{ "output": <JSON matching the schema>, "cost_usd", "model" }`.
+- A declarative collector or judge calls the runner its store-config instance names, else its manifest, else the user config's default; the runner is a plugin instance of kind `runner`. The model comes the same way, else `default`.
+- `cost_usd` must be a finite number of at least 0; the output is then decoded as the caller's own output (§6.4, §6.5), as strictly.
 - `read_only` means the agent may read files, run read-only commands and use its configured tools (for example a chat connector), and may not write files, push or post anything.
 - `cost_usd` is required; a runner that cannot report cost estimates it from token counts and a price table in its params. `model` is the model the provider actually used; it goes into the lock.
 - The built-in runners call `claude -p` and `codex exec`, with the prompt passed by file or stdin, never on the command line, and with a wrap-up message when the timeout nears. They are adapted from the headless runner of rreview (same author, same license).
