@@ -232,10 +232,24 @@ pub fn builtin() -> Result<BTreeMap<String, Plugin>> {
     for text in crate::checks::MANIFESTS
         .iter()
         .chain(crate::runner::MANIFESTS.iter())
+        .chain([crate::git_history::MANIFEST].iter())
     {
         let mut manifest = parse_manifest(text, &dir, "built in")?;
         match &mut manifest.spec {
             Spec::Check(c) | Spec::Runner(c) => c.command[0] = exe_text.to_string(),
+            Spec::Collector(c) => {
+                for argv in [
+                    &mut c.fingerprint,
+                    &mut c.command,
+                    &mut c.fetch,
+                    &mut c.resolve,
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    argv[0] = exe_text.to_string();
+                }
+            }
             _ => {}
         }
         found.insert(
@@ -628,7 +642,10 @@ pub fn plugin_hash(plugin: &Plugin) -> Result<String> {
         return content_hash(&plugin.dir);
     }
     let mut text = None;
-    for t in crate::checks::MANIFESTS {
+    for t in crate::checks::MANIFESTS
+        .into_iter()
+        .chain([crate::git_history::MANIFEST])
+    {
         if parse_manifest(t, &plugin.dir, "built in")?.id == plugin.manifest.id {
             text = Some(t);
         }

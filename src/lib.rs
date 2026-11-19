@@ -2,6 +2,8 @@ pub mod checks;
 pub mod commands;
 pub mod config;
 pub mod error;
+pub mod git_history;
+pub mod glob;
 pub mod history;
 pub mod lock;
 pub mod merge;
@@ -13,6 +15,7 @@ pub mod query;
 pub mod run;
 pub mod runner;
 pub mod secrets;
+pub mod sources;
 pub mod store;
 pub mod wire;
 #[cfg(test)]
