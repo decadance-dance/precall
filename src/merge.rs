@@ -879,7 +879,7 @@ mod tests {
             "repo",
             r#"{"key":"b","op":"remove","id":"auth","evidence":"file:gone"}"#,
         );
-        let out = apply(&s, &rules(), &[parent.clone()], &BTreeMap::new());
+        let out = apply(&s, &rules(), std::slice::from_ref(&parent), &BTreeMap::new());
         assert!(out.failed["repo/a"].contains("I3"), "{:?}", out.failed);
         assert!(out.store.nodes.contains_key("api"));
         let out = apply(&s, &rules(), &[parent.clone(), child], &BTreeMap::new());
@@ -910,7 +910,7 @@ mod tests {
             r#"{"key":"b","op":"add","parent_key":"a","title":"C","body":"","sources":["file:c"]}"#,
         );
         // The parent is not among the items: rejected before merge.
-        let out = apply(&s, &rules(), &[child.clone()], &BTreeMap::new());
+        let out = apply(&s, &rules(), std::slice::from_ref(&child), &BTreeMap::new());
         assert_eq!(out.failed["repo/b"], "parent rejected");
         let long = item(
             "repo",
