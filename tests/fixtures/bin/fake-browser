@@ -1,0 +1,5 @@
+#!/bin/sh
+# A fake browser for `rrecall open` tests, set as RRECALL_BROWSER: appends its argv, one line, to
+# $FAKE_BROWSER_LOG and exits with $FAKE_BROWSER_EXIT (default 0).
+printf '%s\n' "$*" >> "${FAKE_BROWSER_LOG:?}"
+exit "${FAKE_BROWSER_EXIT:-0}"

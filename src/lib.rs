@@ -23,6 +23,7 @@ pub mod secrets;
 pub mod slack;
 pub mod sources;
 pub mod store;
+pub mod view;
 pub mod wire;
 #[cfg(test)]
 pub(crate) mod testutil {

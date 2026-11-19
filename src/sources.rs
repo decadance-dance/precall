@@ -84,9 +84,9 @@ pub fn cut(text: &str, max: usize) -> String {
     s
 }
 
-/// Whether `s` looks like an abbreviated or full git object id.
+/// Whether `s` looks like an abbreviated or full git object id (SHA-1 or SHA-256).
 pub fn is_sha(s: &str) -> bool {
-    (4..=40).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
+    (4..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// The refs of a resolve input (spec §6.4).

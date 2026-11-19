@@ -415,14 +415,17 @@ fn a_changed_fingerprint_collects_again_and_force_ignores_fingerprints() {
     w.run_code(&[], 0);
     assert_eq!((w.calls("repo"), w.calls("github")), (2, 2));
     assert_ne!(w.lock()["collectors"]["repo"]["fingerprint"], fp1);
-    let before = w.snapshot();
+    let without_times = |mut l: Value| {
+        for e in l["collectors"].as_object_mut().unwrap().values_mut() {
+            e.as_object_mut().unwrap().remove("settled_at");
+        }
+        l
+    };
+    let (map, lock) = (w.map("layout"), without_times(w.lock()));
     w.run_code(&["--force"], 0);
     assert_eq!((w.calls("repo"), w.calls("github")), (3, 3));
-    assert_eq!(
-        w.snapshot(),
-        before,
-        "a forced run over unchanged sources writes nothing"
-    );
+    assert_eq!(w.map("layout"), map, "a forced run over unchanged sources");
+    assert_eq!(without_times(w.lock()), lock, "only the settled times move");
     let lock = w.lock();
     assert!(
         lock["collectors"]["repo"]["hash"]
@@ -431,7 +434,7 @@ fn a_changed_fingerprint_collects_again_and_force_ignores_fingerprints() {
             .starts_with("sha256:")
     );
     assert_eq!(lock["collectors"]["repo"]["plugin"], "plugins/col");
-    assert!(lock["collectors"]["repo"].get("settled_at").is_none());
+    assert!(lock["collectors"]["repo"]["settled_at"].is_string());
     assert_eq!(lock["plugins"]["check"]["plugin"], "plugins/check");
 }
 
@@ -1391,12 +1394,20 @@ fn a_lock_checked_out_with_crlf_is_not_rewritten_and_no_commit_is_reported() {
     ));
     w.git(&["config", "core.autocrlf", "true"]);
     w.run_code(&[], 0);
+    // A collector that keeps crashing leaves its unsettled entry, so the lock renders the same.
+    let crashing = format!(
+        "{}{}",
+        w.inst("repo", "col", "scenario = \"crash\""),
+        w.inst("audit", "audit", "out = \"{}\"")
+    );
+    w.config(&crashing);
+    w.run_code(&[], 5);
     std::fs::remove_file(w.store().join("rrecall.lock")).unwrap();
     w.git(&["checkout", "--", "rrecall.lock"]);
     let lock = std::fs::read_to_string(w.store().join("rrecall.lock")).unwrap();
     assert!(lock.contains("\r\n"), "git checked the lock out with CRLF");
     let (head, calls) = (w.head(), w.calls("audit"));
-    let o = w.run_code(&["--force"], 0);
+    let o = w.run_code(&[], 5);
     assert_eq!(w.head(), head);
     assert_eq!(
         std::fs::read_to_string(w.store().join("rrecall.lock")).unwrap(),
@@ -1409,6 +1420,10 @@ fn a_lock_checked_out_with_crlf_is_not_rewritten_and_no_commit_is_reported() {
     assert!(!events.contains(&json!("commit.after")), "{events:?}");
     assert!(!o.stdout.contains(&head[..7]), "{}", o.stdout);
     // A lock change git's own attributes clean away: nothing lands, so nothing is reported.
+    w.config(&format!(
+        "{cfg}{}",
+        w.inst("audit", "audit", "out = \"{}\"")
+    ));
     w.git(&["config", "filter.blank.clean", "cat >/dev/null"]);
     std::fs::write(
         w.store().join(".gitattributes"),
@@ -1504,6 +1519,38 @@ fn a_second_run_waits_for_the_store_lock_or_fails_fast() {
         w.map("layout").contains(r#""note":"mine""#),
         "the note survived the run"
     );
+}
+
+#[test]
+fn the_builtin_html_view_renders_after_the_commit_and_its_failure_is_only_reported() {
+    let w = world(&props(&[add("a", "layout", "Queue")]));
+    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    w.config(&format!("{cfg}\n[[plugins]]\nid = \"html\"\n"));
+    w.run_code(&[], 0);
+    let page = std::fs::read_to_string(w.store().join("views/index.html")).unwrap();
+    assert!(page.contains("<title>kiln"), "{}", &page[..200]);
+    // The node the run added is changed since the last run, with the run commit in its history.
+    let start = r#"<script type="application/json" id="map-data">"#;
+    let from = page.find(start).unwrap() + start.len();
+    let to = from + page[from..].find("</script>").unwrap();
+    let data: Value = serde_json::from_str(&page[from..to]).unwrap();
+    let queue = data["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == "queue")
+        .unwrap();
+    assert_eq!(queue["changed"], true);
+    assert_eq!(queue["history"][0]["subject"], data["last_run"]["subject"]);
+    assert!(!w.report().contains("view `html` failed"), "{}", w.report());
+
+    // A view that cannot write its page is a warning; the run keeps its exit code.
+    let w = world(&props(&[add("a", "layout", "Queue")]));
+    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    w.config(&format!("{cfg}\n[[plugins]]\nid = \"html\"\n"));
+    std::fs::write(w.store().join("views"), "not a directory").unwrap();
+    w.run_code(&[], 0);
+    assert!(w.report().contains("view `html` failed"), "{}", w.report());
 }
 
 #[test]
@@ -1771,6 +1818,33 @@ fn the_builtin_slack_collector_reads_through_a_connector_runner_once_a_day() {
     // Due once a day: a second run calls no agent.
     w.run_code(&[], 0);
     assert_eq!(agent_rec("claude.calls").lines().count(), 2);
+    // A day later the agent reads from the settled run, with the overlap and the cap.
+    assert!(
+        collect.contains("\"since\": null"),
+        "the first run reads its whole window"
+    );
+    assert!(
+        collect.contains("one day before `since.at`") && collect.contains("`lookback_days`"),
+        "{collect}"
+    );
+    let at = w.lock()["collectors"]["slack"]["settled_at"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let text = std::fs::read_to_string(w.store().join("rrecall.lock")).unwrap();
+    std::fs::write(
+        w.store().join("rrecall.lock"),
+        text.replace(&at, "2026-11-01T00:00:00Z"),
+    )
+    .unwrap();
+    w.commit("a day later", &["rrecall.lock"]);
+    std::fs::write(w.root.join("home/agent/out.3"), r#"{"proposals": []}"#).unwrap();
+    w.run_code(&[], 0);
+    let again = agent_rec("claude.stdin.3");
+    assert!(
+        again.contains("\"at\": \"2026-11-01T00:00:00Z\""),
+        "{again}"
+    );
     // Slack text may not reach a runner its list leaves out.
     let only_plain = snippet.replace(
         "allowed_runners = [\"claude-slack\", \"claude\"]",
@@ -2187,4 +2261,338 @@ fn a_collector_without_fetch_gets_no_fetched_key() {
     ));
     w.run_code(&[], 0);
     assert!(w.input("runner", 1)["input"].get("fetched").is_none());
+}
+
+// ---- Incremental collection (spec §4.2, §6.4) ----
+
+/// `world` with `repo` answering line N of `outs` on its Nth call.
+fn seq_world(outs: &[String]) -> W {
+    let w = world(&props(&[]));
+    w.config(&format!(
+        "{}{}",
+        w.inst(
+            "repo",
+            "col",
+            &format!("scenario = \"seq\", out = {}", q(&outs.join("\n")))
+        ),
+        w.inst("check", "check", "scenario = \"all\", out = \"accept\""),
+    ));
+    w
+}
+
+fn with_cursor(items: &[Value], cursor: Value) -> String {
+    json!({ "proposals": items, "cursor": cursor }).to_string()
+}
+
+#[test]
+fn the_cursor_of_a_settled_run_reaches_the_next_input_as_since() {
+    let w = seq_world(&[
+        with_cursor(&[], json!("c1")),
+        with_cursor(&[], json!({"n": 2})),
+    ]);
+    w.run_code(&[], 0);
+    assert_eq!(
+        w.input("repo", 1)["since"],
+        Value::Null,
+        "first run: full read"
+    );
+    let lock = w.lock();
+    let entry = &lock["collectors"]["repo"];
+    assert_eq!(entry["cursor"], "c1");
+    assert!(entry["setup"].as_str().unwrap().starts_with("sha256:"));
+    let at = entry["settled_at"].as_str().unwrap().to_string();
+    std::fs::write(w.fp(), "v2").unwrap();
+    w.run_code(&[], 0);
+    assert_eq!(
+        w.input("repo", 2)["since"],
+        json!({"at": at, "cursor": "c1"})
+    );
+    assert_eq!(w.lock()["collectors"]["repo"]["cursor"], json!({"n": 2}));
+}
+
+#[test]
+fn a_settled_run_without_a_cursor_clears_it_and_keeps_the_time() {
+    let w = seq_world(&[with_cursor(&[], json!("c1")), props(&[]), props(&[])]);
+    w.run_code(&[], 0);
+    std::fs::write(w.fp(), "v2").unwrap();
+    w.run_code(&[], 0);
+    let lock = w.lock();
+    assert!(lock["collectors"]["repo"].get("cursor").is_none(), "{lock}");
+    let at = lock["collectors"]["repo"]["settled_at"].clone();
+    std::fs::write(w.fp(), "v3").unwrap();
+    w.run_code(&[], 0);
+    assert_eq!(
+        w.input("repo", 3)["since"],
+        json!({"at": at, "cursor": null})
+    );
+}
+
+#[test]
+fn an_unsettled_run_does_not_advance_the_cursor() {
+    let w = seq_world(&[
+        with_cursor(&[], json!("c1")),
+        with_cursor(&[add("a", "layout", "Queue")], json!("c2")),
+    ]);
+    w.run_code(&[], 0);
+    let settled = w.lock()["collectors"]["repo"].clone();
+    std::fs::write(w.fp(), "v2").unwrap();
+    let outs = [
+        with_cursor(&[], json!("c1")),
+        with_cursor(&[add("a", "layout", "Queue")], json!("c2")),
+    ];
+    w.config(&format!(
+        "{}{}",
+        w.inst(
+            "repo",
+            "col",
+            &format!("scenario = \"seq\", out = {}", q(&outs.join("\n")))
+        ),
+        w.inst("check", "check", "scenario = \"crash\""),
+    ));
+    w.run_code(&[], 5);
+    let entry = &w.lock()["collectors"]["repo"];
+    assert_eq!(entry["unsettled"], true);
+    assert_eq!(entry["cursor"], "c1", "the cursor stays at the settled run");
+    assert_eq!(entry["settled_at"], settled["settled_at"]);
+    w.config(&format!(
+        "{}{}",
+        w.inst(
+            "repo",
+            "col",
+            &format!("scenario = \"seq\", out = {}", q(&outs.join("\n")))
+        ),
+        w.inst("check", "check", "scenario = \"all\", out = \"accept\""),
+    ));
+    w.run_code(&[], 0);
+    assert_eq!(
+        w.input("repo", 3)["since"],
+        json!({"at": settled["settled_at"], "cursor": "c1"}),
+        "the retry reads from the last settled run"
+    );
+    assert_eq!(w.lock()["collectors"]["repo"]["cursor"], "c2");
+}
+
+#[test]
+fn a_params_change_force_or_an_old_entry_reads_everything() {
+    let outs = [with_cursor(&[], json!("c1"))];
+    let w = seq_world(&outs);
+    w.run_code(&[], 0);
+    // A params change drops the cursor.
+    w.config(&format!(
+        "{}{}",
+        w.inst(
+            "repo",
+            "col",
+            &format!("scenario = \"seq\", out = {}", q(&format!(" {}", outs[0])))
+        ),
+        w.inst("check", "check", "scenario = \"all\", out = \"accept\""),
+    ));
+    w.run_code(&[], 0);
+    assert_eq!(w.calls("repo"), 2);
+    assert_eq!(w.input("repo", 2)["since"], Value::Null, "params changed");
+    // `--force` reads everything.
+    w.run_code(&["--force"], 0);
+    assert_eq!(w.input("repo", 3)["since"], Value::Null, "--force");
+    assert_eq!(w.lock()["collectors"]["repo"]["cursor"], "c1");
+    // An entry written before the lock kept the setup: its settled state is unknown.
+    let mut lock = w.lock();
+    lock["collectors"]["repo"]
+        .as_object_mut()
+        .unwrap()
+        .remove("setup");
+    std::fs::write(
+        w.store().join("rrecall.lock"),
+        format!("{}\n", serde_json::to_string_pretty(&lock).unwrap()),
+    )
+    .unwrap();
+    w.commit("old lock", &["rrecall.lock"]);
+    std::fs::write(w.fp(), "v2").unwrap();
+    w.run_code(&[], 0);
+    assert_eq!(w.input("repo", 4)["since"], Value::Null, "old entry");
+}
+
+#[test]
+fn a_cursor_that_looks_like_a_credential_is_not_kept() {
+    let token = format!("ghp_{}", "aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3z5A");
+    let w = seq_world(&[with_cursor(&[], json!({ "t": token }))]);
+    w.run_code(&[], 0);
+    let text = std::fs::read_to_string(w.store().join("rrecall.lock")).unwrap();
+    assert!(!text.contains(&token), "{text}");
+    assert!(w.lock()["collectors"]["repo"].get("cursor").is_none());
+    assert!(w.report().contains("cursor"), "{}", w.report());
+}
+
+#[test]
+fn an_oversized_or_null_cursor_fails_the_output() {
+    let raw = |c: &str| format!(r#"{{"proposals":[],"cursor":{c}}}"#);
+    // Review round 1, finding 6: a number that is no 64-bit integer would not come back as
+    // given, so it fails the output instead.
+    for cursor in [
+        with_cursor(&[], json!("x".repeat(5000))),
+        with_cursor(&[], Value::Null),
+        raw("18446744073709551617"),
+        raw(r#"{"seq": [1.5]}"#),
+        raw("-9223372036854775809"),
+    ] {
+        let w = seq_world(std::slice::from_ref(&cursor));
+        let o = w.run_code(&[], 5);
+        assert!(
+            o.stderr.contains("cursor") && o.stderr.contains("`repo`"),
+            "{cursor}: {}",
+            o.stderr
+        );
+        assert!(w.lock()["collectors"].get("repo").is_none(), "{cursor}");
+    }
+}
+
+#[test]
+fn a_cursor_of_64_bit_integers_comes_back_exactly() {
+    let w = seq_world(&[
+        r#"{"proposals":[],"cursor":[18446744073709551615,-9223372036854775808]}"#.to_string(),
+        props(&[]),
+    ]);
+    w.run_code(&[], 0);
+    std::fs::write(w.fp(), "v2").unwrap();
+    w.run_code(&[], 0);
+    let p = w.rec("repo").with_extension("stdin.2");
+    let stdin = std::fs::read_to_string(&p).unwrap();
+    assert!(
+        stdin.contains(r#""cursor":[18446744073709551615,-9223372036854775808]"#),
+        "{stdin}"
+    );
+}
+
+#[test]
+fn a_fetch_returns_the_cursor_and_gets_since() {
+    let w = W::new();
+    fetching(&w);
+    let r = json!({"output": {"proposals": []}, "cost_usd": 0.0, "model": "fake-1"});
+    w.config(&format!(
+        "{}{}",
+        w.inst(
+            "writer",
+            "fetching",
+            "out = '{\"cursor\": {\"n\": 7}, \"pulls\": []}'"
+        ),
+        w.inst("runner", "runner", &format!("out = {}", q(&r.to_string()))),
+    ));
+    w.run_code(&[], 0);
+    assert_eq!(w.input("writer", 1)["since"], Value::Null);
+    assert_eq!(w.input("runner", 1)["input"]["since"], Value::Null);
+    assert_eq!(w.lock()["collectors"]["writer"]["cursor"], json!({"n": 7}));
+    let at = w.lock()["collectors"]["writer"]["settled_at"].clone();
+    std::fs::write(w.fp(), "v2").unwrap();
+    w.run_code(&[], 0);
+    let since = json!({"at": at, "cursor": {"n": 7}});
+    assert_eq!(w.input("writer", 2)["since"], since);
+    assert_eq!(w.input("runner", 2)["input"]["since"], since);
+    // A prompt change makes the next read full.
+    std::fs::write(
+        w.store().join("plugins/fetching/p.md"),
+        "Propose changes, citing lines.\n",
+    )
+    .unwrap();
+    w.run_code(&[], 0);
+    assert_eq!(w.input("writer", 3)["since"], Value::Null, "prompt changed");
+    assert_eq!(w.input("runner", 3)["input"]["since"], Value::Null);
+}
+
+#[test]
+fn a_fetch_cursor_of_an_unsettled_run_is_not_kept() {
+    // Review round 1, finding 8: a judge that fails, and a runner call the budget refuses.
+    for failing in ["judge", "budget"] {
+        let w = W::new();
+        fetching(&w);
+        let writer = w.inst(
+            "writer",
+            "fetching",
+            &format!(
+                "scenario = \"seq\", out = {}",
+                q("{\"cursor\": {\"n\": 1}}\n{\"cursor\": {\"n\": 2}}")
+            ),
+        );
+        let quiet = json!({"output": {"proposals": []}, "cost_usd": 0.0, "model": "fake-1"});
+        let quiet = w.inst(
+            "runner",
+            "runner",
+            &format!("out = {}", q(&quiet.to_string())),
+        );
+        w.config(&format!("{writer}{quiet}"));
+        w.run_code(&[], 0);
+        let settled = w.lock()["collectors"]["writer"].clone();
+        assert_eq!(settled["cursor"], json!({"n": 1}));
+        std::fs::write(w.fp(), "v2").unwrap();
+        let busy =
+            json!({"output": {"proposals": [note_add()]}, "cost_usd": 0.6, "model": "fake-1"});
+        let busy = w.inst(
+            "runner",
+            "runner",
+            &format!("out = {}", q(&busy.to_string())),
+        );
+        w.config(&match failing {
+            "judge" => format!(
+                "{writer}{busy}{}",
+                w.inst("judge", "judge", "scenario = \"crash\"")
+            ),
+            _ => format!(
+                "max_cost_usd = 0.5\n{writer}{busy}{}",
+                w.inst("pjudge", "pjudge", "")
+            ),
+        });
+        w.run_code(&[], 5);
+        assert_eq!(w.input("writer", 2)["since"]["cursor"], json!({"n": 1}));
+        let entry = &w.lock()["collectors"]["writer"];
+        assert_eq!(entry["unsettled"], true, "{failing}");
+        assert_eq!(
+            entry["cursor"],
+            json!({"n": 1}),
+            "{failing}: the fetch's newer cursor"
+        );
+        assert_eq!(entry["settled_at"], settled["settled_at"], "{failing}");
+        w.config(&format!("{writer}{quiet}"));
+        w.run_code(&[], 0);
+        let since = json!({"at": settled["settled_at"], "cursor": {"n": 1}});
+        assert_eq!(w.input("writer", 3)["since"], since, "{failing}: the retry");
+    }
+}
+
+#[test]
+fn round_two_gets_the_same_since_and_round_ones_cursor_is_kept() {
+    let w = world(&props(&[]));
+    let outs = [
+        with_cursor(&[], json!("c0")),
+        with_cursor(&[add("a", "layout", "Queue")], json!("c1")),
+        with_cursor(&[add("a", "layout", "Queue")], json!("c2")),
+    ];
+    let repo = w.inst(
+        "repo",
+        "col",
+        &format!("scenario = \"seq\", out = {}", q(&outs.join("\n"))),
+    );
+    w.config(&format!(
+        "max_rounds = 2\n{repo}{}",
+        w.inst("check", "check", "scenario = \"all\", out = \"accept\"")
+    ));
+    w.run_code(&[], 0);
+    let at = w.lock()["collectors"]["repo"]["settled_at"].clone();
+    std::fs::write(w.fp(), "v2").unwrap();
+    w.config(&format!(
+        "max_rounds = 2\n{repo}{}",
+        w.inst("check", "check", "scenario = \"all\", out = \"revise\"")
+    ));
+    w.run(&[]);
+    assert_eq!(w.calls("repo"), 3, "round 2 ran");
+    assert_eq!(w.input("repo", 3)["round"], 2);
+    let since = json!({"at": at, "cursor": "c0"});
+    assert_eq!(w.input("repo", 2)["since"], since);
+    assert_eq!(
+        w.input("repo", 3)["since"],
+        since,
+        "round 2: the same since"
+    );
+    assert_eq!(
+        w.lock()["collectors"]["repo"]["cursor"],
+        "c1",
+        "round 2's cursor is ignored"
+    );
 }

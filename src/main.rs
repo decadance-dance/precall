@@ -69,6 +69,8 @@ enum Cmd {
         #[arg(long)]
         no_wait: bool,
     },
+    /// Render the HTML view of the map and open it.
+    Open,
     /// The last run and its result.
     Status {
         #[arg(long)]
@@ -154,6 +156,7 @@ fn main() -> ExitCode {
             },
         ),
         Cmd::Status { json } => commands::status(p, *json),
+        Cmd::Open => commands::open_page(p),
         Cmd::Note { id, text } => commands::note(p, id, text),
         Cmd::Rm {
             id,
