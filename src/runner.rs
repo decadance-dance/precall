@@ -116,7 +116,7 @@ pub fn run(id: &str, stdin: &str) -> Result<String> {
         Agent::Claude => access_from_env()?,
         Agent::Codex => Access::default(),
     };
-    let scratch = Scratch::create()?;
+    let scratch = Scratch::create(input.timeout)?;
     let dir = &scratch.0;
     let launch = match agent {
         Agent::Claude => claude_launch(&input, dir, &access)?,
@@ -303,34 +303,25 @@ fn is_mcp_tool(name: &str) -> bool {
 }
 
 /// A fresh owner-only config dir in the scratch dir, so none of the user's CLAUDE.md, settings,
-/// permission rules, hooks or local plugins and MCP servers load, while the login stays the
-/// user's, never copied: on macOS the keychain entry is named after
-/// `CLAUDE_SECURESTORAGE_CONFIG_DIR` (empty for the default `~/.claude` entry), elsewhere the
-/// login is the user's `.credentials.json`, linked in as the codex runner links `auth.json`.
+/// permission rules, hooks or local plugins and MCP servers load. The login stays the user's:
+/// Claude Code reads it (the macOS keychain entry, or `.credentials.json` elsewhere) from
+/// `CLAUDE_SECURESTORAGE_CONFIG_DIR`, set to the user's own config dir (empty for the default
+/// `~/.claude`), and refreshes it there in place as any session does; nothing is copied or linked.
+// limit: a relative `CLAUDE_CONFIG_DIR` is made absolute against the runner's working dir; if
+// Claude Code names a keychain entry after the relative text, the call fails as not logged in.
 fn claude_config(dir: &Path) -> Result<Vec<(String, String)>> {
-    let user = std::env::var("CLAUDE_CONFIG_DIR")
-        .ok()
-        .filter(|d| !d.is_empty());
-    let real = match &user {
-        Some(d) => PathBuf::from(d),
-        None => PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join(".claude"),
+    let user = match std::env::var_os("CLAUDE_CONFIG_DIR").filter(|d| !d.is_empty()) {
+        Some(d) => utf8(&std::path::absolute(PathBuf::from(d))?)?.to_string(),
+        None => String::new(),
     };
     let config = dir.join("claude-config");
     fs::DirBuilder::new()
         .mode(0o700)
         .create(&config)
         .with_context(|| format!("{}", config.display()))?;
-    let login = real.join(".credentials.json");
-    if login.is_file() {
-        std::os::unix::fs::symlink(&login, config.join(".credentials.json"))
-            .with_context(|| format!("{}", config.display()))?;
-    }
     Ok(vec![
         ("CLAUDE_CONFIG_DIR".into(), utf8(&config)?.into()),
-        (
-            "CLAUDE_SECURESTORAGE_CONFIG_DIR".into(),
-            user.unwrap_or_default(),
-        ),
+        ("CLAUDE_SECURESTORAGE_CONFIG_DIR".into(), user),
     ])
 }
 
@@ -368,7 +359,13 @@ fn claude_launch(input: &RunnerInput, dir: &Path, access: &Access) -> Result<Lau
     } else {
         args.push("--safe-mode".into());
     }
-    let allowed = [TOOLS.to_string()]
+    // With tool search the connectors' tool schemas are deferred: ToolSearch loads them.
+    let tools = if access.connectors {
+        format!("{TOOLS},ToolSearch")
+    } else {
+        TOOLS.to_string()
+    };
+    let allowed = [tools.clone()]
         .into_iter()
         .chain(access.tools.iter().cloned())
         .collect::<Vec<_>>()
@@ -380,7 +377,7 @@ fn claude_launch(input: &RunnerInput, dir: &Path, access: &Access) -> Result<Lau
             "stream-json",
             "--verbose",
             "--tools",
-            TOOLS,
+            &tools,
             "--allowedTools",
             &allowed,
             "--permission-mode",
@@ -451,20 +448,29 @@ fn utf8(p: &Path) -> Result<&str> {
 /// source text, so the dir is the user's alone.
 struct Scratch(PathBuf);
 
+/// A scratch dir's name: the prefix, the Unix time after which no call can still use it (the
+/// core kills the runner at its caller's timeout), and a random part.
+const SCRATCH_PREFIX: &str = "rrecall-agent-";
+
 impl Scratch {
-    fn create() -> Result<Scratch> {
-        let dir = std::env::temp_dir().join(format!(
-            "rrecall-runner-{}-{}",
-            std::process::id(),
-            uuid_v4()
-        ));
+    fn create(timeout: u64) -> Result<Scratch> {
+        let tmp = std::env::temp_dir();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        sweep(&tmp, now);
+        let expires = now.saturating_add(timeout).saturating_add(60);
+        let dir = tmp.join(format!("{SCRATCH_PREFIX}{expires}-{}", uuid_v4()));
         // Created with its mode in one step, and never an existing dir (the temp dir is shared).
         fs::DirBuilder::new()
             .mode(0o700)
             .create(&dir)
             .with_context(|| format!("creating {}", dir.display()))?;
+        // Removed again by `Drop` when a step below fails.
+        let mut scratch = Scratch(dir);
+        strip_acl(&scratch.0)?;
         // The sandboxes match real paths (macOS `/var` is `/private/var`).
-        let scratch = Scratch(fs::canonicalize(&dir)?);
+        scratch.0 = fs::canonicalize(&scratch.0)?;
         if let Some(repo) = scratch.0.ancestors().find(|a| a.join(".git").exists()) {
             bail!(
                 "the runner's temp dir {} is inside the git repository {}: set TMPDIR outside it",
@@ -473,6 +479,61 @@ impl Scratch {
             );
         }
         Ok(scratch)
+    }
+}
+
+/// On macOS an ACL the temp dir passes on is independent of the mode and could let other users
+/// read the call's files: the scratch dir drops it before anything is created inside, so
+/// nothing inside inherits one either.
+#[cfg(target_os = "macos")]
+fn strip_acl(dir: &Path) -> Result<()> {
+    let ok = Command::new("/bin/chmod")
+        .arg("-N")
+        .arg(dir)
+        .stdin(Stdio::null())
+        .status()
+        .with_context(|| format!("removing the ACL of {}", dir.display()))?
+        .success();
+    if !ok {
+        bail!("could not remove the ACL of {}", dir.display());
+    }
+    Ok(())
+}
+
+// Linux: a default (inherited) POSIX ACL's entries are masked by the mode's group bits, which
+// 0700 and 0600 clear.
+#[cfg(not(target_os = "macos"))]
+fn strip_acl(_: &Path) -> Result<()> {
+    Ok(())
+}
+
+/// Removes the scratch dirs of calls killed before their own cleanup ran (the runner's `Drop`
+/// never runs on SIGKILL): only dirs of this user, named with the prefix, whose time is past;
+/// a link is never followed.
+// limit: such a dir, with the agent's session and connector state, stays until the next runner
+// call on this machine starts after its time.
+fn sweep(tmp: &Path, now: u64) {
+    let uid = unsafe { libc::getuid() };
+    let Ok(entries) = fs::read_dir(tmp) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let expired = name
+            .to_str()
+            .and_then(|n| n.strip_prefix(SCRATCH_PREFIX))
+            .and_then(|rest| rest.split_once('-'))
+            .and_then(|(t, _)| t.parse::<u64>().ok())
+            .is_some_and(|t| t < now);
+        if !expired {
+            continue;
+        }
+        if let Ok(m) = fs::symlink_metadata(e.path())
+            && m.is_dir()
+            && std::os::unix::fs::MetadataExt::uid(&m) == uid
+        {
+            let _ = fs::remove_dir_all(e.path());
+        }
     }
 }
 

@@ -104,6 +104,22 @@ impl T {
         }
     }
 
+    /// Gives the temp dir an ACL that every dir and file created in it inherits, readable by
+    /// everyone (macOS ACLs are independent of the mode).
+    #[cfg(target_os = "macos")]
+    fn inheritable_acl(&self) {
+        let ok = Command::new("/bin/chmod")
+            .args([
+                "+a",
+                "group:everyone allow list,search,readattr,read,file_inherit,directory_inherit",
+            ])
+            .arg(self.root.join("tmp"))
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+    }
+
     fn rec(&self, name: &str) -> String {
         std::fs::read_to_string(self.root.join("home/agent").join(name))
             .unwrap_or_else(|e| panic!("{name}: {e}"))
@@ -467,8 +483,30 @@ fn a_record_torn_by_the_kill_does_not_lose_the_wrap_up() {
 #[test]
 fn the_scratch_dir_and_its_files_are_owner_only() {
     let t = T::new("perms", r#"{"texts":{}}"#);
+    #[cfg(target_os = "macos")]
+    t.inheritable_acl();
     json_of(&t.call("claude", "m", 60, None));
-    assert_eq!(t.rec("claude.perms"), "drwx------\n-rw-------\n");
+    // No ACL flag and no ACL entry, also under a temp dir whose ACL everything inherits.
+    assert_eq!(t.rec("claude.perms"), "drwx------ \n-rw------- \n0\n");
+}
+
+#[test]
+fn a_call_removes_the_expired_scratch_dirs_of_killed_calls_only() {
+    let t = T::new("ok", r#"{"texts":{}}"#);
+    let tmp = t.root.join("tmp");
+    let expired = tmp.join("rrecall-agent-1-0a1b");
+    let running = tmp.join("rrecall-agent-99999999999-0a1b");
+    let other = tmp.join("rrecall-runner-1-0a1b");
+    for d in [&expired, &running, &other] {
+        std::fs::create_dir_all(d.join("claude-config")).unwrap();
+    }
+    // A link with the prefix is never followed.
+    let target = t.root.join("keep");
+    std::fs::create_dir_all(&target).unwrap();
+    std::os::unix::fs::symlink(&target, tmp.join("rrecall-agent-2-link")).unwrap();
+    assert!(t.call("claude", "m", 60, None).ok);
+    assert!(!expired.exists());
+    assert!(running.exists() && other.exists() && target.exists());
 }
 
 #[test]
@@ -487,8 +525,10 @@ fn claude_with_connectors_runs_in_a_fresh_config_dir_without_hooks_and_allows_on
     // The user's own config dir, with a login file and a CLAUDE.md that must not load.
     let real = t.root.join("home/real-config");
     std::fs::create_dir_all(&real).unwrap();
-    std::fs::write(real.join(".credentials.json"), "{}").unwrap();
+    std::fs::write(real.join(".credentials.json"), r#"{"token":"t1"}"#).unwrap();
     std::fs::write(real.join("CLAUDE.md"), "user instructions").unwrap();
+    #[cfg(target_os = "macos")]
+    t.inheritable_acl();
     let o = t.call_with(
         "claude",
         "default",
@@ -506,10 +546,11 @@ fn claude_with_connectors_runs_in_a_fresh_config_dir_without_hooks_and_allows_on
     assert_eq!(after(&argv, "--setting-sources"), "user");
     assert!(argv.iter().any(|a| a == "--disable-slash-commands"));
     assert_eq!(after(&argv, "--settings"), r#"{"disableAllHooks":true}"#);
-    assert_eq!(after(&argv, "--tools"), "Read,Grep,Glob");
+    // ToolSearch loads the deferred schemas of the connectors' tools.
+    assert_eq!(after(&argv, "--tools"), "Read,Grep,Glob,ToolSearch");
     assert_eq!(
         after(&argv, "--allowedTools"),
-        "Read,Grep,Glob,mcp__claude_ai_Slack__slack_read_channel,mcp__claude_ai_Slack__slack_read_thread"
+        "Read,Grep,Glob,ToolSearch,mcp__claude_ai_Slack__slack_read_channel,mcp__claude_ai_Slack__slack_read_thread"
     );
     assert_eq!(after(&argv, "--permission-mode"), "dontAsk");
     let env = t.rec("claude.env.1");
@@ -530,13 +571,14 @@ fn claude_with_connectors_runs_in_a_fresh_config_dir_without_hooks_and_allows_on
     assert_eq!(config, format!("{}/claude-config", cwd.trim()), "{env}");
     let secure = format!("CLAUDE_SECURESTORAGE_CONFIG_DIR={}", real.display());
     assert!(env.lines().any(|l| l == secure), "{env}");
-    assert_eq!(
-        t.rec("claude.config"),
-        format!("drwx------\n{}\n", real.join(".credentials.json").display())
-    );
+    // Owner-only with no ACL, and empty: Claude Code reads (and refreshes) the login in
+    // CLAUDE_SECURESTORAGE_CONFIG_DIR, so nothing is copied or linked into it.
+    assert_eq!(t.rec("claude.config"), "drwx------ \n0\n");
     t.no_scratch_left();
-    // Removing the call's dir removed the link, not the user's login.
-    assert!(real.join(".credentials.json").is_file());
+    assert_eq!(
+        std::fs::read_to_string(real.join(".credentials.json")).unwrap(),
+        r#"{"token":"t1"}"#
+    );
 }
 
 #[test]
@@ -590,4 +632,26 @@ fn claude_tools_must_be_exact_mcp_tool_names_and_need_connectors() {
         assert!(o.stderr.contains("param `"), "{tools}: {}", o.stderr);
         assert!(!t.root.join("home/agent/claude.calls").exists(), "{tools}");
     }
+}
+
+#[test]
+fn a_relative_claude_config_dir_reaches_the_agent_as_an_absolute_path() {
+    let t = T::new("ok", r#"{"texts":{}}"#);
+    let o = t.call_with(
+        "claude",
+        "m",
+        60,
+        None,
+        &[
+            ("RRECALL_PARAM_CONNECTORS", "true".into()),
+            ("CLAUDE_CONFIG_DIR", "rel/config".into()),
+        ],
+    );
+    assert!(o.ok, "{}", o.stderr);
+    // The runner runs in the test's working dir, the crate root.
+    let want = format!(
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR={}/rel/config",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    assert!(t.rec("claude.env.1").lines().any(|l| l == want));
 }

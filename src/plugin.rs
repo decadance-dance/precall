@@ -1548,11 +1548,18 @@ repo = ""
                 .map(|_| ())
                 .map_err(|e| format!("{e:#}"))
         };
-        for empty in ["", "channels = [], dms = []"] {
+        for empty in [
+            "",
+            "channels = [], dms = []",
+            "channels = [\"\"]",
+            "channels = [\"  \"]",
+            "dms = [42]",
+            "channels = [\"eng\"], dms = [42]",
+        ] {
             let e = load(empty).unwrap_err();
             assert!(
-                e.contains("`slack`") && e.contains("`channels` or `dms`"),
-                "{e}"
+                e.contains("`slack`") && (e.contains("`channels`") || e.contains("`dms`")),
+                "{empty}: {e}"
             );
         }
         load("channels = [\"eng-platform\"]").unwrap();
