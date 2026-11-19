@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -116,7 +116,7 @@ pub fn run(id: &str, stdin: &str) -> Result<String> {
         Agent::Claude => access_from_env()?,
         Agent::Codex => Access::default(),
     };
-    let scratch = Scratch::create(input.timeout)?;
+    let scratch = Scratch::create()?;
     let dir = &scratch.0;
     let launch = match agent {
         Agent::Claude => claude_launch(&input, dir, &access)?,
@@ -442,33 +442,28 @@ fn utf8(p: &Path) -> Result<&str> {
         .with_context(|| format!("path is not UTF-8: {}", p.display()))
 }
 
-/// A call's own working dir in the system temp dir, removed when the call ends: outside the
-/// map store, so the agent cannot read the map by a relative path, and outside any git
-/// repository, so it loads no project's instruction files. The agent's session log there holds
-/// source text, so the dir is the user's alone.
+/// A call's own working dir in the runners' private dir in the system temp dir, removed when
+/// the call ends: outside the map store, so the agent cannot read the map by a relative path,
+/// and outside any git repository, so it loads no project's instruction files. The agent's
+/// session log there holds source text, so the dir is the user's alone.
 struct Scratch(PathBuf);
 
-/// A scratch dir's name: the prefix, the Unix time after which no call can still use it (the
-/// core kills the runner at its caller's timeout), and a random part.
-const SCRATCH_PREFIX: &str = "rrecall-agent-";
+/// A scratch dir's name: the prefix, the pid of the runner that made it, and a random part.
+const SCRATCH_PREFIX: &str = "agent-";
 
 impl Scratch {
-    fn create(timeout: u64) -> Result<Scratch> {
-        let tmp = std::env::temp_dir();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
-        sweep(&tmp, now);
-        let expires = now.saturating_add(timeout).saturating_add(60);
-        let dir = tmp.join(format!("{SCRATCH_PREFIX}{expires}-{}", uuid_v4()));
-        // Created with its mode in one step, and never an existing dir (the temp dir is shared).
+    fn create() -> Result<Scratch> {
+        let private = private_dir()?;
+        sweep(&private);
+        let name = format!("{SCRATCH_PREFIX}{}-{}", std::process::id(), uuid_v4());
+        let dir = private.join(name);
+        // Created with its mode in one step, and never an existing dir.
         fs::DirBuilder::new()
             .mode(0o700)
             .create(&dir)
             .with_context(|| format!("creating {}", dir.display()))?;
         // Removed again by `Drop` when a step below fails.
         let mut scratch = Scratch(dir);
-        strip_acl(&scratch.0)?;
         // The sandboxes match real paths (macOS `/var` is `/private/var`).
         scratch.0 = fs::canonicalize(&scratch.0)?;
         if let Some(repo) = scratch.0.ancestors().find(|a| a.join(".git").exists()) {
@@ -482,9 +477,32 @@ impl Scratch {
     }
 }
 
+/// `rrecall-<uid>` in the temp dir, which every scratch dir lives in and the sweep looks in
+/// alone: made owner-only, and refused when it is not a dir of this user that only they reach,
+/// since the temp dir is shared.
+fn private_dir() -> Result<PathBuf> {
+    let uid = unsafe { libc::getuid() };
+    let dir = std::env::temp_dir().join(format!("rrecall-{uid}"));
+    match fs::DirBuilder::new().mode(0o700).create(&dir) {
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => {
+            return Err(e).with_context(|| format!("creating {}", dir.display()));
+        }
+        _ => {}
+    }
+    let m = fs::symlink_metadata(&dir).with_context(|| format!("{}", dir.display()))?;
+    if !m.is_dir() || m.uid() != uid || m.mode() & 0o077 != 0 {
+        bail!(
+            "{} must be a dir that only this user owns and reaches (mode 0700): remove it",
+            dir.display()
+        );
+    }
+    strip_acl(&dir)?;
+    Ok(dir)
+}
+
 /// On macOS an ACL the temp dir passes on is independent of the mode and could let other users
-/// read the call's files: the scratch dir drops it before anything is created inside, so
-/// nothing inside inherits one either.
+/// read the call's files: the private dir drops it before a scratch dir is created inside, so
+/// nothing inside inherits one.
 #[cfg(target_os = "macos")]
 fn strip_acl(dir: &Path) -> Result<()> {
     let ok = Command::new("/bin/chmod")
@@ -507,34 +525,41 @@ fn strip_acl(_: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Removes the scratch dirs of calls killed before their own cleanup ran (the runner's `Drop`
-/// never runs on SIGKILL): only dirs of this user, named with the prefix, whose time is past;
-/// a link is never followed.
-// limit: such a dir, with the agent's session and connector state, stays until the next runner
-// call on this machine starts after its time.
-fn sweep(tmp: &Path, now: u64) {
-    let uid = unsafe { libc::getuid() };
-    let Ok(entries) = fs::read_dir(tmp) else {
+/// Removes the scratch dirs of runners killed before their own cleanup ran (`Drop` never runs
+/// on SIGKILL): only entries with the exact name form whose runner pid no longer exists. Only
+/// this user can add one to the private dir, and `remove_dir_all` never follows a link.
+// limit: a dead runner's pid reused by a live process keeps its dir until that process ends;
+// a dir whose runner was killed while its agent lives on is removed under that agent, whose
+// answer nobody reads any more.
+fn sweep(private: &Path) {
+    let Ok(entries) = fs::read_dir(private) else {
         return;
     };
     for e in entries.flatten() {
-        let name = e.file_name();
-        let expired = name
-            .to_str()
-            .and_then(|n| n.strip_prefix(SCRATCH_PREFIX))
-            .and_then(|rest| rest.split_once('-'))
-            .and_then(|(t, _)| t.parse::<u64>().ok())
-            .is_some_and(|t| t < now);
-        if !expired {
+        let Some(pid) = e.file_name().to_str().and_then(scratch_pid) else {
             continue;
-        }
-        if let Ok(m) = fs::symlink_metadata(e.path())
-            && m.is_dir()
-            && std::os::unix::fs::MetadataExt::uid(&m) == uid
-        {
+        };
+        // SAFETY: signal 0 only checks that the process exists.
+        let gone = unsafe { libc::kill(pid, 0) } == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        if gone {
             let _ = fs::remove_dir_all(e.path());
         }
     }
+}
+
+/// The runner pid of a name made by `Scratch::create`, `None` for any other name.
+fn scratch_pid(name: &str) -> Option<libc::pid_t> {
+    let (pid, id) = name.strip_prefix(SCRATCH_PREFIX)?.split_once('-')?;
+    let hex =
+        |s: &str, n| s.len() == n && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    let parts: Vec<&str> = id.split('-').collect();
+    let uuid = parts.len() == 5 && parts.iter().zip([8, 4, 4, 4, 12]).all(|(p, n)| hex(p, n));
+    let pid = pid
+        .parse::<libc::pid_t>()
+        .ok()
+        .filter(|p| *p > 0 && p.to_string() == pid)?;
+    uuid.then_some(pid)
 }
 
 impl Drop for Scratch {
@@ -932,6 +957,23 @@ mod tests {
                 .to_string()
                 .contains("duplicate key")
         );
+    }
+
+    #[test]
+    fn only_a_generated_scratch_name_yields_a_pid() {
+        let id = uuid_v4();
+        assert_eq!(scratch_pid(&format!("agent-42-{id}")), Some(42));
+        for other in [
+            "agent-1-project-notes".to_string(),
+            format!("agent-042-{id}"),
+            format!("agent-0-{id}"),
+            format!("agent--1-{id}"),
+            format!("agent-1-{id}-x"),
+            format!("agent-1-{}", id.to_uppercase()),
+            format!("rrecall-agent-1-{id}"),
+        ] {
+            assert_eq!(scratch_pid(&other), None, "{other}");
+        }
     }
 
     #[test]

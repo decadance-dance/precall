@@ -55,6 +55,26 @@ impl T {
         prices: Option<&str>,
         env: &[(&str, String)],
     ) -> Out {
+        let o = self
+            .spawn_with(id, model, timeout, prices, env)
+            .wait_with_output()
+            .unwrap();
+        Out {
+            ok: o.status.success(),
+            stdout: String::from_utf8(o.stdout).unwrap(),
+            stderr: String::from_utf8(o.stderr).unwrap(),
+        }
+    }
+
+    /// `call_with` without waiting for the runner, which is the returned child itself.
+    fn spawn_with(
+        &self,
+        id: &str,
+        model: &str,
+        timeout: u64,
+        prices: Option<&str>,
+        env: &[(&str, String)],
+    ) -> std::process::Child {
         let path = format!(
             "{}/tests/fixtures/bin:{}",
             env!("CARGO_MANIFEST_DIR"),
@@ -96,12 +116,7 @@ impl T {
             .unwrap()
             .write_all(input.to_string().as_bytes())
             .unwrap();
-        let o = child.wait_with_output().unwrap();
-        Out {
-            ok: o.status.success(),
-            stdout: String::from_utf8(o.stdout).unwrap(),
-            stderr: String::from_utf8(o.stderr).unwrap(),
-        }
+        child
     }
 
     /// Gives the temp dir an ACL that every dir and file created in it inherits, readable by
@@ -129,13 +144,21 @@ impl T {
         self.rec(name).lines().map(String::from).collect()
     }
 
-    /// The scratch dir of each call (in `TMPDIR`) is gone after it.
+    /// The runners' private dir in `TMPDIR`.
+    fn private(&self) -> PathBuf {
+        let uid = std::os::unix::fs::MetadataExt::uid(&std::fs::metadata(&self.root).unwrap());
+        self.root.join(format!("tmp/rrecall-{uid}"))
+    }
+
+    /// The scratch dir of each call (in the private dir in `TMPDIR`) is gone after it.
     fn no_scratch_left(&self) {
-        let left: Vec<_> = std::fs::read_dir(self.root.join("tmp"))
-            .unwrap()
-            .flatten()
-            .map(|e| e.file_name())
-            .collect();
+        let names = |p: PathBuf| -> Vec<_> {
+            let names = std::fs::read_dir(p).unwrap().flatten();
+            names.map(|e| e.file_name()).collect()
+        };
+        let private = self.private();
+        assert_eq!(names(self.root.join("tmp")), [private.file_name().unwrap()]);
+        let left = names(private);
         assert!(left.is_empty(), "{left:?}");
     }
 }
@@ -486,27 +509,94 @@ fn the_scratch_dir_and_its_files_are_owner_only() {
     #[cfg(target_os = "macos")]
     t.inheritable_acl();
     json_of(&t.call("claude", "m", 60, None));
-    // No ACL flag and no ACL entry, also under a temp dir whose ACL everything inherits.
-    assert_eq!(t.rec("claude.perms"), "drwx------\n-rw-------\nacl=0\n");
+    // The private dir and the scratch dir in it: no ACL flag and no ACL entry, also under a temp
+    // dir whose ACL everything inherits.
+    assert_eq!(
+        t.rec("claude.perms"),
+        "drwx------\ndrwx------\n-rw-------\nacl=0\n"
+    );
 }
 
 #[test]
-fn a_call_removes_the_expired_scratch_dirs_of_killed_calls_only() {
-    let t = T::new("ok", r#"{"texts":{}}"#);
-    let tmp = t.root.join("tmp");
-    let expired = tmp.join("rrecall-agent-1-0a1b");
-    let running = tmp.join("rrecall-agent-99999999999-0a1b");
-    let other = tmp.join("rrecall-runner-1-0a1b");
-    for d in [&expired, &running, &other] {
-        std::fs::create_dir_all(d.join("claude-config")).unwrap();
+fn a_call_removes_only_the_scratch_dirs_of_calls_whose_runner_is_gone() {
+    // Call 1 hangs in its agent; calls 2 and 3 share its TMPDIR.
+    let t = T::new("sleep-always", "{}");
+    let mut first = t.spawn_with("claude", "m", 60, None, &[]);
+    let cwd = t.root.join("home/agent/claude.cwd.1");
+    for _ in 0..200 {
+        if cwd.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    // A link with the prefix is never followed.
+    let running = PathBuf::from(std::fs::read_to_string(&cwd).unwrap().trim());
+    let private = std::fs::canonicalize(t.private()).unwrap();
+    assert_eq!(running.parent(), Some(private.as_path()));
+    // Look-alikes with a dead pid, in TMPDIR and in the private dir, and a link with the exact
+    // name form.
+    let mut done = Command::new("true").spawn().unwrap();
+    done.wait().unwrap();
+    let dead = done.id();
+    let tmp = t.root.join("tmp");
+    let looks = [
+        tmp.join(format!("rrecall-agent-{dead}-project-notes")),
+        private.join(format!("agent-{dead}-project-notes")),
+        private.join(format!("agent-{dead}-0a1b2c3d-0000-4000-8000-00000000000g")),
+    ];
+    for d in &looks {
+        std::fs::create_dir_all(d).unwrap();
+        std::fs::write(d.join("note"), "keep").unwrap();
+    }
     let target = t.root.join("keep");
     std::fs::create_dir_all(&target).unwrap();
-    std::os::unix::fs::symlink(&target, tmp.join("rrecall-agent-2-link")).unwrap();
-    assert!(t.call("claude", "m", 60, None).ok);
-    assert!(!expired.exists());
-    assert!(running.exists() && other.exists() && target.exists());
+    let link = private.join(format!("agent-{dead}-0a1b2c3d-0000-4000-8000-000000000000"));
+    std::os::unix::fs::symlink(&target, link).unwrap();
+    let other = T::new("ok", r#"{"texts":{}}"#);
+    let shared = [("TMPDIR", tmp.to_string_lossy().into())];
+    assert!(other.call_with("claude", "m", 60, None, &shared).ok);
+    assert!(running.exists());
+    // Killed, the runner leaves its dir behind; the next call removes it, and nothing else.
+    first.kill().unwrap();
+    first.wait().unwrap();
+    if let Ok(p) = std::fs::read_to_string(t.root.join("home/agent/claude.pid.1")) {
+        let _ = Command::new("kill").arg(p.trim()).status();
+    }
+    assert!(running.exists());
+    assert!(other.call_with("claude", "m", 60, None, &shared).ok);
+    assert!(!running.exists());
+    for d in &looks {
+        assert!(d.join("note").exists(), "{}", d.display());
+    }
+    assert!(target.exists());
+}
+
+#[test]
+fn a_private_runner_dir_that_others_could_reach_is_refused() {
+    let t = T::new("ok", r#"{"texts":{}}"#);
+    let private = t.private();
+    std::fs::create_dir(&private).unwrap();
+    std::fs::set_permissions(
+        &private,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let o = t.call("claude", "m", 60, None);
+    assert!(
+        !o.ok && o.stderr.contains(&private.display().to_string()),
+        "{}",
+        o.stderr
+    );
+    assert!(!t.root.join("home/agent/claude.calls").exists());
+    // Nor a link in its place.
+    std::fs::remove_dir(&private).unwrap();
+    std::os::unix::fs::symlink(t.root.join("home"), &private).unwrap();
+    let o = t.call("claude", "m", 60, None);
+    assert!(
+        !o.ok && o.stderr.contains(&private.display().to_string()),
+        "{}",
+        o.stderr
+    );
+    assert!(!t.root.join("home/agent/claude.calls").exists());
 }
 
 #[test]
