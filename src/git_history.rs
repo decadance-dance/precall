@@ -95,51 +95,47 @@ struct Tag {
     name: String,
     /// The tagged commit.
     commit: String,
+    /// Seconds since the epoch: tags of one day keep their order.
+    time: i64,
     date: String,
     /// The annotation without its signature; empty for a lightweight tag.
     notes: String,
 }
 
-/// The tags whose commit is on `branch`, oldest first (then by name).
+/// The tags whose commit is on `branch`, oldest first (then by name), from one git call.
 fn tags(dir: &Path, branch: &str) -> Result<Vec<Tag>> {
     let merged = format!("--merged={branch}");
+    // Each record ends with NUL and a newline; notes hold newlines but never NUL.
     let list = git(
         dir,
         &[
             "for-each-ref",
             &merged,
-            "--format=%(refname:strip=2)%00%(objecttype)%00%(objectname)%00%(*objectname)%00%(creatordate:short)",
+            "--format=%(refname:strip=2)%00%(objecttype)%00%(objectname)%00%(*objectname)%00%(creatordate:unix)%00%(creatordate:short)%00%(contents:subject)%0a%0a%(contents:body)%00",
             "refs/tags",
         ],
     )?;
     let mut tags = Vec::new();
-    for line in list.lines() {
-        let f: Vec<&str> = line.split('\0').collect();
-        let [name, kind, obj, peeled, date] = f[..] else {
-            bail!("git for-each-ref printed an unexpected line");
+    for rec in list.split("\0\n").filter(|r| !r.trim().is_empty()) {
+        let f: Vec<&str> = rec.split('\0').collect();
+        let [name, kind, obj, peeled, unix, date, notes] = f[..] else {
+            bail!("git for-each-ref printed an unexpected record");
         };
+        // A lightweight tag's contents are its commit's message, not release notes.
         let (commit, notes) = if kind == "tag" {
-            let r = format!("refs/tags/{name}");
-            let notes = git(
-                dir,
-                &[
-                    "for-each-ref",
-                    "--format=%(contents:subject)%0a%0a%(contents:body)",
-                    &r,
-                ],
-            )?;
-            (peeled, notes.trim().to_string())
+            (peeled, notes.trim())
         } else {
-            (obj, String::new())
+            (obj, "")
         };
         tags.push(Tag {
             name: name.to_string(),
             commit: commit.to_string(),
+            time: unix.parse().unwrap_or(0),
             date: date.to_string(),
-            notes,
+            notes: notes.to_string(),
         });
     }
-    tags.sort_by(|a, b| (&a.date, &a.name).cmp(&(&b.date, &b.name)));
+    tags.sort_by(|a, b| (a.time, &a.name).cmp(&(b.time, &b.name)));
     Ok(tags)
 }
 

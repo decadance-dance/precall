@@ -167,6 +167,11 @@ impl W {
 }
 
 fn git_in(dir: &Path, args: &[&str]) -> String {
+    git_at(dir, "2026-03-04T05:06:07Z", args)
+}
+
+/// `git args` in `dir` with author and committer date `date`.
+fn git_at(dir: &Path, date: &str, args: &[&str]) -> String {
     let o = Command::new("git")
         .args([
             "-c",
@@ -181,8 +186,8 @@ fn git_in(dir: &Path, args: &[&str]) -> String {
         ])
         .arg(dir)
         .args(args)
-        .env("GIT_COMMITTER_DATE", "2026-03-04T05:06:07Z")
-        .env("GIT_AUTHOR_DATE", "2026-03-04T05:06:07Z")
+        .env("GIT_COMMITTER_DATE", date)
+        .env("GIT_AUTHOR_DATE", date)
         .output()
         .unwrap();
     assert!(
@@ -281,6 +286,44 @@ fn git_history_proposes_a_done_node_per_merged_branch_until_there_are_releases()
     let done = w.map("done");
     let rel = done.iter().find(|n| n["title"] == "v0.2.0").unwrap();
     assert_eq!(rel["body"], "Merged: feature/docs.");
+}
+
+#[test]
+fn git_history_orders_tags_of_one_day_by_time_not_by_name() {
+    let w = W::new();
+    w.commit_file("README.md", "widget\n", "init");
+    for (branch, at) in [
+        ("feature/a", "2026-03-04T10:00:00Z"),
+        ("feature/b", "2026-03-04T12:00:00Z"),
+    ] {
+        w.git(&["checkout", "-q", "-b", branch]);
+        w.commit_file(&format!("{}.txt", branch.replace('/', "-")), branch, "work");
+        w.git(&["checkout", "-q", "main"]);
+        git_at(
+            &w.repo(),
+            at,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "-m",
+                &format!("Merge branch '{branch}'"),
+                branch,
+            ],
+        );
+        let tag = if branch == "feature/a" {
+            "v0.9.0"
+        } else {
+            "v0.10.0"
+        };
+        w.git(&["tag", tag]);
+    }
+    history_config(&w);
+    w.run(0);
+    let done = w.map("done");
+    let body = |t: &str| done.iter().find(|n| n["title"] == t).unwrap()["body"].clone();
+    assert_eq!(body("v0.9.0"), "Merged: feature/a.");
+    assert_eq!(body("v0.10.0"), "Merged: feature/b.");
 }
 
 #[test]

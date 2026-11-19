@@ -146,6 +146,8 @@ fn fetch(repo: &str) -> Result<String> {
         })
     })
     .collect();
+    // limit: one page, and GitHub caps a page at 100, so a `limit` above 100 still gives
+    // at most 100 releases; paging is the upgrade if a project needs older ones.
     let releases: Vec<Value> = gh(&["api", &format!("repos/{repo}/releases?per_page={limit}")])?
         .as_array()
         .into_iter()
