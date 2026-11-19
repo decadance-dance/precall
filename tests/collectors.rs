@@ -1007,3 +1007,124 @@ fn files_proposals_cite_references_that_resolve_and_respect_ownership() {
         .collect();
     assert!(srcs.iter().any(|s| s[&cite] == "It has a CLI."), "{judged}");
 }
+
+#[test]
+fn files_text_rule_is_the_byte_rule_whatever_git_attributes_say() {
+    // Review round 1, finding 3.
+    let w = W::new();
+    w.commit_file("docs/guide.md", "Guide\n", "base");
+    let p = files_params(&w, true, &[("include", r#"["docs/**", "*.md"]"#)]);
+    let first = fp(&w, &p);
+    assert!(first.contains("docs/guide.md"), "{first}");
+    w.commit_file(
+        ".gitattributes",
+        "docs/guide.md -diff\nforced.md diff\n",
+        "attrs",
+    );
+    assert_eq!(
+        fp(&w, &p),
+        first,
+        "an attribute is not a change of the file"
+    );
+    w.commit_file("forced.md", "a\u{0}b\n", "nul");
+    w.commit_file("empty.md", "", "empty");
+    let o = files(&w, "fetch", &p, "{}");
+    let f: Value = serde_json::from_str(&o.stdout).unwrap();
+    assert_eq!(
+        f["files"],
+        json!(["docs/guide.md", "empty.md"]),
+        "{}",
+        o.stderr
+    );
+}
+
+#[test]
+fn files_line_selector_is_only_a_trailing_line_range() {
+    // Review round 1, finding 6.
+    let w = W::new();
+    w.commit_file("docs/a#b.md", "Notes\nMore\n", "hash in a name");
+    let c = w.git(&["rev-parse", "--short=12", "HEAD"]);
+    let p = files_params(&w, true, &[]);
+    let refs = [
+        format!("file:docs/a#b.md@{c}"),
+        format!("file:docs/a#b.md#L2@{c}"),
+    ];
+    let t = texts(&files(
+        &w,
+        "resolve",
+        &p,
+        &json!({ "refs": refs }).to_string(),
+    ));
+    assert_eq!(t[&refs[0]], "Notes\nMore\n");
+    assert_eq!(t[&refs[1]], "More");
+}
+
+#[test]
+fn files_resolve_keeps_to_what_collection_reads() {
+    // Review round 1, finding 7: no symlink, no binary, at the cited commit too.
+    let w = W::new();
+    w.commit_file("known.md", "Known\n", "known");
+    std::os::unix::fs::symlink("known.md", w.repo().join("alias.md")).unwrap();
+    w.git(&["add", "alias.md"]);
+    w.git(&["commit", "-q", "-m", "alias"]);
+    w.commit_file("blob.md", "a\u{0}b\n", "binary");
+    let c = w.git(&["rev-parse", "--short=12", "HEAD"]);
+    let o = files(&w, "fetch", &files_params(&w, false, &[]), "{}");
+    let f: Value = serde_json::from_str(&o.stdout).unwrap();
+    assert_eq!(f["files"], json!(["known.md"]), "{}", o.stderr);
+    let refs = ["file:alias.md", "file:blob.md", "file:known.md"];
+    let t = texts(&files(
+        &w,
+        "resolve",
+        &files_params(&w, false, &[]),
+        &json!({ "refs": refs }).to_string(),
+    ));
+    assert_eq!(t["file:alias.md"], Value::Null);
+    assert_eq!(t["file:blob.md"], Value::Null);
+    assert_eq!(t["file:known.md"], "Known\n");
+    let refs = [
+        format!("file:alias.md@{c}"),
+        format!("file:blob.md@{c}"),
+        format!("file:known.md@{c}"),
+    ];
+    let t = texts(&files(
+        &w,
+        "resolve",
+        &files_params(&w, true, &[]),
+        &json!({ "refs": refs }).to_string(),
+    ));
+    assert_eq!(t[&refs[0]], Value::Null);
+    assert_eq!(t[&refs[1]], Value::Null);
+    assert_eq!(t[&refs[2]], "Known\n");
+}
+
+#[test]
+fn files_keeps_each_blobs_text_answer_in_its_state_dir() {
+    let w = W::new();
+    w.commit_file("guide.md", "Guide\n", "base");
+    let state = w.root.join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    let st = state.to_string_lossy().into_owned();
+    let p = files_params(&w, true, &[]);
+    let mut env: Vec<(String, String)> = p
+        .iter()
+        .map(|(k, v)| (format!("RRECALL_PARAM_{}", k.to_uppercase()), v.clone()))
+        .collect();
+    env.push(("RRECALL_STATE_DIR".into(), st));
+    let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let fetch = || {
+        let o = w.raw(&["builtin", "files", "fetch"], Some("{}"), &env);
+        assert_eq!(o.code, 0, "{}", o.stderr);
+        serde_json::from_str::<Value>(&o.stdout).unwrap()["files"].clone()
+    };
+    assert_eq!(fetch(), json!(["guide.md"]));
+    let id = w.git(&["rev-parse", "HEAD:guide.md"]);
+    let cache = state.join("text-blobs");
+    assert_eq!(
+        std::fs::read_to_string(&cache).unwrap(),
+        format!("{id} text\n")
+    );
+    // The kept answer is used: the blob is not read again.
+    std::fs::write(&cache, format!("{id} binary\n")).unwrap();
+    assert_eq!(fetch(), json!([]));
+}

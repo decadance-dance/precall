@@ -7,7 +7,10 @@ use crate::glob;
 use crate::sources::{self, git, is_sha};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 pub const MANIFEST: &str = r#"id = "files"
 name = "A repository's or a folder's files, read by an agent"
@@ -143,32 +146,20 @@ impl Scope {
 
     fn matched_at_head(&self) -> Result<Vec<(String, String)>> {
         let tree = git(&self.root, &["ls-tree", "-r", "-z", "HEAD"])?;
-        // `git grep -I` lists the files at HEAD that hold text (an empty file holds none).
-        // It exits 1 when no file matches.
-        let text = sources::output_codes(
-            "git",
-            &self.root,
-            &["grep", "-I", "-l", "-z", "-e", "", "HEAD", "--"],
-            &[0, 1],
-        )?;
-        let text: std::collections::BTreeSet<&str> = text
-            .split('\0')
-            .filter_map(|p| p.strip_prefix("HEAD:"))
-            .collect();
         let mut out = Vec::new();
         for entry in tree.split('\0').filter(|e| !e.is_empty()) {
             let Some((meta, rel)) = entry.split_once('\t') else {
                 continue;
             };
-            let f: Vec<&str> = meta.split(' ').collect();
-            // Regular files only: no submodule, no symlink.
-            if let ["100644" | "100755", "blob", id] = f[..]
-                && text.contains(rel)
+            if let Some(id) = regular_blob(meta)
                 && self.wanted(rel)
             {
                 out.push((rel.to_string(), id.to_string()));
             }
         }
+        let ids: Vec<&str> = out.iter().map(|(_, id)| id.as_str()).collect();
+        let text = text_blobs(&self.root, &ids)?;
+        out.retain(|(_, id)| text.contains(id));
         Ok(out)
     }
 
@@ -252,8 +243,12 @@ impl Scope {
         } else {
             (loc, None)
         };
-        let (rel, lines) = match loc.rsplit_once('#') {
-            Some((p, l)) => (p, Some(line_range(l)?)),
+        // The selector is a trailing `#L<a>[-L<b>]`; any other `#` belongs to the path.
+        let (rel, lines) = match loc
+            .rsplit_once('#')
+            .and_then(|(p, l)| Some((p, line_range(l)?)))
+        {
+            Some((p, r)) => (p, Some(r)),
             None => (loc, None),
         };
         if rel.is_empty()
@@ -265,22 +260,32 @@ impl Scope {
         {
             return None;
         }
-        let text = match commit {
-            Some(c) => git(&self.root, &["show", &format!("{c}:./{rel}")]).ok()?,
+        // The rules collection reads by: a regular file, no symlink, text by the byte rule.
+        let bytes = match commit {
+            Some(c) => {
+                let entry = git(&self.root, &["ls-tree", "-z", c, "--", rel]).ok()?;
+                let (meta, path) = entry.trim_end_matches('\0').split_once('\t')?;
+                if path != rel {
+                    return None;
+                }
+                let id = regular_blob(meta)?;
+                git_bytes(&self.root, &["cat-file", "blob", id])?
+            }
             None => {
                 let path = self.root.join(rel);
                 if rel.split('/').any(|s| s.starts_with('.'))
-                    || !path.canonicalize().ok()?.starts_with(&self.root)
+                    || path.canonicalize().ok()? != path
+                    || !std::fs::symlink_metadata(&path).ok()?.is_file()
                 {
                     return None;
                 }
-                let bytes = std::fs::read(&path).ok()?;
-                if !is_text(&bytes) {
-                    return None;
-                }
-                String::from_utf8_lossy(&bytes).into_owned()
+                std::fs::read(&path).ok()?
             }
         };
+        if !is_text(&bytes) {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&bytes).into_owned();
         let text = match lines {
             Some((a, b)) => {
                 let picked: Vec<&str> = text.lines().skip(a - 1).take(b + 1 - a).collect();
@@ -299,6 +304,104 @@ impl Scope {
             text
         })
     }
+}
+
+/// The blob id of an `ls-tree` entry's `<mode> <type> <id>` when it is a regular file: no
+/// submodule, no symlink.
+fn regular_blob(meta: &str) -> Option<&str> {
+    match meta.split(' ').collect::<Vec<_>>()[..] {
+        ["100644" | "100755", "blob", id] => Some(id),
+        _ => None,
+    }
+}
+
+/// `git args`'s stdout as bytes, `None` when it fails.
+fn git_bytes(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
+    let o = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    o.status.success().then_some(o.stdout)
+}
+
+/// Which of the blobs `ids` hold text by the byte rule (an empty blob does), read raw with
+/// one `git cat-file --batch`, so no git attribute changes the answer. A blob's answer never
+/// changes, so it is kept in the instance's state dir and only new blobs are read.
+fn text_blobs(root: &Path, ids: &[&str]) -> Result<HashSet<String>> {
+    let cache = std::env::var_os("RRECALL_STATE_DIR").map(|d| PathBuf::from(d).join("text-blobs"));
+    let mut known: BTreeMap<String, bool> = cache
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| {
+            let (id, t) = l.split_once(' ')?;
+            Some((id.to_string(), t == "text"))
+        })
+        .collect();
+    let todo: BTreeSet<&str> = ids
+        .iter()
+        .copied()
+        .filter(|i| !known.contains_key(*i))
+        .collect();
+    if !todo.is_empty() {
+        let mut child = Command::new("git")
+            .args(["cat-file", "--batch"])
+            .current_dir(root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("running git cat-file")?;
+        let input: String = todo.iter().map(|i| format!("{i}\n")).collect();
+        let mut stdin = child.stdin.take().context("git cat-file has no stdin")?;
+        // Written from a thread: git answers while it reads, and a full pipe would block both.
+        let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
+        let mut out = BufReader::new(child.stdout.take().context("git cat-file has no stdout")?);
+        for id in &todo {
+            let mut header = String::new();
+            out.read_line(&mut header)?;
+            let size: u64 = header
+                .split(' ')
+                .nth(2)
+                .and_then(|s| s.trim().parse().ok())
+                .with_context(|| format!("git cat-file has no blob {id}"))?;
+            let mut head = Vec::new();
+            (&mut out)
+                .take(size.min(SNIFF as u64))
+                .read_to_end(&mut head)?;
+            // The rest of the blob and the newline after it.
+            std::io::copy(
+                &mut (&mut out).take(size - head.len() as u64 + 1),
+                &mut std::io::sink(),
+            )?;
+            known.insert(id.to_string(), is_text(&head));
+        }
+        drop(out);
+        let _ = writer.join();
+        child.wait()?;
+        if let Some(p) = &cache {
+            // Only the blobs in scope now, so the file does not grow with history.
+            let keep: String = ids
+                .iter()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .filter_map(|i| {
+                    known
+                        .get(*i)
+                        .map(|t| format!("{i} {}\n", if *t { "text" } else { "binary" }))
+                })
+                .collect();
+            let _ = std::fs::write(p, keep);
+        }
+    }
+    Ok(ids
+        .iter()
+        .filter(|i| known.get(**i) == Some(&true))
+        .map(|i| i.to_string())
+        .collect())
 }
 
 /// `L<a>` or `L<a>-L<b>`, 1-based, a ≤ b.
