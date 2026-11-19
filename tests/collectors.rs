@@ -927,17 +927,21 @@ fn github_returns_its_newest_times_as_the_cursor_and_fetches_only_what_is_newer(
         serde_json::from_str(&o.stdout).unwrap()
     };
     let full = fetch(r#"{"since": null}"#);
-    let newest = json!({"updated": "2026-03-02T10:00:00Z", "published": "2026-03-03T10:00:00Z"});
+    // One time per list: each advances only by its own results (review round 1, finding 1).
+    let newest = json!({"pulls": "2026-03-01T10:00:00Z", "issues": "2026-03-02T10:00:00Z", "published": "2026-03-03T10:00:00Z"});
     assert_eq!(full["cursor"], newest);
     assert!(!gh_argv(&w).contains("updated:>="), "{}", gh_argv(&w));
     std::fs::remove_file(w.root.join("rec/gh.argv")).unwrap();
-    let older = json!({"updated": "2026-03-01T10:00:00Z", "published": "2026-03-03T10:00:00Z"});
+    let older = json!({"pulls": "2026-02-01T10:00:00Z", "issues": "2026-03-01T10:00:00Z", "published": "2026-03-03T10:00:00Z"});
     let f = fetch(&since(older));
     let argv = gh_argv(&w);
-    for noun in ["pr", "issue"] {
+    for (noun, t) in [
+        ("pr", "2026-02-01T10:00:00Z"),
+        ("issue", "2026-03-01T10:00:00Z"),
+    ] {
         assert!(
             argv.contains(&format!(
-                "{noun} list -R acme/widget --state all --search sort:updated-desc updated:>=2026-03-01T10:00:00Z --limit 50"
+                "{noun} list -R acme/widget --state all --search sort:updated-desc updated:>={t} --limit 50"
             )),
             "{argv}"
         );
@@ -948,18 +952,26 @@ fn github_returns_its_newest_times_as_the_cursor_and_fetches_only_what_is_newer(
         "no release published after the cursor"
     );
     assert_eq!(f["cursor"], newest);
+    // A pull request updated between the two list calls: the issue list's newer time does not
+    // carry the pull requests' cursor past it.
+    gh(&w, "pr-list", &json!([]));
+    let f = fetch(&since(
+        json!({"pulls": "2026-02-01T10:00:00Z", "issues": "2026-03-01T10:00:00Z"}),
+    ));
+    assert_eq!(f["cursor"]["pulls"], "2026-02-01T10:00:00Z", "{f}");
+    assert_eq!(f["cursor"]["issues"], "2026-03-02T10:00:00Z", "{f}");
     // Nothing new: the cursor stays where it was.
     for key in ["pr-list", "issue-list", "api.releases"] {
         gh(&w, key, &json!([]));
     }
-    let later = json!({"updated": "2026-04-01T00:00:00Z", "published": "2026-04-01T00:00:00Z"});
+    let later = json!({"pulls": "2026-04-01T00:00:00Z", "issues": "2026-04-02T00:00:00Z", "published": "2026-04-01T00:00:00Z"});
     assert_eq!(fetch(&since(later.clone()))["cursor"], later);
     // A cursor that is not two times is not used.
     let o = w.builtin(
         "github",
         "fetch",
         &gh_params(),
-        &since(json!({"updated": "x sort:created"})),
+        &since(json!({"pulls": "x sort:created", "issues": "x sort:created"})),
     );
     assert_eq!(o.code, 0, "{}", o.stderr);
     assert!(!gh_argv(&w).contains("x sort:created"), "{}", gh_argv(&w));

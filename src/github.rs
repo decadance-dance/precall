@@ -62,6 +62,9 @@ fn gh(args: &[&str]) -> Result<Value> {
 /// The most recently updated issue or pull request, and a hash of the releases as fetch lists
 /// them: an edit to an issue or pull request moves its `updated_at`, but an edited release note
 /// moves no date.
+// limit: an edit to the newest issue or pull request within the same second as its
+// `updated_at` leaves this output as it was, so the collector is not due for it; the inclusive
+// `updated:>=` search of fetch reads it only when the next run is due for another reason.
 fn fingerprint(repo: &str) -> Result<String> {
     let issues = gh(&[
         "api",
@@ -147,13 +150,12 @@ fn newest(prev: Option<String>, items: &[&Value], key: &str) -> Option<String> {
 /// The pull requests, issues and releases the agent proposes from, newest `limit` of each:
 /// pull requests and issues by last update, so closing or merging an old one reaches the agent
 /// as the evidence for a removal. With a cursor from the last settled run, only what was updated
-/// (pull requests, issues) or published (releases) since; the cursor is the newest of each.
+/// (pull requests, issues) or published (releases) since. The cursor keeps one time per list,
+/// each moved only by that list's own results: an item of one list updated while the other was
+/// listed is never skipped.
 fn fetch(repo: &str, input: &str) -> Result<String> {
     let input: Value = serde_json::from_str(input).context("the fetch input is no JSON")?;
-    let (updated, published) = (
-        cursor_time(&input, "updated"),
-        cursor_time(&input, "published"),
-    );
+    let published = cursor_time(&input, "published");
     let limit = limit();
     let mut releases = releases(repo, limit)?;
     // limit: an edit to the notes of a release published before the cursor waits for a full
@@ -163,14 +165,15 @@ fn fetch(repo: &str, input: &str) -> Result<String> {
     }
     // limit: when more than `limit` items changed since the cursor, only the newest `limit` come
     // and the cursor moves past the rest, as a full read never lists more than `limit` either.
-    let search = match &updated {
-        // Inclusive: the newest item of the last run comes once more rather than a same-second
-        // update being missed.
-        Some(t) => format!("sort:updated-desc updated:>={t}"),
-        None => "sort:updated-desc".to_string(),
-    };
     let limit = limit.to_string();
-    let list = |noun: &str, fields: &str| -> Result<Vec<Value>> {
+    // `key` names the list's time in the cursor.
+    let list = |noun: &str, key: &str, fields: &str| -> Result<Vec<Value>> {
+        let search = match cursor_time(&input, key) {
+            // Inclusive: the newest item of the last run comes once more rather than a
+            // same-second update being missed.
+            Some(t) => format!("sort:updated-desc updated:>={t}"),
+            None => "sort:updated-desc".to_string(),
+        };
         // limit: `--search` goes through GitHub's search, which returns at most 1000 items, so a
         // `limit` above 1000 gives 1000; enough for a map's recent work.
         let v = gh(&[
@@ -181,6 +184,7 @@ fn fetch(repo: &str, input: &str) -> Result<String> {
     };
     let pulls: Vec<Value> = list(
         "pr",
+        "pulls",
         "number,title,state,author,mergedAt,closedAt,updatedAt,body,labels",
     )?
     .iter()
@@ -195,6 +199,7 @@ fn fetch(repo: &str, input: &str) -> Result<String> {
     .collect();
     let issues: Vec<Value> = list(
         "issue",
+        "issues",
         "number,title,state,stateReason,author,assignees,closedAt,updatedAt,body,labels",
     )?
     .iter()
@@ -209,7 +214,8 @@ fn fetch(repo: &str, input: &str) -> Result<String> {
     })
     .collect();
     let cursor = json!({
-        "updated": newest(updated, &pulls.iter().chain(&issues).collect::<Vec<_>>(), "updated_at"),
+        "pulls": newest(cursor_time(&input, "pulls"), &pulls.iter().collect::<Vec<_>>(), "updated_at"),
+        "issues": newest(cursor_time(&input, "issues"), &issues.iter().collect::<Vec<_>>(), "updated_at"),
         "published": newest(published, &releases.iter().collect::<Vec<_>>(), "published_at"),
     });
     Ok(json!({
