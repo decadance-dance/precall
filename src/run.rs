@@ -284,6 +284,15 @@ struct Run {
 /// Per proposal key, the branch each judge was shown it under (`None`: no place to land).
 type JudgedIn = BTreeMap<String, BTreeMap<String, Option<String>>>;
 
+/// Keys as JSON strings, so whitespace and commas inside a key stay visible.
+fn quoted(keys: &[String]) -> String {
+    let q: Vec<String> = keys
+        .iter()
+        .map(|k| serde_json::to_string(k).unwrap_or_else(|_| k.clone()))
+        .collect();
+    q.join(", ")
+}
+
 /// `name`, and `name.N` from round 2 on (spec §6.3 log names).
 fn entry(name: &str, round: u32) -> String {
     if round <= 1 {
@@ -1203,7 +1212,7 @@ impl Run {
             let head = format!(
                 "re-asked: {} in round {round}: {}",
                 judge.id,
-                missing.join(", ")
+                quoted(&missing)
             );
             let note = match follow_up {
                 Ok(still) if still.is_empty() => head,
@@ -1218,17 +1227,17 @@ impl Run {
                     }
                     format!(
                         "{head}; still without a verdict, dropped: {}",
-                        still.join(", ")
+                        quoted(&still)
                     )
                 }
                 Err(why) if why == "budget" => format!(
                     "re-ask refused by the budget: {} in round {round}, dropped: {}",
                     judge.id,
-                    missing.join(", ")
+                    quoted(&missing)
                 ),
                 Err(_) => format!(
                     "{head}; the follow-up failed (see Warnings), dropped: {}",
-                    missing.join(", ")
+                    quoted(&missing)
                 ),
             };
             self.judge_notes.push(note);
@@ -1257,8 +1266,9 @@ impl Run {
                     Some((
                         it.key(),
                         format!(
-                            "{away} but lands under `{now}`, since a move it depended on was \
-                             not accepted: propose it again"
+                            "{away} but lands under `{now}` once the accepted proposals are \
+                             applied, since the judge's batch and the accepted batch differ: \
+                             propose it again"
                         ),
                     ))
                 })
@@ -1658,9 +1668,11 @@ impl Run {
         for (id, why) in &self.unsettled {
             s += &format!("- unsettled: {id} ({})\n", one_line(why, 2000));
         }
-        // Every key, uncut: the report must name each one re-asked or dropped (spec §4.4).
+        // Every key, uncut and quoted as given: the report must name each one re-asked or
+        // dropped (spec §4.4). Keys are JSON strings, so a note holds no line break; the whole
+        // report is redacted before it is written.
         for note in &self.judge_notes {
-            s += &format!("- {}\n", one_line(note, usize::MAX));
+            s += &format!("- {note}\n");
         }
         s += &format!("- rejected: {}\n", self.left_rejected());
         if let Some(d) = &self.drift {

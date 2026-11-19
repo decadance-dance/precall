@@ -907,7 +907,7 @@ fn a_missing_verdict_is_asked_once_more_with_only_its_proposal() {
     assert!(map.contains("Queue") && map.contains("Cache"), "{map}");
     assert!(
         w.report()
-            .contains("- re-asked: judge in round 1: repo/b\n"),
+            .contains("- re-asked: judge in round 1: \"repo/b\"\n"),
         "{}",
         w.report()
     );
@@ -928,7 +928,7 @@ fn a_verdict_missing_twice_drops_only_its_proposal() {
     let report = w.report();
     assert!(
         report.contains(
-            "- re-asked: judge in round 1: repo/b; still without a verdict, dropped: repo/b\n"
+            "- re-asked: judge in round 1: \"repo/b\"; still without a verdict, dropped: \"repo/b\"\n"
         ),
         "{report}"
     );
@@ -1104,6 +1104,54 @@ fn the_report_names_every_key_reasked_and_dropped() {
 }
 
 #[test]
+fn the_report_keeps_keys_that_differ_in_whitespace_or_hold_a_comma_apart() {
+    let item = |key: &str, src: &str| json!({"key": key, "op": "add", "parent": "layout", "title": "Cache", "body": "Cache body.", "sources": [src], "reason": "found"});
+    let out = props(&[
+        item("cache entry", "file:one.md"),
+        item("cache  entry", "file:two.md"),
+        item("a, b", "file:three.md"),
+    ]);
+    // No fake check: its shell loop splits keys on whitespace.
+    let w = W::new();
+    w.config(&format!(
+        "{}{}",
+        w.inst("repo", "col", &format!("out = {}", q(&out))),
+        w.inst(
+            "judge",
+            "judge",
+            &format!("out = {}", q(r#"{"verdicts":[]}"#))
+        )
+    ));
+    w.run_code(&[], 5);
+    let keys = r#""repo/cache entry", "repo/cache  entry", "repo/a, b""#;
+    let want =
+        format!("- re-asked: judge in round 1: {keys}; still without a verdict, dropped: {keys}\n");
+    assert!(w.report().contains(&want), "{want}{}", w.report());
+    // Keys are still redacted there.
+    let tok = ["gh", "p_", "Zq3vK9mW2xR7tY5pL8nB4cD6fG1hJ0kAa2Ss"].concat();
+    let out = props(&[item(&format!("key {tok}"), "file:one.md")]);
+    w.config(&format!(
+        "{}{}",
+        w.inst("repo", "col", &format!("out = {}", q(&out))),
+        w.inst(
+            "judge",
+            "judge",
+            &format!("out = {}", q(r#"{"verdicts":[]}"#))
+        )
+    ));
+    w.run_code(&["--force"], 5);
+    let report = w.report();
+    let line = report
+        .lines()
+        .find(|l| l.starts_with("- re-asked: "))
+        .unwrap_or_else(|| panic!("{report}"));
+    assert!(
+        line.contains("[redacted:") && !line.contains(&tok[..12]),
+        "{line}"
+    );
+}
+
+#[test]
 fn a_reask_refused_by_the_budget_is_reported_as_refused() {
     let w = world(&props(&[
         add("a", "layout", "Queue"),
@@ -1124,7 +1172,7 @@ fn a_reask_refused_by_the_budget_is_reported_as_refused() {
     assert_eq!(w.calls("runner"), 1, "the follow-up was refused");
     let report = w.report();
     assert!(
-        report.contains("- re-ask refused by the budget: pjudge in round 1, dropped: repo/b\n"),
+        report.contains("- re-ask refused by the budget: pjudge in round 1, dropped: \"repo/b\"\n"),
         "{report}"
     );
     assert!(!report.contains("- re-asked:"), "{report}");
@@ -2785,6 +2833,29 @@ fn an_add_whose_branch_changed_after_it_was_judged_goes_back() {
     assert!(node_ids(&w.input("dup", 1)).is_empty());
     assert!(!w.map("layout").contains("queue-2"), "{}", w.map("layout"));
     assert!(w.report().contains("judged under"), "{}", w.report());
+}
+
+#[test]
+fn an_add_reasked_without_its_accepted_move_goes_back_with_a_reason_that_fits() {
+    // `judge` accepts the move and leaves the add out; asked again with the add alone, it sees
+    // it under `layout`. The move is accepted, so the add lands under `how-it-works`.
+    let outs = [
+        json!({"verdicts": [{"key": "repo/m", "verdict": "accept", "reason": "ok"}]}).to_string(),
+        json!({"verdicts": [{"key": "repo/q", "verdict": "accept", "reason": "ok"}]}).to_string(),
+    ];
+    let w = moving(
+        &verdicts("accept", "accept"),
+        &format!("scenario = \"seq\", out = {}", q(&outs.join("\n"))),
+    );
+    w.run_code(&[], 0);
+    assert!(w.map("how-it-works").contains("\"id\":\"parent\""));
+    let report = w.report();
+    let reason = report
+        .lines()
+        .find(|l| l.starts_with("  - core reject: judged under `layout`"))
+        .unwrap_or_else(|| panic!("{report}"));
+    assert!(reason.contains("lands under `how-it-works`"), "{reason}");
+    assert!(!reason.contains("not accepted"), "{reason}");
 }
 
 #[test]
