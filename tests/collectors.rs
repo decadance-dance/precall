@@ -726,22 +726,24 @@ fn github_fetches_prs_issues_and_releases_through_gh_with_bodies_cut() {
         prs.iter()
             .map(|p| p["number"].as_u64().unwrap())
             .collect::<Vec<_>>(),
-        [3, 12],
-        "sorted by number"
+        [12, 3],
+        "in gh's order, most recently updated first"
     );
-    assert_eq!(prs[1]["body"].as_str().unwrap().chars().count(), 2000);
-    assert_eq!(prs[1]["author"], "ana");
+    assert_eq!(prs[0]["body"].as_str().unwrap().chars().count(), 2000);
+    assert_eq!(prs[0]["author"], "ana");
     assert_eq!(f["issues"][0]["state_reason"], "COMPLETED");
     assert_eq!(f["issues"][0]["assignees"], json!(["bo"]));
     assert_eq!(f["releases"][0]["tag"], "v1.0.0");
     assert_eq!(f["releases"][0]["body"], "First release.");
     let argv = gh_argv(&w);
     assert!(
-        argv.contains("pr list -R acme/widget --state all --limit 50"),
+        argv.contains("pr list -R acme/widget --state all --search sort:updated-desc --limit 50"),
         "{argv}"
     );
     assert!(
-        argv.contains("issue list -R acme/widget --state all --limit 50"),
+        argv.contains(
+            "issue list -R acme/widget --state all --search sort:updated-desc --limit 50"
+        ),
         "{argv}"
     );
     assert!(

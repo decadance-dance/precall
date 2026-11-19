@@ -127,19 +127,29 @@ fn cut_keep_lines(text: &str, max: usize) -> String {
     text.chars().take(max).collect()
 }
 
-fn by_number(mut items: Vec<Value>) -> Vec<Value> {
-    items.sort_by_key(|a| a["number"].as_u64());
-    items
-}
-
-/// The pull requests, issues and releases the agent proposes from, newest `limit` of each.
+/// The pull requests, issues and releases the agent proposes from, newest `limit` of each:
+/// pull requests and issues by last update, so closing or merging an old one reaches the agent
+/// as the evidence for a removal.
 fn fetch(repo: &str) -> Result<String> {
     let limit = limit();
     let releases = releases(repo, limit)?;
     let limit = limit.to_string();
     let list = |noun: &str, fields: &str| -> Result<Vec<Value>> {
+        // limit: `--search` goes through GitHub's search, which returns at most 1000 items, so a
+        // `limit` above 1000 gives 1000; enough for a map's recent work.
         let v = gh(&[
-            noun, "list", "-R", repo, "--state", "all", "--limit", &limit, "--json", fields,
+            noun,
+            "list",
+            "-R",
+            repo,
+            "--state",
+            "all",
+            "--search",
+            "sort:updated-desc",
+            "--limit",
+            &limit,
+            "--json",
+            fields,
         ])?;
         Ok(v.as_array().cloned().unwrap_or_default())
     };
@@ -179,8 +189,8 @@ fn fetch(repo: &str) -> Result<String> {
             "issue": format!("gh-issue:{repo}#<number>"),
             "release": format!("gh-release:{repo}@<tag>"),
         },
-        "pulls": by_number(pulls),
-        "issues": by_number(issues),
+        "pulls": pulls,
+        "issues": issues,
         "releases": releases,
     })
     .to_string())
