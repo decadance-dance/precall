@@ -128,14 +128,14 @@ pub struct ResolveInput {
 }
 
 /// Check and judge input (spec §6.5). Checks get `sources: None`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct JudgeInput {
     pub proposals: Vec<JudgeItem>,
     pub map_ids: Vec<String>,
     pub params: Params,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct JudgeItem {
     /// `<collector instance>/<proposal key>`, unique across collectors.
     pub key: String,
@@ -154,13 +154,13 @@ pub enum VerdictKind {
     Revise,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Verdict {
     pub key: String,
     pub verdict: VerdictKind,
     pub reason: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction: Option<String>,
 }
 
