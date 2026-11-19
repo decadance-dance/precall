@@ -5,6 +5,7 @@ name = "rrecall"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
+repository = "https://github.com/decadance-dance/rrecall"
 description = "Keeps a versioned map of a software project and answers questions about it"
 
 [dependencies]
