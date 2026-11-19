@@ -1,0 +1,16 @@
+#!/bin/sh
+# A fake `gh` for tests. It answers from canned files under $FAKE_GH_DIR: `gh api <path>` prints
+# gh.api.<the path's last segment before `?`> (`issues`, `releases`), `gh <noun> list` prints
+# gh.<noun>-list, `gh <noun> view <id>` prints gh.<noun>-view-<id>. A missing file is an error
+# like gh's own (exit 1). Each call appends its argv, one line, to $FAKE_GH_DIR/gh.argv.
+d="${FAKE_GH_DIR:?}"
+printf '%s\n' "$*" >> "$d/gh.argv"
+case "$1" in
+    api) seg=${2%%\?*}; key="api.${seg##*/}" ;;
+    *) case "$2" in
+           list) key="$1-list" ;;
+           view) key="$1-view-$3" ;;
+           *) key="$1-$2" ;;
+       esac ;;
+esac
+if [ -f "$d/gh.$key" ]; then cat "$d/gh.$key"; else echo "HTTP 404: Not Found ($key)" >&2; exit 1; fi

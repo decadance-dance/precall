@@ -317,6 +317,7 @@ pub fn builtin(id: &str, entry: Option<&str>) -> Result<String> {
         "claude" | "codex" => crate::runner::run(id, &input),
         "git-history" => crate::git_history::run(entry, &input),
         "files" => crate::files::run(entry, &input),
+        "github" => crate::github::run(entry, &input),
         _ => crate::checks::run(id, &input).map(|out| out + "\n"),
     }
 }

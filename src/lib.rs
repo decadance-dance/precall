@@ -4,6 +4,7 @@ pub mod config;
 pub mod error;
 pub mod files;
 pub mod git_history;
+pub mod github;
 pub mod glob;
 pub mod history;
 pub mod lock;
