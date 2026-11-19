@@ -410,7 +410,15 @@ mod tests {
             "{:#}",
             run("size-limits", &with_params(json!({"title_max": secret}))).unwrap_err()
         );
-        assert!(e.contains("title_max") && !e.contains(&secret[4..]), "{e}");
+        // Fixed messages: a failing assertion must not print the diagnostic it caught leaking.
+        assert!(
+            e.contains("title_max"),
+            "bad param: the error does not name the param"
+        );
+        assert!(
+            !e.contains(&secret[4..]),
+            "bad param: the error quotes the value"
+        );
         // A malformed input says where, not what.
         let mut bad = node();
         bad["order"] = json!(secret);
@@ -425,7 +433,14 @@ mod tests {
             )
             .unwrap_err()
         );
-        assert!(e.contains("line") && !e.contains(&secret[4..]), "{e}");
+        assert!(
+            e.contains("line"),
+            "bad input: the error does not say where"
+        );
+        assert!(
+            !e.contains(&secret[4..]),
+            "bad input: the error quotes the value"
+        );
     }
 
     #[test]

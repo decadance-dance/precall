@@ -64,7 +64,8 @@ fn each_builtin_check_runs_through_the_process_runner() {
             ..serde_json::from_value(serde_json::to_value(&input).unwrap()).unwrap()
         };
         let out = process::call(&ctx, &inst, "check", &command, &input)
-            .unwrap_or_else(|e| panic!("{}: {e:#}", inst.id));
+            // The error carries the check's stderr; a fixed message keeps a leaked secret out.
+            .unwrap_or_else(|_| panic!("check `{}` failed to run", inst.id));
         let v = wire::decode_verdicts(&inst.id, &out, &keys).unwrap();
         got.push((
             inst.id.clone(),

@@ -202,32 +202,44 @@ fn slack_webhook(text: &str) -> bool {
         })
 }
 
-/// Three dot-separated base64url segments, the first two starting with `eyJ` (a JSON object).
+/// Three dot-separated base64url segments of at least 10 characters, the first two starting
+/// with `eyJ` (a JSON object). One pass over the maximal segments, each read once and never
+/// capped: a token with many claims has a long payload.
 fn jwt(text: &str) -> bool {
     let b = text.as_bytes();
-    text.match_indices("eyJ").any(|(i, _)| {
-        if i > 0 && word(b[i - 1]) {
-            return false;
+    // The last two segments seen, as (start, end), while each followed the one before by a
+    // single `.`.
+    let mut chain: Vec<(usize, usize)> = Vec::with_capacity(2);
+    let mut i = 0;
+    while i < b.len() {
+        if !word(b[i]) {
+            i += 1;
+            continue;
         }
-        let mut at = i;
-        for seg in 0..3 {
-            if seg == 1 && !b[at..].starts_with(b"eyJ") {
-                return false;
-            }
-            let n = run(b, at, word, WINDOW);
-            if n < 10 {
-                return false;
-            }
-            at += n;
-            if seg < 2 {
-                if b.get(at) != Some(&b'.') {
-                    return false;
+        let start = i;
+        while i < b.len() && word(b[i]) {
+            i += 1;
+        }
+        let joined = chain
+            .last()
+            .is_some_and(|&(_, end)| end + 1 == start && b[end] == b'.');
+        if !joined {
+            chain.clear();
+        }
+        let long = i - start >= 10;
+        let object = b[start..i].starts_with(b"eyJ");
+        match chain.len() {
+            2 if long => return true,
+            0 | 1 if long && object => chain.push((start, i)),
+            _ => {
+                chain.clear();
+                if long && object {
+                    chain.push((start, i));
                 }
-                at += 1;
             }
         }
-        true
-    })
+    }
+    false
 }
 
 /// A PEM or PGP armor line that opens a private key.
@@ -465,6 +477,40 @@ mod tests {
         }
     }
 
+    /// Segments of any length: a token with many claims has a payload far over any window.
+    #[test]
+    fn a_jwt_with_a_long_payload_is_a_jwt() {
+        let header = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
+        for claims in [10, 444, 5000] {
+            let payload = [
+                "ey",
+                "J",
+                &"c2NvcGUiOiJyZWFk".repeat(claims / 16 + 1)[..claims - 3],
+            ]
+            .concat();
+            let text = [
+                "token ",
+                header,
+                ".",
+                &payload,
+                ".",
+                "Zq3vK9mW2xR7tY5pL8nB4cD6fG1hJ0kAa2Ss",
+                " end",
+            ]
+            .concat();
+            assert_eq!(find(&text), Some("jwt"), "payload of {claims} characters");
+        }
+        // Near-misses: two segments, or a second segment that is no JSON object.
+        assert_eq!(
+            find(&["ey", "JhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0"].concat()),
+            None
+        );
+        assert_eq!(
+            find(&["ey", "JhbGciOiJIUzI1NiJ9.abcdefghijklmnop.qrstuvwxyz0123"].concat()),
+            None
+        );
+    }
+
     #[test]
     fn a_percent_encoded_url_password_is_a_password() {
         assert_eq!(
@@ -488,6 +534,7 @@ mod tests {
             ("aws prefix", "AKIA"),
             ("sk prefix", " sk-"),
             ("jwt", "eyJ."),
+            ("jwt segments", "eyJabcdefghij."),
             ("key header", "-----BEGIN "),
         ] {
             let text = unit.repeat(mib / unit.len());
