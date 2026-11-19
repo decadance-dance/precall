@@ -87,6 +87,33 @@ pub fn init(name_arg: Option<&str>, project_flag: Option<&str>) -> Result<String
         "\n# The runner the judges call (spec §6.8).\n[[plugins]]\nid = {}\n",
         config::toml_str(&runner)
     );
+    // The judges name no runner (spec §6.8): a user config without a default gets `claude`.
+    // Checked before the store exists, written after it, so a failure leaves nothing behind.
+    let default_runner = if user.runner.is_none() {
+        let path = config::user_config_path()?;
+        let old = match std::fs::read_to_string(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            r => r.with_context(|| format!("reading {}", path.display()))?,
+        };
+        // A top-level key goes before the first table, after a BOM, which must stay first.
+        let (bom, rest) = match old.strip_prefix('\u{feff}') {
+            Some(rest) => ("\u{feff}", rest),
+            None => ("", old.as_str()),
+        };
+        let new = format!(
+            "{bom}# The default runner of declarative plugins (spec §9).\nrunner = \"claude\"\n{rest}"
+        );
+        let parsed: config::UserConfig = toml::from_str(&new)
+            .with_context(|| format!("adding a default runner to {}", path.display()))?;
+        anyhow::ensure!(
+            parsed.runner.as_deref() == Some("claude"),
+            "adding a default runner to {} did not set it",
+            path.display()
+        );
+        Some((path, new))
+    } else {
+        None
+    };
     let created = !path.exists();
     let made = std::fs::create_dir_all(&path)
         .with_context(|| format!("creating {}", path.display()))
@@ -116,24 +143,13 @@ pub fn init(name_arg: Option<&str>, project_flag: Option<&str>) -> Result<String
     }
 
     let mut out = format!("Created the map of `{name}` at {}\n", path.display());
-    if user.runner.is_none() {
-        // A top-level key goes before the first table, so it is prepended, not appended.
-        let path = config::user_config_path()?;
-        let old = match std::fs::read_to_string(&path) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-            r => r.with_context(|| format!("reading {}", path.display()))?,
-        };
-        if let Some(dir) = path.parent() {
+    if let Some((user_path, text)) = default_runner {
+        if let Some(dir) = user_path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(
-            &path,
-            format!(
-                "# The default runner of declarative plugins (spec §9).\nrunner = \"claude\"\n{old}"
-            ),
-        )
-        .with_context(|| format!("writing {}", path.display()))?;
-        out += &format!("default runner: claude, in {}\n", path.display());
+        std::fs::write(&user_path, text)
+            .with_context(|| format!("writing {}", user_path.display()))?;
+        out += &format!("default runner: claude, in {}\n", user_path.display());
     }
     match user.project(&name) {
         None => {

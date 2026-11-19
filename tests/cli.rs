@@ -1220,3 +1220,18 @@ fn init_keeps_the_users_default_runner_and_enables_it() {
         "{cfg}"
     );
 }
+
+#[test]
+fn init_keeps_a_bom_prefixed_user_config_valid() {
+    let e = Env::new();
+    std::fs::create_dir_all(e.user_config().parent().unwrap()).unwrap();
+    let before = "\u{feff}# mine\n[[projects]]\nname = \"kiln\"\n";
+    std::fs::write(e.user_config(), before).unwrap();
+    e.ok(&["init", "kiln"]);
+    let user = std::fs::read_to_string(e.user_config()).unwrap();
+    // The BOM stays first, the default runner goes before every table, the rest is kept.
+    assert!(user.starts_with('\u{feff}'), "{user:?}");
+    assert!(user.ends_with(&before['\u{feff}'.len_utf8()..]), "{user:?}");
+    assert!(user.contains("runner = \"claude\"\n"), "{user:?}");
+    e.ok(&["--project", "kiln", "ls"]);
+}
