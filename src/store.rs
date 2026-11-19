@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 pub const BRANCH_SOURCE: &str = "config:rrecall.toml";
 
+#[derive(Debug, Clone)]
 pub struct Store {
     pub root: PathBuf,
     pub branches: Vec<BranchDef>,
@@ -444,7 +445,7 @@ mod tests {
         ];
         for (file, text, want) in cases {
             let t = store_with(&[(file, text)]);
-            let e = format!("{:#}", Store::load(&t.0).err().expect(want));
+            let e = format!("{:#}", Store::load(&t.0).expect_err(want));
             assert!(e.contains(want), "want `{want}` in: {e}");
         }
     }

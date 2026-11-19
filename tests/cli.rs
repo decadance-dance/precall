@@ -285,7 +285,7 @@ fn exit_codes() {
 }
 
 #[test]
-fn help_lists_m1_commands_only() {
+fn help_lists_the_built_commands_only() {
     let e = Env::new();
     let help = e.ok(&["--help"]);
     for c in [
@@ -300,13 +300,14 @@ fn help_lists_m1_commands_only() {
         "note",
         "rm",
         "agent-instructions",
+        "run",
     ] {
         assert!(
             help.contains(&format!("  {c} ")) || help.contains(&format!("  {c}\n")),
             "{c} missing:\n{help}"
         );
     }
-    for later in ["  run", "  open", "  doctor", "  plugin"] {
+    for later in ["  open", "  doctor", "  plugin"] {
         assert!(!help.contains(later), "{later} listed:\n{help}");
     }
 }

@@ -57,6 +57,18 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Run the pipeline: collect from the sources that changed, check, judge, commit.
+    Run {
+        /// Run only this collector instance.
+        #[arg(long)]
+        only: Option<String>,
+        /// Ignore fingerprints and collect every source again.
+        #[arg(long)]
+        force: bool,
+        /// Exit 4 instead of waiting when another run holds the store lock.
+        #[arg(long)]
+        no_wait: bool,
+    },
     /// The last run and its result.
     Status {
         #[arg(long)]
@@ -96,6 +108,18 @@ fn main() -> ExitCode {
         Cmd::Find { text, json } => commands::find(p, text, *json),
         Cmd::Why { id, json } => commands::why(p, id, *json),
         Cmd::Recent { since, json } => commands::recent(p, since, *json),
+        Cmd::Run {
+            only,
+            force,
+            no_wait,
+        } => rrecall::run::run(
+            p,
+            &rrecall::run::Opts {
+                only: only.clone(),
+                force: *force,
+                wait: !*no_wait,
+            },
+        ),
         Cmd::Status { json } => commands::status(p, *json),
         Cmd::Note { id, text } => commands::note(p, id, text),
         Cmd::Rm {

@@ -47,7 +47,7 @@ fn a_timeout_kills_the_group_without_kill_on_path() {
         run_id: "r1".into(),
         run_dir: store.join("runs/r1"),
     };
-    let e = run_hooks(&ctx, &ins, Event::RunBefore, &serde_json::json!({})).unwrap_err();
+    let e = run_hooks(&ctx, &ins, Event::RunBefore, &serde_json::json!({}), "").unwrap_err();
     assert_eq!(rrecall::error::exit_code(&e), 4, "{e:#}");
     assert!(format!("{e:#}").contains("timed out"), "{e:#}");
     assert!(!format!("{e:#}").contains("killing"), "{e:#}");
