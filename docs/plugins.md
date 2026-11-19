@@ -49,6 +49,7 @@ path = ""
 - A folder of notes has no cheap fingerprint without code, so `min_interval = "1d"` makes it due at most once a day instead.
 - [`prompt.md`](../examples/meeting-notes/prompt.md) tells the agent what to read and how to propose; [`resolve.md`](../examples/meeting-notes/resolve.md) tells it how to fetch a cited line back for the judges.
 - `path` is a param: every instance sets its own folder.
+- After its first run it reads only the notes dated on or after its last settled run (`since`, [spec §4.5](SPEC.md#45-incremental-collection)); a note written up late under an older date waits for `rrecall run --force`.
 
 Install it from a checkout of rrecall. `plugin add` shows the manifest, the prompts and the runner they use, and asks before it copies anything into your user plugin directory:
 
