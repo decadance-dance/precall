@@ -1522,6 +1522,38 @@ fn a_second_run_waits_for_the_store_lock_or_fails_fast() {
 }
 
 #[test]
+fn the_builtin_html_view_renders_after_the_commit_and_its_failure_is_only_reported() {
+    let w = world(&props(&[add("a", "layout", "Queue")]));
+    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    w.config(&format!("{cfg}\n[[plugins]]\nid = \"html\"\n"));
+    w.run_code(&[], 0);
+    let page = std::fs::read_to_string(w.store().join("views/index.html")).unwrap();
+    assert!(page.contains("<title>kiln"), "{}", &page[..200]);
+    // The node the run added is changed since the last run, with the run commit in its history.
+    let start = r#"<script type="application/json" id="map-data">"#;
+    let from = page.find(start).unwrap() + start.len();
+    let to = from + page[from..].find("</script>").unwrap();
+    let data: Value = serde_json::from_str(&page[from..to]).unwrap();
+    let queue = data["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == "queue")
+        .unwrap();
+    assert_eq!(queue["changed"], true);
+    assert_eq!(queue["history"][0]["subject"], data["last_run"]["subject"]);
+    assert!(!w.report().contains("view `html` failed"), "{}", w.report());
+
+    // A view that cannot write its page is a warning; the run keeps its exit code.
+    let w = world(&props(&[add("a", "layout", "Queue")]));
+    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    w.config(&format!("{cfg}\n[[plugins]]\nid = \"html\"\n"));
+    std::fs::write(w.store().join("views"), "not a directory").unwrap();
+    w.run_code(&[], 0);
+    assert!(w.report().contains("view `html` failed"), "{}", w.report());
+}
+
+#[test]
 fn a_view_failure_is_reported_and_keeps_the_exit_code() {
     let w = world(&props(&[add("a", "layout", "Queue")]));
     let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
