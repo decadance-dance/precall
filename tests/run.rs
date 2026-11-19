@@ -1965,7 +1965,7 @@ fn an_add_a_judge_saw_without_a_destination_does_not_commit() {
     let ma = json!({"key": "ma", "op": "move", "id": "anchor", "parent": "layout", "sources": ["file:a.md"], "reason": "moved"});
     let a = json!({"key": "q", "op": "add", "parent": "parent", "title": "Queue", "body": "", "sources": ["gh-pr:o/r#9"], "reason": "found"});
     let say = |vs: &[(&str, &str)]| {
-        json!({"verdicts": vs.iter().map(|(k, v)| json!({"key": k, "verdict": v, "reason": format!("{v}")})).collect::<Vec<_>>()}).to_string()
+        json!({"verdicts": vs.iter().map(|(k, v)| json!({"key": k, "verdict": v, "reason": v})).collect::<Vec<_>>()}).to_string()
     };
     w.config(&format!(
         "max_rounds = 1\n{}{}{}{}{}",

@@ -1169,6 +1169,10 @@ fn a_failed_init_in_an_existing_directory_keeps_the_directory_and_its_files() {
     )
     .unwrap();
     assert_eq!(e.run(&["init", "already"]).code, 1);
+    assert!(
+        !e.user_config().exists(),
+        "the user config init wrote is undone"
+    );
     let mut left: Vec<String> = std::fs::read_dir(&store)
         .unwrap()
         .map(|f| f.unwrap().file_name().to_string_lossy().into_owned())
@@ -1262,4 +1266,42 @@ fn init_refuses_a_default_runner_it_cannot_find_and_enables_one_it_finds() {
     e.ok(&["init", "kiln"]);
     let cfg = std::fs::read_to_string(e.store("kiln").join("rrecall.toml")).unwrap();
     assert!(cfg.ends_with("[[plugins]]\nid = \"fast\"\n"), "{cfg}");
+}
+
+#[test]
+fn init_refuses_a_default_runner_whose_id_another_instance_takes() {
+    let e = Env::new();
+    let dir = e.user_config().parent().unwrap().to_path_buf();
+    let plugin = dir.join("plugins/support");
+    std::fs::create_dir_all(&plugin).unwrap();
+    std::fs::write(
+        plugin.join("rrecall-plugin.toml"),
+        "id = \"support\"\nname = \"A runner\"\nversion = \"0.1.0\"\nmin_rrecall = \"0.1.0\"\nkind = \"runner\"\n\n[runner]\ncommand = [\"/bin/cat\"]\n",
+    )
+    .unwrap();
+    std::fs::write(e.user_config(), "runner = \"support\"\n").unwrap();
+    let o = e.run(&["init", "kiln"]);
+    assert_eq!(o.code, 2, "{}", o.stderr);
+    assert!(o.stderr.contains("`support`"), "{}", o.stderr);
+    assert!(!e.store("kiln").exists(), "nothing is created");
+}
+
+#[test]
+fn init_that_cannot_write_the_user_config_leaves_nothing_and_can_be_retried() {
+    use std::os::unix::fs::PermissionsExt;
+    let e = Env::new();
+    std::fs::create_dir_all(e.user_config().parent().unwrap()).unwrap();
+    std::fs::write(e.user_config(), "[[projects]]\nname = \"kiln\"\n").unwrap();
+    let mode = |m| std::fs::Permissions::from_mode(m);
+    std::fs::set_permissions(e.user_config(), mode(0o444)).unwrap();
+    let o = e.run(&["init", "kiln"]);
+    assert_eq!(o.code, 1, "{}", o.stderr);
+    assert!(!e.store("kiln").exists(), "nothing is created");
+    std::fs::set_permissions(e.user_config(), mode(0o644)).unwrap();
+    e.ok(&["init", "kiln"]);
+    assert!(
+        std::fs::read_to_string(e.user_config())
+            .unwrap()
+            .contains("runner = \"claude\"")
+    );
 }
