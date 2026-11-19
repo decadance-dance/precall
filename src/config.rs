@@ -281,9 +281,7 @@ pub fn append_user_config(entry: &str) -> Result<()> {
 /// appends keep each other's entries, and publishes the result by rename once it parses as a
 /// user config, so a failure leaves the file as it was.
 fn append_at(path: &Path, entry: &str) -> Result<()> {
-    let dir = path.parent().context("the user config has no directory")?;
-    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let _held = crate::lock::lock_file(&dir.join("config.toml.lock"), true)?;
+    let _held = lock_config_at(path)?;
     let old = match std::fs::read_to_string(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         r => r.with_context(|| format!("reading {}", path.display()))?,
@@ -313,13 +311,58 @@ fn append_at(path: &Path, entry: &str) -> Result<()> {
         text = toml::to_string(&doc)?;
     }
     toml::from_str::<UserConfig>(&text).with_context(|| format!("updating {}", path.display()))?;
+    replace_config(path, &text)
+}
+
+/// Holds the user config's lock: every command that rewrites the user config (`init`,
+/// `plugin add`, `plugin trust`) reads and writes it under this lock.
+pub fn lock_user_config() -> Result<crate::lock::StoreLock> {
+    lock_config_at(&user_config_path()?)
+}
+
+fn lock_config_at(path: &Path) -> Result<crate::lock::StoreLock> {
+    let dir = path.parent().context("the user config has no directory")?;
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    crate::lock::lock_file(&dir.join("config.toml.lock"), true)?
+        .context("the user config lock was not granted")
+}
+
+/// Replaces the file at `path` with `text` by a rename, so a reader never sees half of it.
+/// The new file keeps the old one's mode (a private config stays private); a first one gets
+/// what a plain write would. Call it under [`lock_user_config`].
+pub fn replace_config(path: &Path, text: &str) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let dir = path.parent().context("the user config has no directory")?;
+    let mode = match std::fs::metadata(path) {
+        Ok(m) => Some(m.permissions().mode() & 0o7777),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    // A rename would replace a file its owner made read-only; a plain write would not.
+    if mode.is_some_and(|m| m & 0o200 == 0) {
+        anyhow::bail!("writing {}: the file is read-only", path.display());
+    }
     let tmp = dir.join(format!(".config.toml.{}", std::process::id()));
-    std::fs::write(&tmp, &text)
-        .and_then(|()| std::fs::rename(&tmp, path))
-        .inspect_err(|_| {
-            let _ = std::fs::remove_file(&tmp);
-        })
-        .with_context(|| format!("writing {}", path.display()))
+    let _ = std::fs::remove_file(&tmp);
+    let written = (|| {
+        // Owner-only until the old mode is copied over, never wider than the file it replaces.
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(if mode.is_some() { 0o600 } else { 0o666 })
+            .open(&tmp)?;
+        f.write_all(text.as_bytes())?;
+        if let Some(m) = mode {
+            f.set_permissions(std::fs::Permissions::from_mode(m))?;
+        }
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written.with_context(|| format!("writing {}", path.display()))
 }
 
 pub fn load_user_config() -> Result<UserConfig> {
@@ -417,6 +460,25 @@ pub fn resolve_project(flag: Option<&str>) -> Result<(String, PathBuf)> {
     Ok((name, path))
 }
 
+/// The name of the project whose store is `store`: the user config's entry with that store,
+/// else the store directory's name (the default store is `<data>/rrecall/<name>`).
+pub fn project_of(user: &UserConfig, store: &Path) -> String {
+    user.projects
+        .iter()
+        .find(|p| user.store_path(&p.name).is_ok_and(|s| s == store))
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| {
+            store
+                .file_name()
+                .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+        })
+}
+
+/// `s` single-quoted as one shell word.
+pub fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// A TOML basic string with its quotes and escapes.
 pub fn toml_str(s: &str) -> String {
     toml::Value::String(s.to_string()).to_string()
@@ -426,6 +488,26 @@ pub fn toml_str(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::testutil::TempDir;
+
+    #[test]
+    fn appends_keep_a_private_config_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = TempDir::new();
+        let path = t.0.join("config.toml");
+        std::fs::write(&path, "runner = \"claude\"\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        append_at(&path, "[[trusted]]\npath = \"/a\"\nhash = \"h\"\n").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        // A new file is no wider than a plain write would make it.
+        let fresh = t.0.join("fresh/config.toml");
+        append_at(&fresh, "[[trusted]]\npath = \"/a\"\nhash = \"h\"\n").unwrap();
+        let plain = t.0.join("plain");
+        std::fs::write(&plain, "").unwrap();
+        let want = std::fs::metadata(&plain).unwrap().permissions().mode() & 0o777;
+        let got = std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777;
+        assert_eq!(got & !want, 0, "{got:o} is wider than {want:o}");
+    }
 
     #[test]
     fn appends_wait_for_the_lock_and_keep_both_entries() {

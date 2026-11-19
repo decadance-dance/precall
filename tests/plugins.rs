@@ -146,6 +146,31 @@ impl W {
         }
     }
 
+    /// Starts rrecall in the work dir with stdin closed; the caller waits.
+    fn spawn(&self, args: &[&str]) -> std::process::Child {
+        Command::new(env!("CARGO_BIN_EXE_rrecall"))
+            .args(args)
+            .current_dir(self.root.join("work"))
+            .env("HOME", self.root.join("home"))
+            .env("XDG_DATA_HOME", self.root.join("data"))
+            .env("XDG_CONFIG_HOME", self.root.join("config"))
+            .env(
+                "PATH",
+                format!(
+                    "{}/tests/fixtures/bin:{}",
+                    env!("CARGO_MANIFEST_DIR"),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .env_remove("RRECALL_PROJECT")
+            .env_remove("GIT_DIR")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    }
+
     /// Replaces the store config with `repo` and `plugins`, and commits it.
     fn config(&self, plugins: &str) {
         let text = format!("repo = {}\n{plugins}", q(&self.repo().to_string_lossy()));
@@ -326,7 +351,10 @@ fn plugin_trust_records_the_directory_and_a_changed_hash_needs_trust_again() {
     let run = w.rr(&["--project", "kettle", "run"], "");
     assert_eq!(run.code, 4, "{}", run.stderr);
     assert!(
-        run.stderr.contains("rrecall plugin trust"),
+        run.stderr.contains(&format!(
+            "rrecall --project kettle plugin trust '{}'",
+            dir.display()
+        )),
         "{}",
         run.stderr
     );
@@ -463,7 +491,11 @@ fn doctor_reports_an_untrusted_project_directory_as_the_run_would() {
     w.config("\n[[plugins]]\nid = \"lid-check\"\n");
     let o = w.rr(&["--project", "kettle", "doctor"], "");
     assert_eq!(o.code, 4, "{}", o.stderr);
-    assert!(o.stderr.contains("rrecall plugin trust"), "{}", o.stderr);
+    let dir = w.repo().join(".rrecall/plugins");
+    let hint = format!("rrecall --project kettle plugin trust '{}'", dir.display());
+    assert!(o.stderr.contains(&hint), "{}", o.stderr);
+    let l = w.rr(&["--project", "kettle", "plugin", "list"], "");
+    assert!(l.stdout.contains(&hint), "{}", l.stdout);
 }
 
 #[test]
@@ -759,4 +791,172 @@ fn doctor_runs_fingerprints_in_a_scratch_state_dir() {
     )
     .unwrap();
     assert_eq!(out.trim(), "1", "a fresh dir on each doctor run");
+}
+
+// ---- review round 2 ----
+
+/// Adds `blobs` (path, mode, content) to the index of the git repo at `dir` and commits them;
+/// returns the commit. Plumbing, so paths the working tree could not hold are possible.
+fn commit_blobs(dir: &Path, blobs: &[(&str, &str, &str)]) -> String {
+    for (path, mode, text) in blobs {
+        let o = Command::new("git")
+            .args(["hash-object", "-w", "--stdin"])
+            .current_dir(dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .and_then(|mut c| {
+                use std::io::Write;
+                c.stdin.take().unwrap().write_all(text.as_bytes())?;
+                c.wait_with_output()
+            })
+            .unwrap();
+        let sha = String::from_utf8(o.stdout).unwrap().trim().to_string();
+        git_in(
+            dir,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("{mode},{sha},{path}"),
+            ],
+        );
+    }
+    git_in(dir, &["commit", "-q", "-m", "blobs"]);
+    git_in(dir, &["rev-parse", "HEAD"])
+}
+
+fn committed_plugin(dir: &Path) {
+    check_plugin(dir, "steam-check", "1.0.0", &[]);
+    git_in(dir, &["init", "-q", "-b", "main"]);
+    git_in(dir, &["add", "."]);
+    git_in(dir, &["commit", "-q", "-m", "v1"]);
+}
+
+#[test]
+fn plugin_add_refuses_tree_paths_that_collide_by_case() {
+    let w = W::new();
+    let src = w.root.join("src/steam");
+    committed_plugin(&src);
+    let head = commit_blobs(
+        &src,
+        &[
+            ("ReadMe.txt", "100644", "first\n"),
+            ("readme.txt", "100644", "second\n"),
+        ],
+    );
+    let o = w.rr(
+        &["plugin", "add", src.to_str().unwrap(), "--ref", &head],
+        "y\n",
+    );
+    assert_ne!(o.code, 0, "{}{}", o.stdout, o.stderr);
+    assert!(o.stderr.contains("readme.txt"), "{}", o.stderr);
+    assert!(!w.user_plugins().join("steam-check").exists());
+}
+
+#[test]
+fn plugin_add_never_writes_through_a_link_from_the_tree() {
+    let w = W::new();
+    let outside = w.root.join("rec/outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let src = w.root.join("src/steam");
+    committed_plugin(&src);
+    let head = commit_blobs(
+        &src,
+        &[
+            ("Out", "120000", outside.to_str().unwrap()),
+            ("out/pwn", "100644", "pwned\n"),
+        ],
+    );
+    let o = w.rr(
+        &["plugin", "add", src.to_str().unwrap(), "--ref", &head],
+        "y\n",
+    );
+    assert_ne!(o.code, 0, "{}{}", o.stdout, o.stderr);
+    assert!(!outside.join("pwn").exists(), "wrote through a link");
+    assert!(!w.user_plugins().join("steam-check").exists());
+}
+
+#[test]
+fn plugin_trust_rejects_a_relative_repo_as_the_loader_does() {
+    let w = W::with_store();
+    check_plugin(
+        &w.root.join("work/relative/.rrecall/plugins/lid-check"),
+        "lid-check",
+        "1.0.0",
+        &[],
+    );
+    std::fs::write(w.store().join("rrecall.toml"), "repo = \"relative\"\n").unwrap();
+    let o = w.rr(
+        &[
+            "--project",
+            "kettle",
+            "plugin",
+            "trust",
+            "./relative/.rrecall/plugins",
+        ],
+        "y\n",
+    );
+    assert_ne!(o.code, 0, "{}{}", o.stdout, o.stderr);
+    assert!(o.stderr.contains("is not an absolute path"), "{}", o.stderr);
+    assert!(!w.user_config().contains("[[trusted]]"));
+}
+
+#[test]
+fn concurrent_doctors_keep_their_own_scratch_state() {
+    let w = W::with_store();
+    let dir = w.store().join("plugins/kettle-notes");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("rrecall-plugin.toml"),
+        "id = \"kettle-notes\"\nname = \"N\"\nversion = \"1.0.0\"\nmin_rrecall = \"0.1.0\"\nkind = \"collector\"\n\n[collector]\nscope = [\"decisions\"]\nsource_kinds = [\"kettle-note\"]\nfingerprint = [\"./fp.sh\"]\ncommand = [\"./fp.sh\"]\n",
+    )
+    .unwrap();
+    // The first call parks until `go` exists, then checks that its scratch file survived.
+    std::fs::write(
+        dir.join("fp.sh"),
+        "#!/bin/sh\ntouch \"$RRECALL_STATE_DIR/mine.$$\"\ntouch \"$HOME/started\"\nwhile [ ! -e \"$HOME/go\" ]; do sleep 0.05; done\n[ -e \"$RRECALL_STATE_DIR/mine.$$\" ] || { echo 'my scratch file disappeared' >&2; exit 1; }\necho ok\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(dir.join("fp.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    w.config("\n[[plugins]]\nid = \"kettle-notes\"\n");
+    let home = w.root.join("home");
+    let first = w.spawn(&["--project", "kettle", "doctor"]);
+    while !home.join("started").exists() {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let second = w.spawn(&["--project", "kettle", "doctor"]);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    std::fs::write(home.join("go"), "").unwrap();
+    for c in [first, second] {
+        let o = c.wait_with_output().unwrap();
+        assert!(
+            o.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        );
+    }
+}
+
+#[test]
+fn init_waits_for_the_user_config_lock() {
+    let w = W::new();
+    let cfg_dir = w.root.join("config/rrecall");
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    let held = rrecall::lock::lock_file(&cfg_dir.join("config.toml.lock"), true).unwrap();
+    let init = w.spawn(&["init", "kettle"]);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(
+        !cfg_dir.join("config.toml").exists(),
+        "init wrote the user config while another command held its lock"
+    );
+    drop(held);
+    let o = init.wait_with_output().unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(
+        w.user_config().contains("name = \"kettle\""),
+        "{}",
+        w.user_config()
+    );
 }

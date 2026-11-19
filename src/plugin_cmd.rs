@@ -107,13 +107,14 @@ pub fn trust(project: Option<&str>, dir: &Path) -> Result<String> {
     // The loader reads only the project's own `.rrecall/plugins/`; trusting any other
     // directory would record a decision nothing ever consults.
     let (name, store) = config::resolve_project(project)?;
-    let repo = config::load_store_config(&store)?.repo.ok_or_else(|| {
+    let cfg = config::load_store_config(&store)?;
+    // The loader's own check of `repo`, so trust never records what a run would reject.
+    let expected = plugin::project_plugin_dir(&cfg)?.ok_or_else(|| {
         error::usage(format!(
             "project `{name}` names no repository (`repo` in {}), so no plugin directory of its own loads",
             store.join(config::STORE_CONFIG).display()
         ))
     })?;
-    let expected = repo.join(".rrecall/plugins");
     if expected.canonicalize().ok().as_ref() != Some(&dir) {
         return Err(error::usage(format!(
             "{} is not the plugin directory of project `{name}`: that is {}",
@@ -186,9 +187,9 @@ pub fn list(project: Option<&str>) -> Result<String> {
                 .collect();
             if let Some(d) = found.untrusted {
                 out += &format!(
-                    "project {}: not trusted; run `rrecall plugin trust {}`\n",
+                    "project {}: not trusted; run `{}`\n",
                     d.display(),
-                    d.display()
+                    plugin::trust_hint(&user, &store, &d)
                 );
             }
             for e in &cfg.plugins {
@@ -384,6 +385,8 @@ fn fetch(url: &str, git_ref: Option<&str>, stage: &Path, tree: &Path) -> Result<
         "list the tree",
     )?;
     std::fs::create_dir(tree).with_context(|| format!("creating {}", tree.display()))?;
+    // Lower-cased path -> (the path as written, whether it is a directory).
+    let mut written: std::collections::HashMap<String, (String, bool)> = Default::default();
     for item in listing.split(|b| *b == 0).filter(|i| !i.is_empty()) {
         let item = std::str::from_utf8(item).context("a path in the tree is not UTF-8")?;
         let (meta, rel) = item.split_once('\t').context("an unreadable tree entry")?;
@@ -395,16 +398,39 @@ fn fetch(url: &str, git_ref: Option<&str>, stage: &Path, tree: &Path) -> Result<
         {
             bail!("the tree holds the path `{rel}`, which add does not write");
         }
-        let dst = tree.join(rel);
-        if let Some(d) = dst.parent() {
-            std::fs::create_dir_all(d).with_context(|| format!("creating {}", d.display()))?;
+        // Every path is created exclusively and checked against what is already written, by
+        // name as a case-insensitive file system sees it: no entry replaces another, and no
+        // directory on the way is a link the tree itself made.
+        let parts: Vec<&str> = rel.split('/').collect();
+        for depth in 1..=parts.len() {
+            let path = parts[..depth].join("/");
+            let leaf = depth == parts.len();
+            match written.get(&path.to_lowercase()) {
+                Some((was, true)) if !leaf && *was == path => continue,
+                Some((was, _)) => bail!("the tree path `{path}` collides with `{was}`"),
+                None => {}
+            }
+            written.insert(path.to_lowercase(), (path.clone(), !leaf));
+            if !leaf {
+                let d = tree.join(&path);
+                std::fs::create_dir(&d).with_context(|| format!("creating {}", d.display()))?;
+            }
         }
+        let dst = tree.join(rel);
         let blob = || git(&["cat-file", "blob", sha], &format!("read {rel}"));
         match mode {
             "100644" | "100755" => {
-                std::fs::write(&dst, blob()?)
-                    .with_context(|| format!("writing {}", dst.display()))?;
+                use std::os::unix::fs::OpenOptionsExt;
                 let bits = if mode == "100755" { 0o755 } else { 0o644 };
+                let bytes = blob()?;
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(bits)
+                    .open(&dst)
+                    .and_then(|mut f| f.write_all(&bytes))
+                    .with_context(|| format!("writing {}", dst.display()))?;
+                // The umask may have narrowed the mode; the tree's mode is what the hash covers.
                 std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(bits))?;
             }
             "120000" => {

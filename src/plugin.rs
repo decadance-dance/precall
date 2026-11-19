@@ -644,33 +644,59 @@ pub fn places(
     // The first place, the plugins inside the binary, has no directory: see [`builtin`].
     let mut dirs = vec![user_plugins.to_path_buf()];
     let mut untrusted = None;
-    if let Some(repo) = &cfg.repo {
-        if !repo.is_absolute() {
-            bail!(
-                "{}: repo `{}` is not an absolute path",
-                config::STORE_CONFIG,
-                repo.display()
-            );
-        }
-        let dir = repo.join(".rrecall/plugins");
-        if dir.is_dir() {
-            let dir = dir
-                .canonicalize()
-                .with_context(|| format!("reading {}", dir.display()))?;
-            let hash = content_hash(&dir)?;
-            let trusted = user
-                .trusted
-                .iter()
-                .any(|t| t.hash == hash && t.path.canonicalize().is_ok_and(|p| p == dir));
-            if trusted {
-                dirs.push(dir);
-            } else {
-                untrusted = Some(dir);
-            }
+    if let Some(dir) = project_plugin_dir(cfg)?
+        && dir.is_dir()
+    {
+        let dir = dir
+            .canonicalize()
+            .with_context(|| format!("reading {}", dir.display()))?;
+        let hash = content_hash(&dir)?;
+        let trusted = user
+            .trusted
+            .iter()
+            .any(|t| t.hash == hash && t.path.canonicalize().is_ok_and(|p| p == dir));
+        if trusted {
+            dirs.push(dir);
+        } else {
+            untrusted = Some(dir);
         }
     }
     dirs.push(store.join("plugins"));
     Ok(Places { dirs, untrusted })
+}
+
+/// The project's `.rrecall/plugins/` as the store config's `repo` names it (spec §6.2), not
+/// resolved; `None` without a `repo`. A relative `repo` is a config error.
+pub fn project_plugin_dir(cfg: &StoreConfig) -> Result<Option<PathBuf>> {
+    let Some(repo) = &cfg.repo else {
+        return Ok(None);
+    };
+    if !repo.is_absolute() {
+        bail!(
+            "{}: repo `{}` is not an absolute path",
+            config::STORE_CONFIG,
+            repo.display()
+        );
+    }
+    Ok(Some(repo.join(".rrecall/plugins")))
+}
+
+/// The command that trusts `dir` for the project whose store is `store`, ready to paste.
+pub fn trust_hint(user: &UserConfig, store: &Path, dir: &Path) -> String {
+    let name = config::project_of(user, store);
+    let plain = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c));
+    format!(
+        "rrecall --project {} plugin trust {}",
+        if plain {
+            name
+        } else {
+            config::shell_quote(&name)
+        },
+        config::shell_quote(&dir.to_string_lossy())
+    )
 }
 
 /// The content hash the lock records for `plugin` (spec §4.2, §6.7): a built-in has no
@@ -1000,12 +1026,12 @@ pub fn load_with(store: &Path, user: &UserConfig, user_plugins: &Path) -> Result
                 .find(|e| !plugins.contains_key(e.uses.as_deref().unwrap_or(&e.id)))
         {
             bail!(
-                "{}: plugin instance `{}`: no plugin `{}` was found; {} holds plugins that are not trusted: run `rrecall plugin trust {}`",
+                "{}: plugin instance `{}`: no plugin `{}` was found; {} holds plugins that are not trusted: run `{}`",
                 config::STORE_CONFIG,
                 e.id,
                 e.uses.as_deref().unwrap_or(&e.id),
                 d.display(),
-                d.display()
+                trust_hint(user, store, d)
             );
         }
         instances(&cfg.plugins, &plugins, &cfg.branches()?)

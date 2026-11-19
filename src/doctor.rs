@@ -32,6 +32,10 @@ pub fn doctor(project: Option<&str>) -> Result<String> {
         // Not under runs/: `status` reads the last run there, and doctor is no run.
         run_dir: store.join("cache/doctor"),
     };
+    // One doctor at a time per store: each clears and fills the same scratch and log dir.
+    std::fs::create_dir_all(&ctx.run_dir)
+        .with_context(|| format!("creating {}", ctx.run_dir.display()))?;
+    let _held = crate::lock::lock_file(&store.join("cache/doctor.lock"), true)?;
     // Fingerprints get a fresh state dir each time, so a probe never changes what a run reads.
     let scratch = ctx.run_dir.join("state");
     match std::fs::remove_dir_all(&scratch) {
