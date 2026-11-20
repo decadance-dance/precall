@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="400" viewBox="0 0 1200 400" role="img" aria-labelledby="title desc">
-  <title id="title">rrecall: a versioned map of a software project, built from its own sources</title>
-  <desc id="desc">The command rrecall run &amp;&amp; rrecall open. Five sources, the repo, its git history, GitHub, Slack and your own plugins, feed one run: fingerprint, collect, check, judge, rework of rejected changes, up to 2 rounds by default, commit. The run writes the map, kept in its own git repository, with six branches: layout, how-it-works, people, done, blocked and decisions; one new node lands under decisions. The commit reads run 2026-11-19T09:14Z: +3 ~1 -0 (rejected 2). The tagline: your project's sources in, one map out; nothing due: no model call, no change. Exit codes: 0 done, 4 aborted, 5 partial.</desc>
+  <title id="title">precall · Project Recall, a versioned map built from a project's own sources</title>
+  <desc id="desc">The command precall run &amp;&amp; precall open. Five sources, the repo, its git history, GitHub, Slack and your own plugins, feed one run: fingerprint, collect, check, judge, rework of rejected changes, up to 2 rounds by default, commit. The run writes the map, kept in its own git repository, with six branches: layout, how-it-works, people, done, blocked and decisions; one new node lands under decisions. The commit reads run 2026-11-19T09:14Z: +3 ~1 -0 (rejected 2). The tagline: your project's sources in, one map out; nothing due: no model call, no change. Exit codes: 0 done, 4 aborted, 5 partial.</desc>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="0.35">
       <stop offset="0" stop-color="#06150f"/><stop offset="0.5" stop-color="#0b0b10"/><stop offset="1" stop-color="#08100e"/>
@@ -18,10 +18,10 @@
 
   <g id="title-block">
     <rect x="64" y="72" width="330" height="36" rx="10" fill="#14141c" stroke="#2a2a36" stroke-width="1.5"/>
-    <text x="82" y="96" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" fill="#e5e5e5"><tspan fill="#34d399">$</tspan> rrecall run <tspan fill="#8b8b9a">&amp;&amp;</tspan> rrecall open</text>
+    <text x="82" y="96" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" fill="#e5e5e5"><tspan fill="#34d399">$</tspan> precall run <tspan fill="#8b8b9a">&amp;&amp;</tspan> precall open</text>
     <rect x="372" y="82" width="9" height="17" rx="1" fill="#e5e5e5" opacity="0.8"/>
-    <text x="58" y="194" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="84" font-weight="700" letter-spacing="-3" fill="url(#word)">rrecall</text>
-    <text x="64" y="238" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="23" fill="#c4c4cc">Your project's sources in, one map out;</text>
+    <text x="58" y="194" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="84" font-weight="700" letter-spacing="-3" fill="url(#word)">precall</text>
+    <text x="64" y="238" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="23" fill="#c4c4cc">Project Recall · a versioned project map</text>
     <text x="64" y="270" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="23" fill="#c4c4cc">nothing due: no model call, no change.</text>
     <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14">
       <text x="64" y="331" fill="#8b8b9a">exit</text>
@@ -58,7 +58,7 @@
   <g id="run" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13">
     <rect x="722" y="70" width="140" height="218" rx="12" fill="#0d0d14" stroke="#34d399" stroke-width="1.5"/>
     <path d="M722 104 H862" stroke="#2a2a36" stroke-width="1.5"/>
-    <text x="738" y="92" fill="#34d399" font-weight="700">rrecall run</text>
+    <text x="738" y="92" fill="#34d399" font-weight="700">precall run</text>
     <path d="M744 128 V266" stroke="#2a2a36" stroke-width="1.5"/>
     <circle cx="744" cy="128" r="4" fill="#5b5b68"/><text x="758" y="132" fill="#c4c4cc">fingerprint</text>
     <circle cx="744" cy="156" r="4" fill="#5b5b68"/><text x="758" y="160" fill="#c4c4cc">collect</text>

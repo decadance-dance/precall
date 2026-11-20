@@ -33,7 +33,7 @@ pub fn init(name_arg: Option<&str>, project_flag: Option<&str>) -> Result<String
         .ok()
         .map(|s| s.trim().to_string());
     let origin = config::origin_url(&cwd);
-    let env = std::env::var("RRECALL_PROJECT")
+    let env = std::env::var("PRECALL_PROJECT")
         .ok()
         .filter(|v| !v.is_empty());
     let name = name_arg
@@ -43,7 +43,7 @@ pub fn init(name_arg: Option<&str>, project_flag: Option<&str>) -> Result<String
         .or_else(|| origin.as_deref().map(origin_basename))
         .ok_or_else(|| {
             error::usage(
-                "name the project: `rrecall init <project>` (no origin remote to name it after)",
+                "name the project: `precall init <project>` (no origin remote to name it after)",
             )
         })?;
     config::check_project_name(&name)?;
@@ -56,7 +56,7 @@ pub fn init(name_arg: Option<&str>, project_flag: Option<&str>) -> Result<String
         )));
     }
     let mut cfg = String::from(
-        "# rrecall store config (spec §9). Add branches with [[skeleton.branch]] (id, title, question, granularity).\n",
+        "# precall store config (spec §9). Add branches with [[skeleton.branch]] (id, title, question, granularity).\n",
     );
     let mut found = Vec::new();
     // The instance ids this config enables, which the default runner's id must not take.
@@ -73,10 +73,10 @@ pub fn init(name_arg: Option<&str>, project_flag: Option<&str>) -> Result<String
         ids.push("repo");
         // Top-level keys go before the first table.
         cfg += &format!(
-            "\n# The project's repository: its .rrecall/plugins/ loads once trusted.\nrepo = {}\n",
+            "\n# The project's repository: its .precall/plugins/ loads once trusted.\nrepo = {}\n",
             config::toml_str(top)
         );
-        cfg += "\n# Sources rrecall init found, as the plugin instances `rrecall run` will use.\n";
+        cfg += "\n# Sources precall init found, as the plugin instances `precall run` will use.\n";
         cfg += &format!(
             "[[plugins]]\nid = \"repo\"\nuse = \"files\"\nparams = {{ path = {}, git = true, preset = \"codebase\" }}\n",
             config::toml_str(top)
@@ -100,7 +100,7 @@ pub fn init(name_arg: Option<&str>, project_flag: Option<&str>) -> Result<String
     let runner = user.runner.clone().unwrap_or_else(|| "claude".into());
     if !plugin::finds_runner(&user, top.as_deref().map(Path::new), &path, &runner)? {
         return Err(error::usage(format!(
-            "the user config's default runner `{runner}` is no runner plugin rrecall can find, so init cannot enable it: set `runner` in {} to a runner plugin id (`claude`, `codex`), or add the instance to the store's config after init",
+            "the user config's default runner `{runner}` is no runner plugin precall can find, so init cannot enable it: set `runner` in {} to a runner plugin id (`claude`, `codex`), or add the instance to the store's config after init",
             config::user_config_path()?.display()
         )));
     }
@@ -114,7 +114,7 @@ pub fn init(name_arg: Option<&str>, project_flag: Option<&str>) -> Result<String
         "\n# The runner the judges call (spec §6.8).\n[[plugins]]\nid = {}\n",
         config::toml_str(&runner)
     );
-    cfg += "\n# The built-in html view: views/index.html after each run, and `rrecall open` (spec §8).\n[[plugins]]\nid = \"html\"\n";
+    cfg += "\n# The built-in html view: views/index.html after each run, and `precall open` (spec §8).\n[[plugins]]\nid = \"html\"\n";
     // The user config gains a default runner (the judges name none, spec §6.8) and the
     // project's entry. It is written before the store and restored if the store fails, so a
     // failure leaves nothing behind and init can run again.
@@ -193,7 +193,7 @@ pub fn init(name_arg: Option<&str>, project_flag: Option<&str>) -> Result<String
     if let Some(p) = user.project(&name)
         && let Some(url) = origin.as_ref().filter(|u| !p.remotes.contains(u))
     {
-        // limit: rrecall appends whole entries only, so it does not edit an existing one.
+        // limit: precall appends whole entries only, so it does not edit an existing one.
         out += &format!(
             "Add {url} to the remotes of project `{name}` in {} to resolve it from this repo.\n",
             user_path.display()
@@ -212,7 +212,7 @@ pub fn init(name_arg: Option<&str>, project_flag: Option<&str>) -> Result<String
             found.join(", ")
         }
     );
-    out += "Next: `rrecall import <outline>` to seed it, `rrecall ls` to read it.\n";
+    out += "Next: `precall import <outline>` to seed it, `precall ls` to read it.\n";
     Ok(out)
 }
 
@@ -291,7 +291,7 @@ pub fn status(project: Option<&str>, json: bool) -> Result<String> {
         (false, Some(run), Some(report)) => {
             format!("Last run: {run}\n\n{}", crate::run::summary_of(&report))
         }
-        _ => "No run report yet: this map has not been through `rrecall run`.\n".into(),
+        _ => "No run report yet: this map has not been through `precall run`.\n".into(),
     })
 }
 
@@ -305,7 +305,7 @@ fn stored_node<'a>(s: &'a Store, id: &str) -> Result<&'a Node> {
     Ok(n)
 }
 
-/// `rrecall open`: renders the built-in html view and opens it with `RRECALL_BROWSER`, else the
+/// `precall open`: renders the built-in html view and opens it with `PRECALL_BROWSER`, else the
 /// platform's opener (spec §2, §8). The page stays written when the opener fails.
 pub fn open_page(project: Option<&str>) -> Result<String> {
     let (name, root) = config::resolve_project(project)?;
@@ -316,7 +316,7 @@ pub fn open_page(project: Option<&str>) -> Result<String> {
         .and_then(|()| out.flush())
         .context("printing the page's path")?;
     drop(out);
-    let browser = std::env::var_os("RRECALL_BROWSER")
+    let browser = std::env::var_os("PRECALL_BROWSER")
         .filter(|b| !b.is_empty())
         .unwrap_or_else(|| {
             if cfg!(target_os = "macos") {
@@ -391,16 +391,16 @@ pub fn rm(
 }
 
 pub const AGENT_INSTRUCTIONS: &str = "\
-This project has an rrecall map: a versioned map of what lives where, how it works, who owns what, \
+This project has an precall map: a versioned map of what lives where, how it works, who owns what, \
 what was done, what is blocked and why decisions were made, as of its last run. Ask it one question \
-per call instead of reading the whole map: `rrecall ls` lists branches and ids; `rrecall show <id>` \
+per call instead of reading the whole map: `precall ls` lists branches and ids; `precall show <id>` \
 prints one node with its sources (`--depth N` for more of its subtree, `--max-tokens N` to cap the size); \
-`rrecall find <text>` searches titles and bodies; `rrecall recent --since 7d` shows what changed lately; \
-`rrecall why <id>` shows when and why a node appeared. Add `--json` for JSON. \
+`precall find <text>` searches titles and bodies; `precall recent --since 7d` shows what changed lately; \
+`precall why <id>` shows when and why a node appeared. Add `--json` for JSON. \
 For the live status of a task, ask the tracker the map points to.
 ";
 
-/// `rrecall builtin <id>`: what a built-in plugin's argv runs (spec §6.2).
+/// `precall builtin <id>`: what a built-in plugin's argv runs (spec §6.2).
 pub fn builtin(id: &str, entry: Option<&str>) -> Result<String> {
     let mut input = String::new();
     std::io::Read::read_to_string(&mut std::io::stdin(), &mut input).context("reading stdin")?;
@@ -420,7 +420,7 @@ pub fn import(project: Option<&str>, file: &Path) -> Result<String> {
     let path = s.root.clone();
     if s.nodes.len() > s.branches.len() {
         return Err(error::usage(
-            "the map already has nodes; `rrecall import` seeds an empty map",
+            "the map already has nodes; `precall import` seeds an empty map",
         ));
     }
     let text =

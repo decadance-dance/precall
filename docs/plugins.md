@@ -1,10 +1,10 @@
-# Writing rrecall plugins
+# Writing precall plugins
 
-Read when: you want rrecall to read a source it does not know (another tracker, a chat, a folder of notes), to judge proposals by your own rules, to render the map another way, or to run another agent.
+Read when: you want precall to read a source it does not know (another tracker, a chat, a folder of notes), to judge proposals by your own rules, to render the map another way, or to run another agent.
 
-rrecall's core knows nodes, the map store and one loop; every source, check, judge, view and agent runner is a plugin, the built-in ones included (VISION, principle 6). A plugin is a directory with a manifest, `rrecall-plugin.toml`, and, depending on its kind, a prompt, a program in any language, or both. It reads one JSON document on stdin and writes one on stdout. The simplest plugin is a manifest and a prompt, with no code at all.
+precall's core knows nodes, the map store and one loop; every source, check, judge, view and agent runner is a plugin, the built-in ones included (VISION, principle 6). A plugin is a directory with a manifest, `precall-plugin.toml`, and, depending on its kind, a prompt, a program in any language, or both. It reads one JSON document on stdin and writes one on stdout. The simplest plugin is a manifest and a prompt, with no code at all.
 
-This guide is a walk through; [SPEC.md §6](SPEC.md#6-plugin-protocol) holds the full rules, and each section below links to the part it summarizes. Every JSON example here is checked against the code by `tests/plugin_guide.rs`, so what you see is what rrecall sends and accepts.
+This guide is a walk through; [SPEC.md §6](SPEC.md#6-plugin-protocol) holds the full rules, and each section below links to the part it summarizes. Every JSON example here is checked against the code by `tests/plugin_guide.rs`, so what you see is what precall sends and accepts.
 
 ## Contents
 
@@ -26,12 +26,12 @@ This guide is a walk through; [SPEC.md §6](SPEC.md#6-plugin-protocol) holds the
 
 [`examples/meeting-notes/`](../examples/meeting-notes/) is a complete collector for an invented source: a folder of meeting notes, one Markdown file per meeting, named `YYYY-MM-DD-<slug>.md`, with `## Decisions`, `## Blocked` and `## Owners` sections ([`examples/meeting-notes-data/`](../examples/meeting-notes-data/) has two). It is a manifest and two prompts, no code:
 
-<!-- file: examples/meeting-notes/rrecall-plugin.toml -->
+<!-- file: examples/meeting-notes/precall-plugin.toml -->
 ```toml
 id = "meeting-notes"
 name = "Meeting notes in a fixed format"
 version = "0.1.0"
-min_rrecall = "0.1.0"
+min_precall = "0.1.0"
 kind = "collector"
 
 [collector]
@@ -49,24 +49,24 @@ path = ""
 - A folder of notes has no cheap fingerprint without code, so `min_interval = "1d"` makes it due at most once a day instead.
 - [`prompt.md`](../examples/meeting-notes/prompt.md) tells the agent what to read and how to propose; [`resolve.md`](../examples/meeting-notes/resolve.md) tells it how to fetch a cited line back for the judges.
 - `path` is a param: every instance sets its own folder.
-- After its first run it reads only the notes dated on or after its last settled run (`since`, [spec §4.5](SPEC.md#45-incremental-collection)); a note written up late under an older date waits for `rrecall run --force`.
+- After its first run it reads only the notes dated on or after its last settled run (`since`, [spec §4.5](SPEC.md#45-incremental-collection)); a note written up late under an older date waits for `precall run --force`.
 
-Try it on a trial project. In a checkout of rrecall, install the plugin: `plugin add` shows the manifest, the prompts and the runner they use, and asks before it copies anything into your user plugin directory:
+Try it on a trial project. In a checkout of precall, install the plugin: `plugin add` shows the manifest, the prompts and the runner they use, and asks before it copies anything into your user plugin directory:
 
 <!-- step: install -->
 ```sh
-rrecall plugin add examples/meeting-notes    # in the checkout; shows the plugin, answer y
+precall plugin add examples/meeting-notes    # in the checkout; shows the plugin, answer y
 ```
 
-Then leave the checkout and create a map store for the trial project `lantern`. Run `init` outside any git repository: inside one, `init` also enables collectors for that repository and its GitHub `origin`, and the run would read them too. `init` prints where the store is (`~/.local/share/rrecall/lantern` by default):
+Then leave the checkout and create a map store for the trial project `lantern`. Run `init` outside any git repository: inside one, `init` also enables collectors for that repository and its GitHub `origin`, and the run would read them too. `init` prints where the store is (`~/.local/share/precall/lantern` by default):
 
 <!-- step: init -->
 ```sh
 cd ~                    # out of the checkout, outside any git repository
-rrecall init lantern
+precall init lantern
 ```
 
-Enable the plugin for the project: append an instance to the store's `rrecall.toml`, after the instances `init` wrote, with the absolute path of your notes folder (the example's `examples/meeting-notes-data/` will do):
+Enable the plugin for the project: append an instance to the store's `precall.toml`, after the instances `init` wrote, with the absolute path of your notes folder (the example's `examples/meeting-notes-data/` will do):
 
 <!-- step: enable -->
 ```toml
@@ -75,17 +75,17 @@ id = "meeting-notes"
 params = { path = "/home/me/meetings" }
 ```
 
-Then check and run it. Outside the project's repository, rrecall finds the project only by name, so name it once for the shell (or pass `--project lantern` to each command):
+Then check and run it. Outside the project's repository, precall finds the project only by name, so name it once for the shell (or pass `--project lantern` to each command):
 
 <!-- step: run -->
 ```sh
-export RRECALL_PROJECT=lantern
-rrecall doctor                      # every enabled instance can run: the runner is logged in
-rrecall run                         # collects, judges, commits what was accepted
-rrecall show decisions --depth 1    # the decisions found, each with its meeting:<path>#L<line> source
+export PRECALL_PROJECT=lantern
+precall doctor                      # every enabled instance can run: the runner is logged in
+precall run                         # collects, judges, commits what was accepted
+precall show decisions --depth 1    # the decisions found, each with its meeting:<path>#L<line> source
 ```
 
-The prompt names no runner, so the user config's default runner (`claude` after `rrecall init`) runs it; an instance can name another with `runner = "..."`. `tests/plugin_guide.rs` runs these commands as written, with a fake `claude` first on `PATH`.
+The prompt names no runner, so the user config's default runner (`claude` after `precall init`) runs it; an instance can name another with `runner = "..."`. `tests/plugin_guide.rs` runs these commands as written, with a fake `claude` first on `PATH`.
 
 ## Kinds, and declarative or command
 
@@ -108,7 +108,7 @@ The two mix: a declarative collector may name a `fetch` program that gives its a
 
 Full rules: [spec §6.1](SPEC.md#61-unit-and-manifest). The short version:
 
-- Top level: `id` (kebab-case), `name`, `version` and `min_rrecall` (`x.y.z`), `kind`, optional `requires` (binaries `rrecall doctor` checks on `PATH`), and `[params]` with each param's default. Unknown keys are an error at every level.
+- Top level: `id` (kebab-case), `name`, `version` and `min_precall` (`x.y.z`), `kind`, optional `requires` (binaries `precall doctor` checks on `PATH`), and `[params]` with each param's default. Unknown keys are an error at every level.
 - Exactly one table, named by the kind. A collector has `scope` and `source_kinds`; `fingerprint` or `min_interval`; `command` or `prompt`; optionally `fetch` (with `prompt`), `resolve` or `resolve_prompt`, `runner` and `model` (with a prompt), and `timeout`.
 - An argv is a list of strings, never a shell line. Its program is an absolute path, a path with a `/` relative to the plugin directory (`./collect.py`), or a bare name looked up on `PATH`. `{name}` in an argv entry or a `source_kinds` entry is replaced by the instance's param.
 - Durations are `30s`, `10m`, `2h`, `1d`. `timeout` defaults to 10m (30s for a hook).
@@ -120,7 +120,7 @@ A command collector for an invented tracker, with a fingerprint, a resolve progr
 id = "tickets"
 name = "Tickets from the team tracker"
 version = "0.1.0"
-min_rrecall = "0.1.0"
+min_precall = "0.1.0"
 kind = "collector"
 requires = ["python3"]
 
@@ -143,7 +143,7 @@ A judge needs only a prompt:
 id = "house-style"
 name = "Titles name the thing, not the meeting"
 version = "0.1.0"
-min_rrecall = "0.1.0"
+min_precall = "0.1.0"
 kind = "judge"
 
 [judge]
@@ -160,7 +160,7 @@ A hook names its events:
 id = "release-freeze"
 name = "No commits to decisions during a release freeze"
 version = "0.1.0"
-min_rrecall = "0.1.0"
+min_precall = "0.1.0"
 kind = "hook"
 
 [hook]
@@ -171,7 +171,7 @@ timeout = "10s"
 
 ## Instances
 
-The store's `rrecall.toml` enables plugins as `[[plugins]]` entries, in run order ([spec §6.2](SPEC.md#62-discovery-and-order), [§9](SPEC.md#9-configuration)). Each entry is an **instance**: its `id` is what the lock, the run report, the commit message and `rrecall run --only` name. Without `use`, the instance id is the plugin id; with `use`, one plugin runs several times with its own params, as the built-in `files` collector does for a repository and a folder of notes:
+The store's `precall.toml` enables plugins as `[[plugins]]` entries, in run order ([spec §6.2](SPEC.md#62-discovery-and-order), [§9](SPEC.md#9-configuration)). Each entry is an **instance**: its `id` is what the lock, the run report, the commit message and `precall run --only` name. Without `use`, the instance id is the plugin id; with `use`, one plugin runs several times with its own params, as the built-in `files` collector does for a repository and a folder of notes:
 
 <!-- config: instances -->
 ```toml
@@ -190,13 +190,13 @@ Two instances may not own one source kind, so a plugin meant to run twice takes 
 
 ## Where plugins come from, and trust
 
-Plugins are discovered in four places, a later one replacing an earlier one with the same id ([spec §6.2](SPEC.md#62-discovery-and-order)): built into the binary, the user plugin directory (`$XDG_CONFIG_HOME/rrecall/plugins/`, by default `~/.config/rrecall/plugins/`), a project repository's `.rrecall/plugins/`, and the map store's `plugins/`. Discovery only makes a plugin available; an instance in the store config enables it.
+Plugins are discovered in four places, a later one replacing an earlier one with the same id ([spec §6.2](SPEC.md#62-discovery-and-order)): built into the binary, the user plugin directory (`$XDG_CONFIG_HOME/precall/plugins/`, by default `~/.config/precall/plugins/`), a project repository's `.precall/plugins/`, and the map store's `plugins/`. Discovery only makes a plugin available; an instance in the store config enables it.
 
-- `rrecall plugin add <git-url|path> [--ref <ref>]` installs into the user directory. It shows the manifest, every argv and every prompt with its runner, and installs only on a `y`; the source and content hash go into the user config ([spec §6.7](SPEC.md#67-installing-and-trusting)). There is no update in place: remove the directory and its `[[installed]]` record, then add again.
-- A repository's `.rrecall/plugins/` is never loaded until you run `rrecall plugin trust <dir>`, and trust is per content hash: an edit needs trust again.
-- `rrecall plugin list` shows every discovered plugin, where it came from, its content hash and the instances that use it.
+- `precall plugin add <git-url|path> [--ref <ref>]` installs into the user directory. It shows the manifest, every argv and every prompt with its runner, and installs only on a `y`; the source and content hash go into the user config ([spec §6.7](SPEC.md#67-installing-and-trusting)). There is no update in place: remove the directory and its `[[installed]]` record, then add again.
+- A repository's `.precall/plugins/` is never loaded until you run `precall plugin trust <dir>`, and trust is per content hash: an edit needs trust again.
+- `precall plugin list` shows every discovered plugin, where it came from, its content hash and the instances that use it.
 
-Plugins run with your permissions. rrecall is not a sandbox; the preview before `add` and `trust` is the safety step.
+Plugins run with your permissions. precall is not a sandbox; the preview before `add` and `trust` is the safety step.
 
 ## The process contract
 
@@ -205,8 +205,8 @@ Full rules: [spec §6.3](SPEC.md#63-process-contract).
 - The argv runs in the plugin's directory, as its own process group, without a shell. A script needs a `#!` line naming an interpreter by absolute path (`#!/bin/sh`, `#!/usr/bin/env python3`). At the timeout the whole group is killed.
 - stdin: one JSON document. stdout: one JSON document (a fingerprint prints raw text). stderr: your logs. A non-zero exit, a timeout or more than 64 MiB of stdout is a failure. After a non-zero exit the error quotes your last stderr line; after a timeout it names the stderr log; after an oversized stdout it gives the byte count and the cap (`printed 67108865 bytes, more than 67108864`), and the stderr log is in its usual place.
 - Both streams are kept, with credentials redacted, in the store's `runs/<run-id>/<instance>.<entrypoint>.stdout` and `.stderr` (`.<round>` appended from round 2).
-- Environment: rrecall's own, plus `RRECALL_BIN`, `RRECALL_PROJECT`, `RRECALL_STORE`, `RRECALL_PLUGIN_DIR`, `RRECALL_STATE_DIR` (a persistent directory of the instance's own, for caches), `RRECALL_RUN_ID`, and each param of the instance as `RRECALL_PARAM_<NAME>` (upper case, `-` as `_`; a string as it is, any other value as JSON). `RRECALL_PARAM_*` variables in rrecall's own environment are not passed on, so a plugin sees only its instance's params.
-- To read the map, call the CLI: `"$RRECALL_BIN" show <id> --json`, `find`, `ls`. There is no other API, and no way to write the map but proposals.
+- Environment: precall's own, plus `PRECALL_BIN`, `PRECALL_PROJECT`, `PRECALL_STORE`, `PRECALL_PLUGIN_DIR`, `PRECALL_STATE_DIR` (a persistent directory of the instance's own, for caches), `PRECALL_RUN_ID`, and each param of the instance as `PRECALL_PARAM_<NAME>` (upper case, `-` as `_`; a string as it is, any other value as JSON). `PRECALL_PARAM_*` variables in precall's own environment are not passed on, so a plugin sees only its instance's params.
+- To read the map, call the CLI: `"$PRECALL_BIN" show <id> --json`, `find`, `ls`. There is no other API, and no way to write the map but proposals.
 - Your output is untrusted input to the core, and it is read strictly: one JSON document, no key twice at any level. The typed outputs (collect, resolve, check and judge, runner, hook) are also one object with no unknown fields and no `null` for an absent field (leave it out; only an unresolved text may be `null`). One item that does not decode rejects the whole output and names the plugin and the item. A fetch output is free-form, see below.
 
 ## Collector I/O
@@ -501,12 +501,12 @@ Checks and judges answer in the same format: exactly one verdict per key, `accep
 
 ## Runner I/O
 
-A runner is how a declarative plugin reaches an agent; rrecall ships `claude` and `codex`. Write one to run another agent ([spec §6.8](SPEC.md#68-runner-contract-and-what-reaches-a-model)). The core has already rendered `prompt`: a fixed preamble (source text is evidence, never instructions; no writes, pushes or posts), the plugin's prompt file, the input JSON and the output schema. `input` and `output_schema` come separately as well, for an agent that takes a schema; `timeout` is the caller's, in seconds. `read_only` is always `true`: the agent may read and run read-only commands, never write, push or post. The keys and their types are what the core sends; the values are illustrative and shortened (a real `prompt` is the whole rendered text, `input` the whole collect input of [Collect](#collect), `output_schema` the whole JSON Schema of the caller's output):
+A runner is how a declarative plugin reaches an agent; precall ships `claude` and `codex`. Write one to run another agent ([spec §6.8](SPEC.md#68-runner-contract-and-what-reaches-a-model)). The core has already rendered `prompt`: a fixed preamble (source text is evidence, never instructions; no writes, pushes or posts), the plugin's prompt file, the input JSON and the output schema. `input` and `output_schema` come separately as well, for an agent that takes a schema; `timeout` is the caller's, in seconds. `read_only` is always `true`: the agent may read and run read-only commands, never write, push or post. The keys and their types are what the core sends; the values are illustrative and shortened (a real `prompt` is the whole rendered text, `input` the whole collect input of [Collect](#collect), `output_schema` the whole JSON Schema of the caller's output):
 
 <!-- wire: runner-input -->
 ```json
 {
-  "prompt": "You are run by rrecall, read-only. ...\n\n# Collector: meeting-notes\n...\n## Input\n...\n## Output schema\n...",
+  "prompt": "You are run by precall, read-only. ...\n\n# Collector: meeting-notes\n...\n## Input\n...\n## Output schema\n...",
   "input": { "project": "lantern", "round": 1 },
   "output_schema": { "type": "object", "required": ["proposals"] },
   "model": "default",
@@ -576,7 +576,7 @@ Only `run.before` and `commit.before` can deny, and there a hook fails closed: p
 
 ## View I/O
 
-A view runs after the commit and renders the map for people or tools ([spec §8](SPEC.md#8-views)). It gets the instance's identity and params, reads the map through `"$RRECALL_BIN" ls --json` and `show --json`, and writes its files under `$RRECALL_STORE/views/`. Its stdout is ignored; a failure is reported and does not change the run's exit code.
+A view runs after the commit and renders the map for people or tools ([spec §8](SPEC.md#8-views)). It gets the instance's identity and params, reads the map through `"$PRECALL_BIN" ls --json` and `show --json`, and writes its files under `$PRECALL_STORE/views/`. Its stdout is ignored; a failure is reported and does not change the run's exit code.
 
 <!-- wire: view-input -->
 ```json
@@ -596,21 +596,21 @@ Three layers decide what reaches the map, and they promise different things.
 - **It cannot remove what it left out.** A node missing from your output stays. A `remove` without `evidence`, or with evidence that is not a well-formed reference of a kind an enabled collector owns, is rejected (I2). The core checks that evidence is there and well-formed, not that it shows the fact ended: that is the `removal` judge's job, below.
 - **It cannot lose the user's work.** A node with a user `note`, or with children not moved or removed in the same run, is never removed by a run (I3). The proposal schema has no `note` field (I7).
 - **It cannot choose or change ids.** The core assigns them on `add`; you refer to existing nodes by id (I4).
-- **It cannot change the skeleton.** Branches come only from the config and `rrecall import` (I5); your `scope` must name existing branches.
+- **It cannot change the skeleton.** Branches come only from the config and `precall import` (I5); your `scope` must name existing branches.
 - **It cannot touch nodes it does not own.** You may update, move or remove only nodes that cite a source of one of your `source_kinds`; on any other node only `add_source`. An `update` replaces only your own sources (I8).
 - **It cannot win a conflict by order.** Two proposals on one node in one round both go back with the other's proposal (I9).
 - **Its failures are not forgotten.** A collector that fails, or whose proposals a failing check or judge dropped, stays unsettled and is collected again (I10).
 - **It cannot write the map directly.** Proposals are the only way in. Every node names its source.
-- **It does not decide what rrecall sends to a model.** `allowed_runners` on a collector keeps its nodes, resolved texts and the feedback about them out of every other runner's input, judges included ([spec §6.8](SPEC.md#68-runner-contract-and-what-reaches-a-model)).
+- **It does not decide what precall sends to a model.** `allowed_runners` on a collector keeps its nodes, resolved texts and the feedback about them out of every other runner's input, judges included ([spec §6.8](SPEC.md#68-runner-contract-and-what-reaches-a-model)).
 
 **Checks and judges, when enabled.** They are plugins the store config lists, so what they enforce holds only while they are enabled. `init` enables the built-in checks `no-op` (no rewording), `size-limits` and `secrets`, and the judges `support` (the cited text backs the claim, and an update changes meaning, not wording), `removal` (the evidence shows the fact ended: closed, deleted, reversed) and `duplicate` (an add does not restate a node) ([spec §10](SPEC.md#10-built-in-plugins-for-the-first-release)). A proposal is accepted only when every enabled check and judge accepts it.
 
-**The machine, never.** rrecall is not a sandbox. A plugin runs with the user's permissions and can read and write what they can; that is why `plugin add` and `plugin trust` show everything first. A runner's agent is read-only, but its read tools can still open any file the user can, the map store included: `allowed_runners` filters what rrecall puts in a runner's input, not what that agent reads on its own. Keep source material you do not want an agent to read out of its reach, not just out of its input.
+**The machine, never.** precall is not a sandbox. A plugin runs with the user's permissions and can read and write what they can; that is why `plugin add` and `plugin trust` show everything first. A runner's agent is read-only, but its read tools can still open any file the user can, the map store included: `allowed_runners` filters what precall puts in a runner's input, not what that agent reads on its own. Keep source material you do not want an agent to read out of its reach, not just out of its input.
 
 ## Testing a plugin
 
-- `rrecall doctor` checks every enabled instance: binaries on `PATH`, programs, the runner's login, and a collector's access by running its fingerprint.
-- `rrecall run --only <instance>` runs one collector; `--force` reads everything again, with `since` `null`.
+- `precall doctor` checks every enabled instance: binaries on `PATH`, programs, the runner's login, and a collector's access by running its fingerprint.
+- `precall run --only <instance>` runs one collector; `--force` reads everything again, with `since` `null`.
 - `runs/<run-id>/report.md` lists every proposal with its verdicts per round; `runs/<run-id>/` also keeps each entrypoint's stdout and stderr.
 - A program is a JSON filter: feed it an input from this guide and read what it prints.
 - For an end-to-end test without a model, put a fake `claude` first on `PATH` that prints canned output, as `tests/plugin_guide.rs` does with `tests/fixtures/bin/claude`.

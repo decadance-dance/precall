@@ -38,7 +38,7 @@ Source: Vincent Driessen, "A successful Git branching model", https://nvie.com/p
   gh pr create --base develop --title "<summary>" --body "Closes #<n>. <what and why; how verified>"
   gh pr checks <pr> --watch
   ```
-- The maintainer merges: `gh pr merge <pr> -R decadance-dance/rrecall --merge --delete-branch`. With `-R`, gh deletes only the remote branch and leaves local checkouts alone. Then, from the primary checkout: `git pull`, and remove the issue's worktree and local branch.
+- The maintainer merges: `gh pr merge <pr> -R decadance-dance/precall --merge --delete-branch`. With `-R`, gh deletes only the remote branch and leaves local checkouts alone. Then, from the primary checkout: `git pull`, and remove the issue's worktree and local branch.
 
 ### Don't
 - Don't branch a task off `main` or another feature branch unless the maintainer asks for stacked work.
@@ -83,6 +83,6 @@ git checkout -b feature/<n>-<slug> origin/develop
 # ... work, bin/check, self-review, cross-model review ...
 git push -u origin feature/<n>-<slug> && gh pr create --base develop --title "<summary>" --body "Closes #<n>. ..."
 # maintainer:
-gh pr merge <pr> -R decadance-dance/rrecall --merge --delete-branch
+gh pr merge <pr> -R decadance-dance/precall --merge --delete-branch
 git pull && git branch -d feature/<n>-<slug>
 ```

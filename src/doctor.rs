@@ -1,4 +1,4 @@
-//! `rrecall doctor` (spec §2): whether each enabled plugin instance can run, and what a run
+//! `precall doctor` (spec §2): whether each enabled plugin instance can run, and what a run
 //! would skip. It runs no model: runner logins are checked with the agents' own status commands,
 //! and a collector's access with its fingerprint.
 

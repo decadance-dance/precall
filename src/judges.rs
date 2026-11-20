@@ -7,7 +7,7 @@ pub const MANIFESTS: [&str; 3] = [
     r#"id = "support"
 name = "Support: rejects a claim its sources do not back, and a rewording"
 version = "0.1.0"
-min_rrecall = "0.1.0"
+min_precall = "0.1.0"
 kind = "judge"
 
 [judge]
@@ -17,7 +17,7 @@ ops = ["add", "update", "add_source"]
     r#"id = "removal"
 name = "Removal: checks that a removal's evidence says what it claims"
 version = "0.1.0"
-min_rrecall = "0.1.0"
+min_precall = "0.1.0"
 kind = "judge"
 
 [judge]
@@ -27,7 +27,7 @@ ops = ["remove"]
     r#"id = "duplicate"
 name = "Duplicate: rejects an addition that restates an existing node"
 version = "0.1.0"
-min_rrecall = "0.1.0"
+min_precall = "0.1.0"
 kind = "judge"
 
 [judge]

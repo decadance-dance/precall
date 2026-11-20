@@ -34,11 +34,11 @@ jobs:
       - run: cargo build --release --locked --target "$TARGET"
       - run: |
           cp LICENSE "target/$TARGET/release/"
-          tar -czf "rrecall-$GITHUB_REF_NAME-$TARGET.tar.gz" -C "target/$TARGET/release" rrecall LICENSE
+          tar -czf "precall-$GITHUB_REF_NAME-$TARGET.tar.gz" -C "target/$TARGET/release" precall LICENSE
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.target }}
-          path: rrecall-*.tar.gz
+          path: precall-*.tar.gz
           if-no-files-found: error
 
   release:
@@ -65,7 +65,7 @@ jobs:
           [ "$(git cat-file -t "$GITHUB_REF_NAME")" = tag ] || { echo "::error::$GITHUB_REF_NAME is not an annotated tag"; exit 1; }
           body=$(git tag -l --format='%(contents:body)' "$GITHUB_REF_NAME")
           printf '%s\n' "${body:-$(git tag -l --format='%(contents:subject)' "$GITHUB_REF_NAME")}" > notes.md
-      # The binaries report the Cargo.toml version (`rrecall --version`); the formula's test checks it.
+      # The binaries report the Cargo.toml version (`precall --version`); the formula's test checks it.
       - run: |
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
           [ "$version" = "$GITHUB_REF_NAME" ] || { echo "::error::tag $GITHUB_REF_NAME differs from version $version in Cargo.toml"; exit 1; }
@@ -75,8 +75,8 @@ jobs:
           merge-multiple: true
       - run: |
           cd dist
-          sha256sum rrecall-*.tar.gz > SHA256SUMS
-          ../bin/formula "$GITHUB_REF_NAME" SHA256SUMS > rrecall.rb
+          sha256sum precall-*.tar.gz > SHA256SUMS
+          ../bin/formula "$GITHUB_REF_NAME" SHA256SUMS > precall.rb
       - run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag dist/*
         env:
           GH_TOKEN: ${{ github.token }}

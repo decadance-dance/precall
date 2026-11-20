@@ -36,7 +36,7 @@ pub(crate) mod testutil {
         pub fn new() -> TempDir {
             static N: AtomicU32 = AtomicU32::new(0);
             let p = std::env::temp_dir().join(format!(
-                "rrecall-unit-{}-{}",
+                "precall-unit-{}-{}",
                 std::process::id(),
                 N.fetch_add(1, Ordering::SeqCst)
             ));

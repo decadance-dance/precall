@@ -11,17 +11,17 @@ use std::path::Path;
 pub const MANIFEST: &str = r#"id = "github"
 name = "GitHub pull requests, issues and releases"
 version = "0.1.0"
-min_rrecall = "0.1.0"
+min_precall = "0.1.0"
 kind = "collector"
 requires = ["gh"]
 
 [collector]
 scope = ["done", "blocked", "decisions", "people"]
 source_kinds = ["gh-pr", "gh-issue", "gh-release"]
-fingerprint = ["rrecall", "builtin", "github", "fingerprint"]
-fetch = ["rrecall", "builtin", "github", "fetch"]
+fingerprint = ["precall", "builtin", "github", "fingerprint"]
+fetch = ["precall", "builtin", "github", "fetch"]
 prompt = "github.md"
-resolve = ["rrecall", "builtin", "github", "resolve"]
+resolve = ["precall", "builtin", "github", "resolve"]
 
 [params]
 repo = ""

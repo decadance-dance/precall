@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-pub const BRANCH_SOURCE: &str = "config:rrecall.toml";
+pub const BRANCH_SOURCE: &str = "config:precall.toml";
 
 #[derive(Debug, Clone)]
 pub struct Store {
@@ -279,7 +279,7 @@ pub fn write_and_commit(root: &Path, changes: &[Change], message: &str) -> Resul
 
 /// Commits the given paths through a private index started from HEAD, leaving the real index alone.
 fn commit_paths(root: &Path, paths: &[&str], message: &str) -> Result<bool> {
-    let index = root.join(".git").join("rrecall-index");
+    let index = root.join(".git").join("precall-index");
     let _ = std::fs::remove_file(&index);
     let has_head = git_run(root, None, &["rev-parse", "--verify", "-q", "HEAD"])?
         .status
@@ -301,7 +301,7 @@ fn commit_paths(root: &Path, paths: &[&str], message: &str) -> Result<bool> {
     committed
 }
 
-/// Runs git in `dir` as rrecall (store commits need no configured identity and are never signed).
+/// Runs git in `dir` as precall (store commits need no configured identity and are never signed).
 pub fn git(dir: &Path, args: &[&str]) -> Result<String> {
     git_in(dir, None, args)
 }
@@ -337,9 +337,9 @@ fn git_run(dir: &Path, index: Option<&Path>, args: &[&str]) -> Result<std::proce
     let mut c = std::process::Command::new("git");
     c.args([
         "-c",
-        "user.name=rrecall",
+        "user.name=precall",
         "-c",
-        "user.email=rrecall@localhost",
+        "user.email=precall@localhost",
         "-c",
         "commit.gpgsign=false",
     ])

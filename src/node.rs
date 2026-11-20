@@ -220,7 +220,7 @@ mod tests {
             "file:src/store.rs#L40-L80@a4586a6",
             "gh-pr:owner/repo#212",
             "slack:C0123ABCDEF/1795033170.000100",
-            "config:rrecall.toml",
+            "config:precall.toml",
         ] {
             assert_eq!(check_source(good), Ok(()), "{good}");
         }

@@ -10,7 +10,7 @@
 # records its argv to codex.argv.N, its stdin to codex.stdin.N and its environment to
 # codex.env.N.
 d="$HOME/agent"
-# `codex login status` (rrecall doctor): logged in unless $HOME/agent/logged-out exists.
+# `codex login status` (precall doctor): logged in unless $HOME/agent/logged-out exists.
 if [ "$1 $2" = "login status" ]; then
     if [ -e "$d/logged-out" ]; then echo "Not logged in" >&2; exit 1; fi
     echo "Logged in using ChatGPT"; exit 0
