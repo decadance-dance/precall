@@ -47,6 +47,15 @@ it as an HTML page.
 
 The project and command are now named `precall`. The first release was published as `rrecall 0.1.0`.
 
+To move a 0.1.0 installation, rename the `rrecall` directory under both `XDG_CONFIG_HOME`
+and `XDG_DATA_HOME` to `precall`. In each existing store, rename `rrecall.toml` and
+`rrecall.lock` to `precall.toml` and `precall.lock`, keeping the store's Git history.
+Update any absolute paths and origin URLs in your config. For custom plugins, rename
+`.rrecall/plugins/` to `.precall/plugins/`, `rrecall-plugin.toml` to `precall-plugin.toml`,
+`min_rrecall` to `min_precall`, and `RRECALL_*` variables to `PRECALL_*`.
+Trust project plugins again after the move. The first `precall run` rereads the built-in
+sources because their plugin hashes changed. That run can call models.
+
 ### 🔥 2026.11.19: rrecall 0.1.0, the first release
 - **A map that stays put**: rrecall builds the map from a project's repository, its GitHub issues
   and its Slack, and keeps it in its own git repository on your machine. A run with no collector
