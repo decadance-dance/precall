@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub const MANIFEST: &str = "rrecall-plugin.toml";
+pub const MANIFEST: &str = "precall-plugin.toml";
 
 /// Source kinds the core owns: branches cite the config, imported nodes their outline.
 pub const CORE_KINDS: [&str; 2] = ["config", "import"];
@@ -27,14 +27,14 @@ pub enum Kind {
     Hook,
 }
 
-/// `rrecall-plugin.toml` as written; [`load_manifest`] checks it into a [`Manifest`].
+/// `precall-plugin.toml` as written; [`load_manifest`] checks it into a [`Manifest`].
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawManifest {
     id: String,
     name: String,
     version: String,
-    min_rrecall: String,
+    min_precall: String,
     kind: Kind,
     #[serde(default)]
     requires: Vec<String>,
@@ -53,7 +53,7 @@ pub struct Manifest {
     pub id: String,
     pub name: String,
     pub version: String,
-    pub min_rrecall: String,
+    pub min_precall: String,
     pub requires: Vec<String>,
     /// Param names and their defaults; an instance may set only these, with the same type.
     pub params: toml::Table,
@@ -188,7 +188,7 @@ impl Manifest {
     }
 }
 
-/// Reads and checks `<dir>/rrecall-plugin.toml`. Errors name the plugin and the key.
+/// Reads and checks `<dir>/precall-plugin.toml`. Errors name the plugin and the key.
 pub fn load_manifest(dir: &Path) -> Result<Manifest> {
     let dir = &dir
         .canonicalize()
@@ -219,18 +219,18 @@ fn parse_manifest(text: &str, dir: Option<&Path>, origin: &str) -> Result<Manife
 }
 
 /// The plugins shipped inside the binary, the first place of spec §6.2. Each runs the running
-/// binary itself (`rrecall builtin <id>`), by absolute path and never through `PATH`, in the
+/// binary itself (`precall builtin <id>`), by absolute path and never through `PATH`, in the
 /// binary's directory.
 pub fn builtin() -> Result<BTreeMap<String, Plugin>> {
     // limit: in a test harness the running binary is the harness, which has no `builtin`
-    // subcommand; tests that run a built-in point its program at the rrecall binary.
-    let exe = std::env::current_exe().context("locating the rrecall binary")?;
+    // subcommand; tests that run a built-in point its program at the precall binary.
+    let exe = std::env::current_exe().context("locating the precall binary")?;
     let exe_text = exe
         .to_str()
-        .with_context(|| format!("the rrecall binary's path {} is not UTF-8", exe.display()))?;
+        .with_context(|| format!("the precall binary's path {} is not UTF-8", exe.display()))?;
     let dir = exe
         .parent()
-        .context("the rrecall binary has no directory")?
+        .context("the precall binary has no directory")?
         .to_path_buf();
     let mut found = BTreeMap::new();
     for text in builtin_manifests() {
@@ -306,7 +306,7 @@ fn check_manifest(raw: RawManifest, dir: Option<&Path>) -> Result<Manifest, Stri
         Some(dir) => check_file(dir, file),
         None => builtin_prompt(&raw.id, file)
             .map(|_| ())
-            .ok_or(format!("`{file}` is not a prompt built into rrecall")),
+            .ok_or(format!("`{file}` is not a prompt built into precall")),
     };
     if !is_slug(&raw.id) {
         return Err(format!("id `{}` is not kebab-case", raw.id));
@@ -315,13 +315,13 @@ fn check_manifest(raw: RawManifest, dir: Option<&Path>) -> Result<Manifest, Stri
         return Err("name is empty".into());
     }
     parse_version(&raw.version).ok_or(format!("version `{}` is not x.y.z", raw.version))?;
-    let min = parse_version(&raw.min_rrecall)
-        .ok_or(format!("min_rrecall `{}` is not x.y.z", raw.min_rrecall))?;
+    let min = parse_version(&raw.min_precall)
+        .ok_or(format!("min_precall `{}` is not x.y.z", raw.min_precall))?;
     let ours = env!("CARGO_PKG_VERSION");
     if parse_version(ours).is_some_and(|v| v < min) {
         return Err(format!(
-            "min_rrecall `{}` is newer than this rrecall ({ours})",
-            raw.min_rrecall
+            "min_precall `{}` is newer than this precall ({ours})",
+            raw.min_precall
         ));
     }
     if raw.requires.iter().any(|r| r.trim().is_empty()) {
@@ -451,7 +451,7 @@ fn check_manifest(raw: RawManifest, dir: Option<&Path>) -> Result<Manifest, Stri
         id: raw.id,
         name: raw.name,
         version: raw.version,
-        min_rrecall: raw.min_rrecall,
+        min_precall: raw.min_precall,
         requires: raw.requires,
         params: raw.params,
         spec,
@@ -530,10 +530,10 @@ fn unfit(v: &toml::Value) -> Option<&'static str> {
     }
 }
 
-/// `RRECALL_PARAM_<NAME>`: upper-cased, `-` to `_`.
+/// `PRECALL_PARAM_<NAME>`: upper-cased, `-` to `_`.
 fn env_name(param: &str) -> String {
     format!(
-        "RRECALL_PARAM_{}",
+        "PRECALL_PARAM_{}",
         param.to_ascii_uppercase().replace('-', "_")
     )
 }
@@ -637,7 +637,7 @@ pub fn discover(places: &[PathBuf]) -> Result<BTreeMap<String, Plugin>> {
 }
 
 /// The plugin directories of spec §6.2 after the built-in place, in load order, and the
-/// project's `.rrecall/plugins/` when it was skipped for want of trust.
+/// project's `.precall/plugins/` when it was skipped for want of trust.
 #[derive(Debug)]
 pub struct Places {
     pub dirs: Vec<PathBuf>,
@@ -674,7 +674,7 @@ pub fn places(
     Ok(Places { dirs, untrusted })
 }
 
-/// The project's `.rrecall/plugins/` as the store config's `repo` names it (spec §6.2), not
+/// The project's `.precall/plugins/` as the store config's `repo` names it (spec §6.2), not
 /// resolved; `None` without a `repo`. A relative `repo` is a config error.
 pub fn project_plugin_dir(cfg: &StoreConfig) -> Result<Option<PathBuf>> {
     let Some(repo) = &cfg.repo else {
@@ -687,7 +687,7 @@ pub fn project_plugin_dir(cfg: &StoreConfig) -> Result<Option<PathBuf>> {
             repo.display()
         );
     }
-    Ok(Some(repo.join(".rrecall/plugins")))
+    Ok(Some(repo.join(".precall/plugins")))
 }
 
 /// The command that trusts `dir` for the project whose store is `store`, ready to paste.
@@ -698,7 +698,7 @@ pub fn trust_hint(user: &UserConfig, store: &Path, dir: &Path) -> String {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c));
     format!(
-        "rrecall --project {} plugin trust {}",
+        "precall --project {} plugin trust {}",
         if plain {
             name
         } else {
@@ -709,7 +709,7 @@ pub fn trust_hint(user: &UserConfig, store: &Path, dir: &Path) -> String {
 }
 
 /// The content hash the lock records for `plugin` (spec §4.2, §6.7): a built-in has no
-/// directory of its own, so its hash covers the rrecall version, its manifest and its prompts.
+/// directory of its own, so its hash covers the precall version, its manifest and its prompts.
 pub fn plugin_hash(plugin: &Plugin) -> Result<String> {
     if !plugin.builtin {
         return content_hash(&plugin.dir);
@@ -729,12 +729,12 @@ pub fn plugin_hash(plugin: &Plugin) -> Result<String> {
     Ok(builtin_hash(text, &prompts))
 }
 
-/// `sha256:<hex>` over the rrecall version, a built-in `manifest` and its `prompts` as (file
+/// `sha256:<hex>` over the precall version, a built-in `manifest` and its `prompts` as (file
 /// name, text), by name. Line ends are LF first, so a CRLF checkout builds the same lock.
 fn builtin_hash(manifest: &str, prompts: &[(&str, &str)]) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
-    h.update(format!("rrecall {}\0", env!("CARGO_PKG_VERSION")));
+    h.update(format!("precall {}\0", env!("CARGO_PKG_VERSION")));
     h.update(lf(manifest));
     let mut prompts = prompts.to_vec();
     prompts.sort();
@@ -865,7 +865,7 @@ impl Instance {
             .collect()
     }
 
-    /// `RRECALL_PARAM_<NAME>` and the value, sorted by name.
+    /// `PRECALL_PARAM_<NAME>` and the value, sorted by name.
     pub fn env_params(&self) -> Vec<(String, String)> {
         let mut env: Vec<_> = self
             .params
@@ -962,7 +962,7 @@ fn instance(
                 return Err(format!("source kind `{k}` is not a kind (a-z, 0-9, `-`)"));
             }
             if CORE_KINDS.contains(&k.as_str()) {
-                return Err(format!("source kind `{k}` belongs to rrecall itself"));
+                return Err(format!("source kind `{k}` belongs to precall itself"));
             }
             source_kinds.push(k);
         }
@@ -995,7 +995,7 @@ pub fn owner<'a>(instances: &'a [Instance], kind: &str) -> Option<&'a Instance> 
 }
 
 /// Whether `init` finds a runner plugin `id` to enable for a new store (spec §2): among the
-/// built-ins, the user plugin directory and `repo`'s trusted `.rrecall/plugins/`.
+/// built-ins, the user plugin directory and `repo`'s trusted `.precall/plugins/`.
 pub fn finds_runner(
     user: &UserConfig,
     repo: Option<&Path>,
@@ -1063,7 +1063,7 @@ mod tests {
 id = "github"
 name = "GitHub pull requests and issues"
 version = "0.1.0"
-min_rrecall = "0.1.0"
+min_precall = "0.1.0"
 kind = "collector"
 requires = ["gh"]
 
@@ -1081,11 +1081,11 @@ repo = ""
 
     fn head(id: &str, kind: &str) -> String {
         format!(
-            "id = \"{id}\"\nname = \"N\"\nversion = \"1.0.0\"\nmin_rrecall = \"0.1.0\"\nkind = \"{kind}\"\n"
+            "id = \"{id}\"\nname = \"N\"\nversion = \"1.0.0\"\nmin_precall = \"0.1.0\"\nkind = \"{kind}\"\n"
         )
     }
 
-    /// `<root>/<dir>/rrecall-plugin.toml` with `text`; returns the plugin dir.
+    /// `<root>/<dir>/precall-plugin.toml` with `text`; returns the plugin dir.
     fn put(root: &Path, dir: &str, text: &str) -> PathBuf {
         let d = root.join(dir);
         std::fs::create_dir_all(&d).unwrap();
@@ -1203,8 +1203,8 @@ repo = ""
             (head("gh", "plugin"), "kind"),
             (GITHUB.replace("id = \"github\"", "id = \"Git Hub\""), "id"),
             (
-                GITHUB.replace("min_rrecall = \"0.1.0\"", "min_rrecall = \"99.0.0\""),
-                "min_rrecall",
+                GITHUB.replace("min_precall = \"0.1.0\"", "min_precall = \"99.0.0\""),
+                "min_precall",
             ),
             (
                 GITHUB.replace("version = \"0.1.0\"", "version = \"one\""),
@@ -1322,7 +1322,7 @@ repo = ""
                     "{}[check]\ncommand = [\"./c\"]\n[params]\na-b = 1\na_b = 2\n",
                     head("c", "check")
                 ),
-                "RRECALL_PARAM_A_B",
+                "PRECALL_PARAM_A_B",
             ),
             ("not toml [".to_string(), MANIFEST),
         ] {
@@ -1452,11 +1452,11 @@ repo = ""
         let t = TempDir::new();
         let repo = t.0.join("repo");
         let dir = put(
-            &repo.join(".rrecall/plugins"),
+            &repo.join(".precall/plugins"),
             "lint",
             &format!("{}[check]\ncommand = [\"./c\"]\n", head("lint", "check")),
         );
-        let plugins = repo.join(".rrecall/plugins").canonicalize().unwrap();
+        let plugins = repo.join(".precall/plugins").canonicalize().unwrap();
         let cfg = StoreConfig {
             repo: Some(repo.clone()),
             ..StoreConfig::default()
@@ -1560,12 +1560,12 @@ repo = ""
             ins[2].env_params(),
             [
                 (
-                    "RRECALL_PARAM_EXCLUDE".to_string(),
+                    "PRECALL_PARAM_EXCLUDE".to_string(),
                     "[\"*.lock\"]".to_string()
                 ),
-                ("RRECALL_PARAM_GIT".into(), "false".into()),
-                ("RRECALL_PARAM_PATH".into(), "/n".into()),
-                ("RRECALL_PARAM_REF_KIND".into(), "note".into()),
+                ("PRECALL_PARAM_GIT".into(), "false".into()),
+                ("PRECALL_PARAM_PATH".into(), "/n".into()),
+                ("PRECALL_PARAM_REF_KIND".into(), "note".into()),
             ]
         );
         let gh = &ins[3];
@@ -1693,7 +1693,7 @@ repo = ""
             let Spec::Check(c) = &p.manifest.spec else {
                 panic!("{id}: not a check")
             };
-            // The running binary, never a `rrecall` found on PATH.
+            // The running binary, never a `precall` found on PATH.
             assert_eq!(
                 c.command,
                 [exe.to_string_lossy().as_ref(), "builtin", id],
@@ -1799,7 +1799,7 @@ repo = ""
         let mut plugins = builtin().unwrap();
         let p = plugins.get_mut("size-limits").unwrap();
         // A binary installed under a directory whose name looks like a param.
-        let exe = "/opt/{title_max}/rrecall".to_string();
+        let exe = "/opt/{title_max}/precall".to_string();
         let Spec::Check(c) = &mut p.manifest.spec else {
             panic!("not a check")
         };
@@ -1838,7 +1838,7 @@ repo = ""
         // An unknown plugin whose project dir is untrusted says how to trust it.
         let repo = t.0.join("repo");
         put(
-            &repo.join(".rrecall/plugins"),
+            &repo.join(".precall/plugins"),
             "lint",
             &format!("{}[check]\ncommand = [\"./c\"]\n", head("lint", "check")),
         );

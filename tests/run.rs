@@ -1,4 +1,4 @@
-//! End-to-end tests of `rrecall run` (spec §4, §5) with fake plugins: one test per invariant,
+//! End-to-end tests of `precall run` (spec §4, §5) with fake plugins: one test per invariant,
 //! the lock, back pressure, the cost cap, hooks, the commit message, the report and exit codes.
 
 use serde_json::{Value, json};
@@ -51,7 +51,7 @@ impl W {
     fn new() -> W {
         static N: AtomicU32 = AtomicU32::new(0);
         let root = std::env::temp_dir().join(format!(
-            "rrecall-run-{}-{}",
+            "precall-run-{}-{}",
             std::process::id(),
             N.fetch_add(1, Ordering::SeqCst)
         ));
@@ -159,16 +159,16 @@ impl W {
         std::fs::create_dir_all(&d).unwrap();
         std::fs::write(d.join("p.md"), "Propose changes.\n").unwrap();
         std::fs::write(
-            d.join("rrecall-plugin.toml"),
+            d.join("precall-plugin.toml"),
             format!(
-                "id = \"{id}\"\nname = \"Fake {id}\"\nversion = \"0.1.0\"\nmin_rrecall = \"0.1.0\"\nkind = \"{kind}\"\n\n{table}\n[params]\n{common}{extra}"
+                "id = \"{id}\"\nname = \"Fake {id}\"\nversion = \"0.1.0\"\nmin_precall = \"0.1.0\"\nkind = \"{kind}\"\n\n{table}\n[params]\n{common}{extra}"
             ),
         )
         .unwrap();
     }
 
     fn store(&self) -> PathBuf {
-        self.root.join("data/rrecall/kiln")
+        self.root.join("data/precall/kiln")
     }
 
     fn fp(&self) -> PathBuf {
@@ -184,7 +184,7 @@ impl W {
     }
 
     fn raw_env(&self, args: &[&str], envs: &[(&str, &str)]) -> Out {
-        let o = Command::new(env!("CARGO_BIN_EXE_rrecall"))
+        let o = Command::new(env!("CARGO_BIN_EXE_precall"))
             .args(args)
             .envs(envs.iter().copied())
             .current_dir(self.root.join("work"))
@@ -193,7 +193,7 @@ impl W {
             .env("XDG_CONFIG_HOME", self.root.join("config"))
             .env("PATH", agents_path())
             .env_remove("CODEX_HOME")
-            .env_remove("RRECALL_PROJECT")
+            .env_remove("PRECALL_PROJECT")
             .env_remove("GIT_DIR")
             .output()
             .unwrap();
@@ -241,8 +241,8 @@ impl W {
 
     /// Replaces the store config (top-level keys first) and commits it.
     fn config(&self, text: &str) {
-        std::fs::write(self.store().join("rrecall.toml"), text).unwrap();
-        self.commit("config", &["rrecall.toml"]);
+        std::fs::write(self.store().join("precall.toml"), text).unwrap();
+        self.commit("config", &["precall.toml"]);
     }
 
     /// Writes `map/<branch>.jsonl` and commits it.
@@ -328,7 +328,7 @@ impl W {
     }
 
     fn lock(&self) -> Value {
-        serde_json::from_str(&std::fs::read_to_string(self.store().join("rrecall.lock")).unwrap())
+        serde_json::from_str(&std::fs::read_to_string(self.store().join("precall.lock")).unwrap())
             .unwrap()
     }
 
@@ -480,13 +480,13 @@ fn a_min_interval_collector_waits_for_its_interval() {
     let lock = w.lock();
     let at = lock["collectors"]["chat"]["settled_at"].as_str().unwrap();
     assert!(at.ends_with('Z') && at.len() == 20, "{at}");
-    let text = std::fs::read_to_string(w.store().join("rrecall.lock")).unwrap();
+    let text = std::fs::read_to_string(w.store().join("precall.lock")).unwrap();
     std::fs::write(
-        w.store().join("rrecall.lock"),
+        w.store().join("precall.lock"),
         text.replace(at, "2000-01-01T00:00:00Z"),
     )
     .unwrap();
-    w.commit("old lock", &["rrecall.lock"]);
+    w.commit("old lock", &["precall.lock"]);
     w.run_code(&[], 0);
     assert_eq!(w.calls("chat"), 2, "due once the interval passed");
 }
@@ -509,7 +509,7 @@ fn i2_a_collector_that_forgets_a_node_removes_nothing() {
 #[test]
 fn the_report_keeps_accepting_verdicts_and_the_collector_gets_only_the_others() {
     let w = world(&props(&[add("a", "layout", "Queue")]));
-    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    let cfg = std::fs::read_to_string(w.store().join("precall.toml")).unwrap();
     w.config(&format!(
         "max_rounds = 2\n{cfg}{}",
         w.inst("judge", "judge", "scenario = \"all\", out = \"reject\"")
@@ -575,7 +575,7 @@ fn i3_a_node_with_a_note_or_children_is_not_removed() {
     }
     let report = w.report();
     assert!(
-        report.contains("I3") && report.contains("rrecall rm"),
+        report.contains("I3") && report.contains("precall rm"),
         "{report}"
     );
     // With the child removed too, both go.
@@ -597,7 +597,7 @@ fn i8_a_collector_may_only_cite_another_collectors_node() {
     // Round 2 proposes nothing: once `b` cites the node with a `file` source, I8 lets `repo`
     // update it, as the spec says.
     let w = world(&format!("{}\n{}", props(&[edit, cite]), props(&[])));
-    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    let cfg = std::fs::read_to_string(w.store().join("precall.toml")).unwrap();
     w.config(&cfg.replacen(
         "params = { record",
         "params = { scenario = \"seq\", record",
@@ -732,7 +732,7 @@ fn i10_a_failing_fingerprint_marks_the_collector_unsettled_until_it_collects_aga
 #[test]
 fn i10_a_judge_that_times_out_drops_its_proposals_and_leaves_the_collector_unsettled() {
     let w = world(&props(&[add("a", "layout", "Queue")]));
-    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    let cfg = std::fs::read_to_string(w.store().join("precall.toml")).unwrap();
     w.config(&format!(
         "{cfg}{}timeout = \"1s\"\n",
         w.inst("judge", "judge", "scenario = \"sleep\"")
@@ -786,7 +786,7 @@ fn i10_a_forced_run_that_drops_proposals_makes_the_collector_due_again() {
 #[test]
 fn back_pressure_stops_after_max_rounds_and_reports_what_is_left() {
     let w = world(&props(&[add("a", "layout", "Queue")]));
-    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    let cfg = std::fs::read_to_string(w.store().join("precall.toml")).unwrap();
     w.config(&format!(
         "max_rounds = 3\n{cfg}{}",
         w.inst("judge", "judge", "scenario = \"all\", out = \"reject\"")
@@ -858,7 +858,7 @@ fn reasked(outs: &[&str]) -> W {
         add("a", "layout", "Queue"),
         add("b", "layout", "Cache"),
     ]));
-    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    let cfg = std::fs::read_to_string(w.store().join("precall.toml")).unwrap();
     w.config(&format!(
         "{cfg}{}",
         w.inst(
@@ -930,7 +930,7 @@ fn runner_judged(verdicts: &[Value]) -> W {
             json!({"output": {"verdicts": v}, "cost_usd": 0.01, "model": "fake-1"}).to_string()
         })
         .collect();
-    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    let cfg = std::fs::read_to_string(w.store().join("precall.toml")).unwrap();
     w.config(&format!(
         "{cfg}{}{}",
         w.inst(
@@ -953,7 +953,7 @@ fn a_judge_key_without_its_collector_counts_in_the_first_call_and_the_reask() {
     assert_eq!(w.calls("runner"), 2);
     let env = std::fs::read_to_string(w.rec("runner")).unwrap();
     assert!(
-        !env.contains("RRECALL_AGENT_DIR"),
+        !env.contains("PRECALL_AGENT_DIR"),
         "a plugin runner gets none: {env}"
     );
     assert!(!logs(&w).iter().any(|l| l.ends_with(".agent")));
@@ -975,7 +975,7 @@ fn an_ambiguous_judge_key_fails_the_whole_output() {
         {"key": "a", "verdict": "accept", "reason": "ok"},
         {"key": "repo/b", "verdict": "accept", "reason": "ok"},
     ])]);
-    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    let cfg = std::fs::read_to_string(w.store().join("precall.toml")).unwrap();
     let github = props(&[add("a", "layout", "Log")]);
     w.config(&cfg.replacen(&q(&props(&[])), &q(&github), 1));
     w.run_code(&[], 5);
@@ -1033,7 +1033,7 @@ fn remove_judged(out: &[Value]) -> W {
         &format!("[judge]\ncommand = [{}]\nops = [\"remove\"]\n", q(&fake())),
         "",
     );
-    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    let cfg = std::fs::read_to_string(w.store().join("precall.toml")).unwrap();
     w.config(&format!(
         "{cfg}{}",
         w.inst("rjudge", "rjudge", "scenario = \"all\", out = \"accept\"")
@@ -1155,7 +1155,7 @@ fn the_report_names_every_key_reasked_and_dropped() {
         })
         .collect();
     let w = world(&props(&items));
-    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    let cfg = std::fs::read_to_string(w.store().join("precall.toml")).unwrap();
     w.config(&format!(
         "{cfg}{}",
         w.inst(
@@ -1231,7 +1231,7 @@ fn a_reask_refused_by_the_budget_is_reported_as_refused() {
         add("b", "layout", "Cache"),
     ]));
     let out = json!({"output": {"verdicts": [{"key": "repo/a", "verdict": "accept", "reason": "ok"}]}, "cost_usd": 0.6, "model": "fake-1"});
-    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    let cfg = std::fs::read_to_string(w.store().join("precall.toml")).unwrap();
     w.config(&format!(
         "max_cost_usd = 0.5\n{cfg}{}{}",
         w.inst(
@@ -1379,12 +1379,12 @@ fn a_forced_run_reports_drift_over_the_nodes_before_or_after_it() {
     assert!(w.report().contains(line), "{}", w.report());
     assert!(
         o.stdout.contains(line),
-        "`rrecall run` prints it: {}",
+        "`precall run` prints it: {}",
         o.stdout
     );
     assert!(
         w.cmd(&["status"]).stdout.contains(line),
-        "and `rrecall status`"
+        "and `precall status`"
     );
 }
 
@@ -1406,7 +1406,7 @@ fn a_forced_run_that_changes_nothing_reports_zero_drift_and_a_normal_run_none() 
 #[test]
 fn a_forced_run_denied_before_its_commit_reports_no_drift() {
     let w = world(&props(&[add("a", "layout", "Queue")]));
-    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    let cfg = std::fs::read_to_string(w.store().join("precall.toml")).unwrap();
     w.config(&format!(
         "{cfg}{}",
         w.inst(
@@ -1597,18 +1597,18 @@ fn the_budget_stops_runner_calls_and_leaves_the_collector_unsettled() {
     assert!(w.report().contains("budget"), "{}", w.report());
     assert!(w.report().contains("$0.60"), "{}", w.report());
     let lock: Value = serde_json::from_str(
-        &std::fs::read_to_string(w.store().join("rrecall.lock")).unwrap_or("{}".into()),
+        &std::fs::read_to_string(w.store().join("precall.lock")).unwrap_or("{}".into()),
     )
     .unwrap();
     assert!(lock["collectors"].get("writer").is_none());
     let input = w.input("runner", 1);
     let prompt = input["prompt"].as_str().unwrap();
-    assert!(prompt.starts_with(rrecall::wire::PREAMBLE), "{prompt}");
+    assert!(prompt.starts_with(precall::wire::PREAMBLE), "{prompt}");
     assert!(
         prompt.contains("Propose changes.\n\n## Input\n"),
         "{prompt}"
     );
-    assert_eq!(input["output_schema"], rrecall::wire::collect_schema());
+    assert_eq!(input["output_schema"], precall::wire::collect_schema());
     assert_eq!(input["model"], "fake-model");
     assert_eq!(input["read_only"], true);
     assert_eq!(input["input"]["round"], 1);
@@ -1766,7 +1766,7 @@ fn a_resolve_prompt_runs_through_its_collectors_runner_and_feeds_the_judges() {
             .contains("\"note:queue.md\"")
     );
     assert_eq!(input["input"], json!({"refs": ["note:queue.md"]}));
-    assert_eq!(input["output_schema"], rrecall::wire::resolve_schema());
+    assert_eq!(input["output_schema"], precall::wire::resolve_schema());
     let runs = w.store().join("runs");
     let run = std::fs::read_dir(&runs)
         .unwrap()
@@ -1993,7 +1993,7 @@ fn the_builtin_claude_runner_runs_a_declarative_collector() {
     let argv = std::fs::read_to_string(w.root.join("home/agent/claude.argv.1")).unwrap();
     assert!(argv.contains("\n--model\nopus-test\n"), "{argv}");
     let stdin = std::fs::read_to_string(w.root.join("home/agent/claude.stdin.1")).unwrap();
-    assert!(stdin.starts_with(rrecall::wire::PREAMBLE) && stdin.contains("Propose changes."));
+    assert!(stdin.starts_with(precall::wire::PREAMBLE) && stdin.contains("Propose changes."));
     // What the agent streamed, next to the call's stdout and stderr (spec §6.3, §6.8).
     let logs = logs(&w);
     for ext in ["stdout", "stderr", "agent"] {
@@ -2007,7 +2007,7 @@ fn a_runner_the_core_kills_at_the_timeout_still_leaves_its_agent_log() {
     let w = world(&props(&[add("a", "layout", "Queue")]));
     let tok = format!("ghp_{}", "aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3z5A");
     agent(&w, "stop-runner", &json!(format!("streamed {tok}")));
-    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    let cfg = std::fs::read_to_string(w.store().join("precall.toml")).unwrap();
     w.config(&format!(
         "{cfg}{}runner = \"claude\"\ntimeout = \"2s\"\n\n[[plugins]]\nid = \"claude\"\n",
         w.inst("pjudge", "pjudge", ""),
@@ -2054,7 +2054,7 @@ fn the_cost_cap_counts_what_the_builtin_runner_reports() {
 #[test]
 fn a_denying_run_before_hook_aborts_before_collecting() {
     let w = world(&props(&[add("a", "layout", "Queue")]));
-    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    let cfg = std::fs::read_to_string(w.store().join("precall.toml")).unwrap();
     w.config(&format!(
         "{}{cfg}",
         w.inst(
@@ -2169,7 +2169,7 @@ fn a_node_moved_away_and_back_shows_its_new_order_as_an_update() {
 #[test]
 fn a_denying_commit_before_hook_leaves_the_store_unchanged() {
     let w = world(&props(&[add("a", "layout", "Queue")]));
-    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    let cfg = std::fs::read_to_string(w.store().join("precall.toml")).unwrap();
     w.config(&format!(
         "{cfg}{}",
         w.inst(
@@ -2200,7 +2200,7 @@ fn a_denying_commit_before_hook_leaves_the_store_unchanged() {
 #[test]
 fn a_lock_checked_out_with_crlf_is_not_rewritten_and_no_commit_is_reported() {
     let w = world(&props(&[]));
-    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    let cfg = std::fs::read_to_string(w.store().join("precall.toml")).unwrap();
     w.config(&format!(
         "{cfg}{}",
         w.inst("audit", "audit", "out = \"{}\"")
@@ -2215,15 +2215,15 @@ fn a_lock_checked_out_with_crlf_is_not_rewritten_and_no_commit_is_reported() {
     );
     w.config(&crashing);
     w.run_code(&[], 5);
-    std::fs::remove_file(w.store().join("rrecall.lock")).unwrap();
-    w.git(&["checkout", "--", "rrecall.lock"]);
-    let lock = std::fs::read_to_string(w.store().join("rrecall.lock")).unwrap();
+    std::fs::remove_file(w.store().join("precall.lock")).unwrap();
+    w.git(&["checkout", "--", "precall.lock"]);
+    let lock = std::fs::read_to_string(w.store().join("precall.lock")).unwrap();
     assert!(lock.contains("\r\n"), "git checked the lock out with CRLF");
     let (head, calls) = (w.head(), w.calls("audit"));
     let o = w.run_code(&[], 5);
     assert_eq!(w.head(), head);
     assert_eq!(
-        std::fs::read_to_string(w.store().join("rrecall.lock")).unwrap(),
+        std::fs::read_to_string(w.store().join("precall.lock")).unwrap(),
         lock,
         "the checkout is left alone"
     );
@@ -2240,11 +2240,11 @@ fn a_lock_checked_out_with_crlf_is_not_rewritten_and_no_commit_is_reported() {
     w.git(&["config", "filter.blank.clean", "cat >/dev/null"]);
     std::fs::write(
         w.store().join(".gitattributes"),
-        "rrecall.lock filter=blank\n",
+        "precall.lock filter=blank\n",
     )
     .unwrap();
     w.commit("attributes", &[".gitattributes"]);
-    w.git(&["add", "--renormalize", "rrecall.lock"]);
+    w.git(&["add", "--renormalize", "precall.lock"]);
     w.git(&["commit", "-q", "-m", "blank lock"]);
     let (head, calls) = (w.head(), w.calls("audit"));
     std::fs::write(w.fp(), "v2").unwrap();
@@ -2261,7 +2261,7 @@ fn a_lock_checked_out_with_crlf_is_not_rewritten_and_no_commit_is_reported() {
 #[test]
 fn observing_hooks_get_each_event_and_their_failures_do_not_count() {
     let w = world(&props(&[add("a", "layout", "Queue")]));
-    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    let cfg = std::fs::read_to_string(w.store().join("precall.toml")).unwrap();
     w.config(&format!(
         "{cfg}{}",
         w.inst("audit", "audit", "out = \"{}\"")
@@ -2303,18 +2303,18 @@ fn observing_hooks_get_each_event_and_their_failures_do_not_count() {
 #[test]
 fn a_second_run_waits_for_the_store_lock_or_fails_fast() {
     let w = world(&props(&[]));
-    let held = rrecall::lock::acquire(&w.store(), true).unwrap().unwrap();
+    let held = precall::lock::acquire(&w.store(), true).unwrap().unwrap();
     let o = w.run_code(&["--no-wait"], 4);
     assert!(o.stderr.contains("lock"), "{}", o.stderr);
     let spawn = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_rrecall"))
+        Command::new(env!("CARGO_BIN_EXE_precall"))
             .args(["--project", "kiln"])
             .args(args)
             .current_dir(w.root.join("work"))
             .env("HOME", w.root.join("home"))
             .env("XDG_DATA_HOME", w.root.join("data"))
             .env("XDG_CONFIG_HOME", w.root.join("config"))
-            .env_remove("RRECALL_PROJECT")
+            .env_remove("PRECALL_PROJECT")
             .spawn()
             .unwrap()
     };
@@ -2337,7 +2337,7 @@ fn a_second_run_waits_for_the_store_lock_or_fails_fast() {
 #[test]
 fn the_builtin_html_view_renders_after_the_commit_and_its_failure_is_only_reported() {
     let w = world(&props(&[add("a", "layout", "Queue")]));
-    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    let cfg = std::fs::read_to_string(w.store().join("precall.toml")).unwrap();
     w.config(&format!("{cfg}\n[[plugins]]\nid = \"html\"\n"));
     w.run_code(&[], 0);
     let page = std::fs::read_to_string(w.store().join("views/index.html")).unwrap();
@@ -2359,7 +2359,7 @@ fn the_builtin_html_view_renders_after_the_commit_and_its_failure_is_only_report
 
     // A view that cannot write its page is a warning; the run keeps its exit code.
     let w = world(&props(&[add("a", "layout", "Queue")]));
-    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    let cfg = std::fs::read_to_string(w.store().join("precall.toml")).unwrap();
     w.config(&format!("{cfg}\n[[plugins]]\nid = \"html\"\n"));
     std::fs::write(w.store().join("views"), "not a directory").unwrap();
     w.run_code(&[], 0);
@@ -2369,7 +2369,7 @@ fn the_builtin_html_view_renders_after_the_commit_and_its_failure_is_only_report
 #[test]
 fn a_view_failure_is_reported_and_keeps_the_exit_code() {
     let w = world(&props(&[add("a", "layout", "Queue")]));
-    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    let cfg = std::fs::read_to_string(w.store().join("precall.toml")).unwrap();
     w.config(&format!(
         "{cfg}{}",
         w.inst("view", "view", "scenario = \"crash\"")
@@ -2380,7 +2380,7 @@ fn a_view_failure_is_reported_and_keeps_the_exit_code() {
     assert_eq!(w.input("view", 1)["project"], "kiln");
     // With no proposals the warnings follow the summary; `run` and `status` still stop there.
     let w = world(&props(&[]));
-    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    let cfg = std::fs::read_to_string(w.store().join("precall.toml")).unwrap();
     w.config(&format!(
         "{cfg}{}",
         w.inst("view", "view", "scenario = \"crash\"")
@@ -2421,7 +2421,7 @@ fn status_summarizes_the_last_report() {
 #[test]
 fn a_manifest_error_aborts_with_exit_4_and_changes_nothing() {
     let w = world(&props(&[]));
-    let m = w.store().join("plugins/col/rrecall-plugin.toml");
+    let m = w.store().join("plugins/col/precall-plugin.toml");
     let text = std::fs::read_to_string(&m).unwrap();
     std::fs::write(
         &m,
@@ -2644,13 +2644,13 @@ fn the_builtin_slack_collector_reads_through_a_connector_runner_once_a_day() {
         .as_str()
         .unwrap()
         .to_string();
-    let text = std::fs::read_to_string(w.store().join("rrecall.lock")).unwrap();
+    let text = std::fs::read_to_string(w.store().join("precall.lock")).unwrap();
     std::fs::write(
-        w.store().join("rrecall.lock"),
+        w.store().join("precall.lock"),
         text.replace(&at, "2026-11-01T00:00:00Z"),
     )
     .unwrap();
-    w.commit("a day later", &["rrecall.lock"]);
+    w.commit("a day later", &["precall.lock"]);
     std::fs::write(w.root.join("home/agent/out.3"), r#"{"proposals": []}"#).unwrap();
     w.run_code(&[], 0);
     let again = agent_rec("claude.stdin.3");
@@ -2669,7 +2669,7 @@ fn the_builtin_slack_collector_reads_through_a_connector_runner_once_a_day() {
 }
 
 #[test]
-fn a_relative_claude_config_dir_is_resolved_against_the_dir_rrecall_runs_in() {
+fn a_relative_claude_config_dir_is_resolved_against_the_dir_precall_runs_in() {
     let w = W::new();
     agent(&w, "ok", &json!({"proposals": []}));
     let readme = include_str!("../README.md");
@@ -2686,7 +2686,7 @@ fn a_relative_claude_config_dir_is_resolved_against_the_dir_rrecall_runs_in() {
         &[("CLAUDE_CONFIG_DIR", "login")],
     );
     assert_eq!(o.code, 0, "{}", o.stderr);
-    // Plugins run in their own dir; the login is the one next to where rrecall was started.
+    // Plugins run in their own dir; the login is the one next to where precall was started.
     let env = std::fs::read_to_string(w.root.join("home/agent/claude.env.1")).unwrap();
     let want = format!(
         "CLAUDE_SECURESTORAGE_CONFIG_DIR={}",
@@ -2710,7 +2710,7 @@ fn judged(judge: &str, verdicts: Value) -> W {
 fn judged_on(judge: &str, proposal: Value, verdicts: Value) -> W {
     let w = world(&props(&[proposal]));
     agent(&w, "ok", &verdicts);
-    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    let cfg = std::fs::read_to_string(w.store().join("precall.toml")).unwrap();
     w.config(&format!(
         "{cfg}\n[[plugins]]\nid = \"claude\"\n\n[[plugins]]\nid = \"{judge}\"\nrunner = \"claude\"\n"
     ));
@@ -2744,9 +2744,9 @@ fn a_builtin_judge_runs_its_embedded_prompt_through_the_runner_and_its_reject_ho
         assert!(w.map("layout").contains("\"id\":\"auth\""), "{judge}");
         assert!(w.report().contains("no source backs it"), "{judge}");
         let stdin = std::fs::read_to_string(w.root.join("home/agent/claude.stdin.1")).unwrap();
-        let prompt = rrecall::plugin::builtin_prompt(judge, &format!("{judge}.md")).unwrap();
+        let prompt = precall::plugin::builtin_prompt(judge, &format!("{judge}.md")).unwrap();
         assert!(
-            stdin.starts_with(rrecall::wire::PREAMBLE) && stdin.contains(prompt.trim_end()),
+            stdin.starts_with(precall::wire::PREAMBLE) && stdin.contains(prompt.trim_end()),
             "{judge}: {stdin}"
         );
         assert!(stdin.contains("\"repo/a\""), "{judge}");
@@ -2788,7 +2788,7 @@ const SYNC: &str = r#"{"id":"sync","parent":"how-it-works","title":"Sync","body"
 fn checks_and_judges_get_the_nodes_of_the_branches_their_batch_adds_to() {
     let w = world(&props(&[add("a", "layout", "Queue")]));
     w.seed("how-it-works", &[SYNC]);
-    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    let cfg = std::fs::read_to_string(w.store().join("precall.toml")).unwrap();
     w.config(&format!(
         "{cfg}{}",
         w.inst("judge", "judge", "scenario = \"all\", out = \"accept\"")
@@ -2841,7 +2841,7 @@ fn a_judge_may_not_accept_a_claim_whose_only_sources_are_unresolved() {
         (json!({"file:a.md": "The queue."}), true),
     ] {
         let w = resolving(&props(&[add("a", "layout", "Queue")]), texts.clone());
-        let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+        let cfg = std::fs::read_to_string(w.store().join("precall.toml")).unwrap();
         // One round: the fake's collect and resolve answers would run out in a second.
         w.config(&format!(
             "max_rounds = 1\n{cfg}{}",
@@ -2865,7 +2865,7 @@ fn a_builtin_judge_accept_with_resolved_sources_enters_the_map() {
         json!({"file:a.md": "The queue."}),
     );
     agent(&w, "ok", &verdict("repo/a", "accept", "the source says so"));
-    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    let cfg = std::fs::read_to_string(w.store().join("precall.toml")).unwrap();
     w.config(&format!(
         "{cfg}\n[[plugins]]\nid = \"claude\"\n\n[[plugins]]\nid = \"support\"\nrunner = \"claude\"\n"
     ));
@@ -3262,11 +3262,11 @@ fn a_params_change_force_or_an_old_entry_reads_everything() {
         .unwrap()
         .remove("setup");
     std::fs::write(
-        w.store().join("rrecall.lock"),
+        w.store().join("precall.lock"),
         format!("{}\n", serde_json::to_string_pretty(&lock).unwrap()),
     )
     .unwrap();
-    w.commit("old lock", &["rrecall.lock"]);
+    w.commit("old lock", &["precall.lock"]);
     std::fs::write(w.fp(), "v2").unwrap();
     w.run_code(&[], 0);
     assert_eq!(w.input("repo", 4)["since"], Value::Null, "old entry");
@@ -3277,7 +3277,7 @@ fn a_cursor_that_looks_like_a_credential_is_not_kept() {
     let token = format!("ghp_{}", "aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3z5A");
     let w = seq_world(&[with_cursor(&[], json!({ "t": token }))]);
     w.run_code(&[], 0);
-    let text = std::fs::read_to_string(w.store().join("rrecall.lock")).unwrap();
+    let text = std::fs::read_to_string(w.store().join("precall.lock")).unwrap();
     assert!(!text.contains(&token), "{text}");
     assert!(w.lock()["collectors"]["repo"].get("cursor").is_none());
     assert!(w.report().contains("cursor"), "{}", w.report());

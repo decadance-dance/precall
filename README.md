@@ -1,11 +1,11 @@
 <p align="center">
-  <img alt="rrecall: the command rrecall run &amp;&amp; rrecall open; five sources, the repo, its git history, GitHub, Slack and your own plugins, feed one run that fingerprints, collects, checks, judges, sends rejections back, up to 2 rounds by default, and commits; the run writes the map, kept in its own git repository, with the branches layout, how-it-works, people, done, blocked and decisions, where one new node lands under decisions; the commit reads run 2026-11-19T09:14Z: +3 ~1 -0 (rejected 2), for git diff and git blame; the tagline says nothing due means no model call and no change; exit 0 done, 4 aborted, 5 partial" src="docs/assets/banner.svg" width="100%">
+  <img alt="precall (Project Recall): the command precall run &amp;&amp; precall open; five sources, the repo, its git history, GitHub, Slack and your own plugins, feed one run that fingerprints, collects, checks, judges, sends rejections back, up to 2 rounds by default, and commits; the run writes the map, kept in its own git repository, with the branches layout, how-it-works, people, done, blocked and decisions, where one new node lands under decisions; the commit reads run 2026-11-19T09:14Z: +3 ~1 -0 (rejected 2), for git diff and git blame; the tagline says nothing due means no model call and no change; exit 0 done, 4 aborted, 5 partial" src="docs/assets/banner.svg" width="100%">
 </p>
 
-<h3 align="center">A versioned map of a software project, built from its own sources, for coding agents and people</h3>
+<h3 align="center">Project Recall · A versioned map of a software project, built from its own sources</h3>
 
 <p align="center">
-  <img alt="Release 0.1.0" src="https://img.shields.io/badge/release-0.1.0-10b981?style=flat-square&labelColor=000000">
+  <img alt="First release: rrecall 0.1.0" src="https://img.shields.io/badge/first%20release-0.1.0-10b981?style=flat-square&labelColor=000000">
   <img alt="Agents: Claude Code and Codex" src="https://img.shields.io/badge/agents-Claude%20Code%20%C2%B7%20Codex-334155?style=flat-square&labelColor=000000">
   <img alt="Sources: repo, GitHub, Slack and your plugins" src="https://img.shields.io/badge/sources-repo%20%C2%B7%20GitHub%20%C2%B7%20Slack%20%C2%B7%20your%20plugins-334155?style=flat-square&labelColor=000000">
   <img alt="Platform: macOS and Linux" src="https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux-334155?style=flat-square&labelColor=000000">
@@ -25,23 +25,36 @@
 
 <br>
 
-`rrecall` keeps a map of a software project: what lives where, how it works, who owns what, what
+`precall` (Project Recall) keeps a map of a software project: what lives where, how it works, who owns what, what
 was done, what is blocked and why decisions were made. A run sends **collectors** over the
 project's sources (the repo, its git history, GitHub, Slack, your own plugins), and **checks and
 judges** accept or reject each change they propose, sending rejections back for rework before
 anything is committed. The map lives in **its own git repository**, so every change shows in
 `git diff` and `git blame`. It is **stable**: a run with no collector due calls no model and
 leaves the map byte for byte as it was (invariant **I1**), and no run removes a node without evidence.
-Coding agents query it from the command line, one node or branch with `rrecall show`; people read
+Coding agents query it from the command line, one node or branch with `precall show`; people read
 it as an HTML page.
 
 <p align="center">
   <img alt="The HTML view of the map of an invented project, lanternfish: a mind map with the branches Layout, How it works and People and their children, and on the right the inspector for the node Sync protocol under How it works: its body, the user's note, its source import:lanternfish-outline.txt, its four children and its history, oldest first, with the import commit and the note commit" src="docs/screenshots/html-view.png" width="90%">
   <br>
-  <sub><code>rrecall open</code> on the map of an invented project: the mind map, and one node with its note, sources, children and history.</sub>
+  <sub><code>precall open</code> on the map of an invented project: the mind map, and one node with its note, sources, children and history.</sub>
 </p>
 
 ## 📣 Recent updates
+
+### Project Recall
+
+The project and command are now named `precall`. The first release was published as `rrecall 0.1.0`.
+
+To move a 0.1.0 installation, rename the `rrecall` directory under both `XDG_CONFIG_HOME`
+and `XDG_DATA_HOME` to `precall`. In each existing store, rename `rrecall.toml` and
+`rrecall.lock` to `precall.toml` and `precall.lock`, keeping the store's Git history.
+Update any absolute paths and origin URLs in your config. For custom plugins, rename
+`.rrecall/plugins/` to `.precall/plugins/`, `rrecall-plugin.toml` to `precall-plugin.toml`,
+`min_rrecall` to `min_precall`, and `RRECALL_*` variables to `PRECALL_*`.
+Trust project plugins again after the move. The first `precall run` rereads the built-in
+sources because their plugin hashes changed. That run can call models.
 
 ### 🔥 2026.11.19: rrecall 0.1.0, the first release
 - **A map that stays put**: rrecall builds the map from a project's repository, its GitHub issues
@@ -63,7 +76,7 @@ it as an HTML page.
   checks that each can run.
 - **Upgrade note**: the first release, nothing to migrate. Built and tested on macOS and Linux;
   the live acceptance run used the `claude` runner (collectors on Opus 5.5, judges on Sonnet 5.5).
-  [Release notes](https://github.com/decadance-dance/rrecall/releases/tag/0.1.0)
+  [Release notes](https://github.com/decadance-dance/precall/releases/tag/0.1.0)
 
 ## 🚀 Key features
 
@@ -72,16 +85,16 @@ it as an HTML page.
 
 * **Its own git repository**: one JSONL file per branch, one node per line, sorted by id, so an
   unchanged node keeps a byte-identical line and `git blame` names the run that last changed it.
-  The store stays on your machine: it has no remote, and rrecall never adds one.
+  The store stays on your machine: it has no remote, and precall never adds one.
 * **Nothing due, nothing spent** (I1): each collector has a cheap fingerprint (a commit, the
   newest `updatedAt`, a hash) or a `min_interval`; when none is due, the run calls no model and
   leaves the map as it was, and commits at most a lock change (a collector whose fingerprint
   failed is marked unsettled).
 * **No loss without evidence**: a run's removal must cite evidence that the fact ended (an issue
   closed, a file deleted, a decision reversed); "not seen this time" is never one. A run never
-  removes a node with your note, nor one whose children it would leave behind (`rrecall rm`
+  removes a node with your note, nor one whose children it would leave behind (`precall rm`
   does that by hand), and node ids never change.
-* **Your notes are yours**: `rrecall note <id> <text>` annotates a node, and no run can change it.
+* **Your notes are yours**: `precall note <id> <text>` annotates a node, and no run can change it.
 
 ### 🔌 Collectors propose, checks and judges decide
 > *Every proposal passes the core's invariants, then every check and judge, or goes back to its collector with the reason.*
@@ -112,8 +125,8 @@ it as an HTML page.
   map), `show <id>` prints one node or branch with its subtree and `--max-tokens N` cuts it at a
   node boundary and says what it left out, and `--json` gives scripts the same nodes.
 * **Seven questions**: where something lives, how it works, who owns what, what was done, what is
-  blocked and why a decision was made are branches; what was worked on lately is `rrecall recent`.
-* **Tell your agent**: `rrecall agent-instructions` prints a paragraph for `AGENTS.md` or
+  blocked and why a decision was made are branches; what was worked on lately is `precall recent`.
+* **Tell your agent**: `precall agent-instructions` prints a paragraph for `AGENTS.md` or
   `CLAUDE.md`: that the map exists and which command answers which question.
 * **The HTML view**: a collapsible mind map, the outline with search, each node's sources, note and
   history, and a "changed since the last run" filter, with nothing loaded from the network.
@@ -123,8 +136,8 @@ it as an HTML page.
 
 * **A prompt is a plugin**: a manifest and a prompt make a collector or a judge that runs on the
   `claude` or `codex` runner; a program in any language that reads and writes JSON can be any kind.
-* **Install and trust**: `rrecall plugin add <git-url|path>`, `rrecall plugin trust <dir>` for a
-  project's `.rrecall/plugins/`, `rrecall plugin list`; `rrecall doctor` checks binaries, logins
+* **Install and trust**: `precall plugin add <git-url|path>`, `precall plugin trust <dir>` for a
+  project's `.precall/plugins/`, `precall plugin list`; `precall doctor` checks binaries, logins
   and each collector's access without a model call (one with only a `min_interval` is checked by a run).
 * **Keep a source's text where you want it**: `allowed_runners` limits which runner instances may
   receive a collector's content; hooks may deny a run or a commit.
@@ -138,42 +151,31 @@ You need `git`; for runs that use a model, [`claude`](https://docs.anthropic.com
 [`gh`](https://cli.github.com/), logged in. Building from source needs
 [rustup](https://rustup.rs/) with a stable toolchain.
 
-With Homebrew, on macOS or Linux:
+Build `precall` with Cargo from the development branch:
 
 ```sh
-brew install decadance-dance/tap/rrecall
+cargo install --git https://github.com/decadance-dance/precall --locked
 ```
 
-With Cargo, the latest release (all versions: [Releases](https://github.com/decadance-dance/rrecall/releases)):
-
-```sh
-cargo install --git https://github.com/decadance-dance/rrecall --tag 0.1.0 --locked
-```
-
-With Cargo, the unreleased development branch `develop`:
-
-```sh
-cargo install --git https://github.com/decadance-dance/rrecall --locked
-```
-
-Each Release also carries prebuilt binaries for macOS (arm64, x86_64) and Linux (x86_64, arm64; static) with their `SHA256SUMS`.
+The first `precall` release will add prebuilt binaries for macOS and Linux and
+`brew install decadance-dance/tap/precall`. See [Releases](https://github.com/decadance-dance/precall/releases).
 
 Then, from inside your project's repository:
 
 ```bash
-rrecall init                # the map store, named after the origin remote; enables repo (files), github for a GitHub origin, the checks, judges and html view
-rrecall doctor              # can each enabled plugin run? binaries, logins, access; no model call
-rrecall run                 # collect, check, judge, commit (the first run reads in full, within each collector's limits)
-rrecall ls                  # the branches and their nodes, to depth 2
-rrecall show decisions      # one node or branch and its subtree, with bodies and sources
-rrecall find release        # nodes whose title or body matches
-rrecall open                # render the HTML view and open it
-rrecall agent-instructions  # a paragraph for your agent's instruction file
+precall init                # the map store, named after the origin remote; enables repo (files), github for a GitHub origin, the checks, judges and html view
+precall doctor              # can each enabled plugin run? binaries, logins, access; no model call
+precall run                 # collect, check, judge, commit (the first run reads in full, within each collector's limits)
+precall ls                  # the branches and their nodes, to depth 2
+precall show decisions      # one node or branch and its subtree, with bodies and sources
+precall find release        # nodes whose title or body matches
+precall open                # render the HTML view and open it
+precall agent-instructions  # a paragraph for your agent's instruction file
 ```
 
-The store lives in `$XDG_DATA_HOME/rrecall/<project>/` (`~/.local/share/rrecall/<project>/`) and
-its config in its `rrecall.toml`. `rrecall import <outline>` seeds an empty map from an indented
-outline; `rrecall status` prints the last run's summary, and `rrecall why` with a node id from
+The store lives in `$XDG_DATA_HOME/precall/<project>/` (`~/.local/share/precall/<project>/`) and
+its config in its `precall.toml`. `precall import <outline>` seeds an empty map from an indented
+outline; `precall status` prints the last run's summary, and `precall why` with a node id from
 `ls` or `find` tells when that node appeared and changed, and why.
 
 
@@ -197,7 +199,7 @@ outline; `rrecall status` prints the last run's summary, and `rrecall why` with 
 <summary><b>Slack</b></summary>
 <br>
 
-The built-in `slack` collector reads named channels and DMs through an agent that can reach Slack: the claude.ai Slack connector of your Claude login. Enable a second `claude` runner instance that loads the connector (`connectors = true`) and may use only the connector's read tools, and let the collector run on it. Add to the store's `rrecall.toml`, next to the `claude` instance `init` enables (`init` does not add these):
+The built-in `slack` collector reads named channels and DMs through an agent that can reach Slack: the claude.ai Slack connector of your Claude login. Enable a second `claude` runner instance that loads the connector (`connectors = true`) and may use only the connector's read tools, and let the collector run on it. Add to the store's `precall.toml`, next to the `claude` instance `init` enables (`init` does not add these):
 
 ```toml
 [[plugins]]
@@ -231,14 +233,14 @@ It runs at most once a day while its setup is unchanged and its last run settled
 <br>
 
 `init` enables the user config's default runner, `claude` unless you set another. To run
-collectors and judges on Codex, set it in `~/.config/rrecall/config.toml`
-(`$XDG_CONFIG_HOME/rrecall/config.toml`) before `rrecall init`:
+collectors and judges on Codex, set it in `~/.config/precall/config.toml`
+(`$XDG_CONFIG_HOME/precall/config.toml`) before `precall init`:
 
 ```toml
 runner = "codex"
 ```
 
-Codex reports tokens but no cost, so the `codex` instance in the store's `rrecall.toml` needs a
+Codex reports tokens but no cost, so the `codex` instance in the store's `precall.toml` needs a
 price, in USD per 1M tokens, for each model it reports; a call whose model has none fails
 ([spec §6.8](docs/SPEC.md#68-runner-contract-and-what-reaches-a-model)). Replace the example with
 your model's name and prices:
@@ -257,7 +259,7 @@ prices = { "your-model" = { input = 1.25, cached_input = 0.125, output = 10.0 } 
 
 ```mermaid
 flowchart TB
-    load(["<b>rrecall run</b><br/>config · lock · manifests"])
+    load(["<b>precall run</b><br/>config · lock · manifests"])
     fp{{"<b>Fingerprint</b><br/>which collectors are due?"}}
     idle(["<b>Nothing due</b><br/>no model call · map unchanged (I1)<br/>report · exit 0"])
     abort(["<b>Aborted</b> · exit 4<br/>store unchanged"])
@@ -298,7 +300,7 @@ flowchart TB
   Two proposals that change the same node are both sent back as a conflict.
 - **Commit**: after the last round, the accepted changes and the lock in one commit, when either changed, whose message lists each change
   with its collector and sources (`run 2026-11-19T09:14Z: +3 ~1 -0 (rejected 2)`); the full run
-  report stays in the store's `runs/`, and `rrecall status` prints its summary.
+  report stays in the store's `runs/`, and `precall status` prints its summary.
 
 **→ [Spec](docs/SPEC.md)** has the map format, the pipeline, the stability rules, the plugin
 protocol and the CLI in full.
@@ -307,7 +309,7 @@ protocol and the CLI in full.
 
 | If you want to… | Open |
 |---|---|
-| Know why rrecall exists and what it must never become | [Vision](docs/VISION.md) |
+| Know why precall exists and what it must never become | [Vision](docs/VISION.md) |
 | Know exactly what it does: the map, the run, the invariants, the CLI and exit codes | [Spec](docs/SPEC.md) |
 | Write a collector, check, judge, view or runner | [Plugin author guide](docs/plugins.md) |
 | Start from a working plugin outside the core | [`examples/meeting-notes/`](examples/meeting-notes/) |
@@ -322,7 +324,7 @@ protocol and the CLI in full.
 | Term | Meaning |
 |---|---|
 | **Map** | A project's tree of nodes, kept in its map store |
-| **Map store** | The git repository that holds one project's map, its config `rrecall.toml` and its lock `rrecall.lock`; never the project's own repository |
+| **Map store** | The git repository that holds one project's map, its config `precall.toml` and its lock `precall.lock`; never the project's own repository |
 | **Node** | One item of the map: a title, a one-fact body, its sources, and optionally a date, a state and your note |
 | **Branch** | A top-level node, one per question: `layout`, `how-it-works`, `people`, `done`, `blocked`, `decisions`, plus any the config adds |
 | **Source reference** | Where a node's fact comes from, such as `gh-pr:owner/repo#212` or `file:src/store.rs#L40-L80@a4586a6` |
@@ -347,16 +349,16 @@ protocol and the CLI in full.
 ```bash
 bin/check                              # the merge gate: cargo fmt --check, clippy -D warnings, cargo test
 cargo test merge::tests               # one test or module first; agents, gh and plugins are faked, no logins needed
-RRECALL_LIVE=1 cargo test -- --ignored # live tests against your real claude and codex logins (they cost money)
+PRECALL_LIVE=1 cargo test -- --ignored # live tests against your real claude and codex logins (they cost money)
 ```
 
 - **Branches** follow [git-flow](docs/workflow/git-flow.md): `feature/<n>-<slug>` off `develop`,
   merged back through a pull request with a merge commit once `ci-ok` is green and a reviewer of
   the other model family has reviewed it. Releases and hotfixes: [releasing](docs/workflow/releasing.md).
-- **Tasks** live in [GitHub Issues](https://github.com/decadance-dance/rrecall/issues); every
+- **Tasks** live in [GitHub Issues](https://github.com/decadance-dance/precall/issues); every
   branch works on one.
 - Files, comments, commits and issues are in English.
 
 </details>
 
-<sub>rrecall is licensed under [Apache-2.0](LICENSE).</sub>
+<sub>precall is licensed under [Apache-2.0](LICENSE).</sub>

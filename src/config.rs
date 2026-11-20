@@ -1,11 +1,11 @@
-//! The store config `rrecall.toml` and the user config (spec §9), and project resolution (§2).
+//! The store config `precall.toml` and the user config (spec §9), and project resolution (§2).
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub const STORE_CONFIG: &str = "rrecall.toml";
+pub const STORE_CONFIG: &str = "precall.toml";
 
 /// A branch of the skeleton (spec §3.4).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -67,10 +67,10 @@ pub fn default_branches() -> Vec<BranchDef> {
     .collect()
 }
 
-/// The id of the computed branch answered by `rrecall recent`; never stored.
+/// The id of the computed branch answered by `precall recent`; never stored.
 pub const COMPUTED_BRANCH: &str = "recent";
 
-/// The store config `rrecall.toml` (spec §9). Unknown keys are errors at every level.
+/// The store config `precall.toml` (spec §9). Unknown keys are errors at every level.
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct StoreConfig {
@@ -79,7 +79,7 @@ pub struct StoreConfig {
     /// The plugin instances, in run order (spec §6.2).
     #[serde(default)]
     pub plugins: Vec<PluginEntry>,
-    /// The project's repository, whose `.rrecall/plugins/` loads once trusted (spec §6.7).
+    /// The project's repository, whose `.precall/plugins/` loads once trusted (spec §6.7).
     #[serde(default)]
     pub repo: Option<PathBuf>,
     #[serde(default)]
@@ -163,7 +163,7 @@ impl StoreConfig {
             let problem = if !crate::node::is_slug(&b.id) {
                 Some("is not a slug (a-z, 0-9, single dashes)")
             } else if b.id == COMPUTED_BRANCH {
-                Some("is the computed branch answered by `rrecall recent`")
+                Some("is the computed branch answered by `precall recent`")
             } else if branches.iter().any(|x| x.id == b.id) {
                 Some("is defined twice")
             } else if b.title.trim().is_empty() || b.title.chars().count() > crate::node::TITLE_MAX
@@ -189,7 +189,7 @@ pub fn branch_entry(text: &str, id: &str) -> Option<BranchDef> {
     cfg.skeleton.branch.into_iter().find(|b| b.id == id)
 }
 
-/// TOML text of one `[[skeleton.branch]]` entry, to append to `rrecall.toml`.
+/// TOML text of one `[[skeleton.branch]]` entry, to append to `precall.toml`.
 pub fn branch_toml(b: &BranchDef) -> String {
     format!(
         "\n[[skeleton.branch]]\nid = {}\ntitle = {}\nquestion = {}\ngranularity = {}\n",
@@ -200,7 +200,7 @@ pub fn branch_toml(b: &BranchDef) -> String {
     )
 }
 
-/// The user config `$XDG_CONFIG_HOME/rrecall/config.toml` (spec §9).
+/// The user config `$XDG_CONFIG_HOME/precall/config.toml` (spec §9).
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UserConfig {
@@ -214,7 +214,7 @@ pub struct UserConfig {
     /// Trusted project plugin directories (spec §6.7).
     #[serde(default)]
     pub trusted: Vec<Trusted>,
-    /// Plugins `rrecall plugin add` installed into the user plugin directory (spec §6.7).
+    /// Plugins `precall plugin add` installed into the user plugin directory (spec §6.7).
     #[serde(default)]
     pub installed: Vec<Installed>,
 }
@@ -235,7 +235,7 @@ pub struct Installed {
     pub hash: String,
 }
 
-/// A project's `.rrecall/plugins/` directory the user trusts at this content hash.
+/// A project's `.precall/plugins/` directory the user trusts at this content hash.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Trusted {
@@ -264,12 +264,12 @@ fn xdg_dir(var: &str, fallback: &str) -> Result<PathBuf> {
 }
 
 pub fn user_config_path() -> Result<PathBuf> {
-    Ok(xdg_dir("XDG_CONFIG_HOME", ".config")?.join("rrecall/config.toml"))
+    Ok(xdg_dir("XDG_CONFIG_HOME", ".config")?.join("precall/config.toml"))
 }
 
 /// The user plugin directory, the second place of spec §6.2.
 pub fn user_plugins_dir() -> Result<PathBuf> {
-    Ok(xdg_dir("XDG_CONFIG_HOME", ".config")?.join("rrecall/plugins"))
+    Ok(xdg_dir("XDG_CONFIG_HOME", ".config")?.join("precall/plugins"))
 }
 
 /// Appends `entry` (whole TOML tables, such as `[[installed]]`) to the user config.
@@ -381,7 +381,7 @@ impl UserConfig {
         self.projects.iter().find(|p| p.name == name)
     }
 
-    /// The store directory: the user config's `store`, else `$XDG_DATA_HOME/rrecall/<name>`.
+    /// The store directory: the user config's `store`, else `$XDG_DATA_HOME/precall/<name>`.
     pub fn store_path(&self, name: &str) -> Result<PathBuf> {
         match self.project(name).and_then(|p| p.store.clone()) {
             Some(p) if p.is_absolute() => Ok(p),
@@ -390,7 +390,7 @@ impl UserConfig {
                 p.display()
             ),
             None => Ok(xdg_dir("XDG_DATA_HOME", ".local/share")?
-                .join("rrecall")
+                .join("precall")
                 .join(name)),
         }
     }
@@ -422,10 +422,10 @@ pub fn origin_url(dir: &Path) -> Option<String> {
     (o.status.success() && !url.is_empty()).then_some(url)
 }
 
-/// Project name and store directory from `--project`, `RRECALL_PROJECT`, or the current repo's origin (spec §2).
+/// Project name and store directory from `--project`, `PRECALL_PROJECT`, or the current repo's origin (spec §2).
 pub fn resolve_project(flag: Option<&str>) -> Result<(String, PathBuf)> {
     let user = load_user_config()?;
-    let env = std::env::var("RRECALL_PROJECT")
+    let env = std::env::var("PRECALL_PROJECT")
         .ok()
         .filter(|v| !v.is_empty());
     let name = match flag.map(str::to_string).or(env) {
@@ -434,7 +434,7 @@ pub fn resolve_project(flag: Option<&str>) -> Result<(String, PathBuf)> {
             let cwd = std::env::current_dir()?;
             let Some(url) = origin_url(&cwd) else {
                 return Err(crate::error::usage(
-                    "no project: pass --project <name>, set RRECALL_PROJECT, or run inside a repo whose origin remote is in the user config",
+                    "no project: pass --project <name>, set PRECALL_PROJECT, or run inside a repo whose origin remote is in the user config",
                 ));
             };
             // limit: remote URLs match as exact strings; an ssh and an https URL of one repo are two remotes.
@@ -442,7 +442,7 @@ pub fn resolve_project(flag: Option<&str>) -> Result<(String, PathBuf)> {
                 Some(p) => p.name.clone(),
                 None => {
                     return Err(crate::error::no_map(format!(
-                        "no map for origin {url}: run `rrecall init` in this repo, or add the URL to a project's remotes in {}",
+                        "no map for origin {url}: run `precall init` in this repo, or add the URL to a project's remotes in {}",
                         user_config_path()?.display()
                     )));
                 }
@@ -453,7 +453,7 @@ pub fn resolve_project(flag: Option<&str>) -> Result<(String, PathBuf)> {
     let path = user.store_path(&name)?;
     if !path.join(STORE_CONFIG).is_file() {
         return Err(crate::error::no_map(format!(
-            "no map for project `{name}` at {}: run `rrecall init {name}`",
+            "no map for project `{name}` at {}: run `precall init {name}`",
             path.display()
         )));
     }
@@ -461,7 +461,7 @@ pub fn resolve_project(flag: Option<&str>) -> Result<(String, PathBuf)> {
 }
 
 /// The name of the project whose store is `store`: the user config's entry with that store,
-/// else the store directory's name (the default store is `<data>/rrecall/<name>`).
+/// else the store directory's name (the default store is `<data>/precall/<name>`).
 pub fn project_of(user: &UserConfig, store: &Path) -> String {
     user.projects
         .iter()
@@ -619,7 +619,7 @@ mod tests {
     #[test]
     fn user_config_is_strict() {
         let u: UserConfig = toml::from_str(
-            "runner = \"claude\"\nmodel = \"default\"\n[[projects]]\nname = \"kiln\"\n[[trusted]]\npath = \"/src/kiln/.rrecall/plugins\"\nhash = \"sha256:00\"\n",
+            "runner = \"claude\"\nmodel = \"default\"\n[[projects]]\nname = \"kiln\"\n[[trusted]]\npath = \"/src/kiln/.precall/plugins\"\nhash = \"sha256:00\"\n",
         )
         .unwrap();
         assert_eq!(u.trusted[0].hash, "sha256:00");

@@ -13,16 +13,16 @@ use std::path::Path;
 pub const MANIFEST: &str = r#"id = "git-history"
 name = "Releases and merged branches from git history"
 version = "0.1.0"
-min_rrecall = "0.1.0"
+min_precall = "0.1.0"
 kind = "collector"
 requires = ["git"]
 
 [collector]
 scope = ["done"]
 source_kinds = ["commit"]
-fingerprint = ["rrecall", "builtin", "git-history", "fingerprint"]
-command = ["rrecall", "builtin", "git-history", "collect"]
-resolve = ["rrecall", "builtin", "git-history", "resolve"]
+fingerprint = ["precall", "builtin", "git-history", "fingerprint"]
+command = ["precall", "builtin", "git-history", "collect"]
+resolve = ["precall", "builtin", "git-history", "resolve"]
 timeout = "2m"
 
 [params]

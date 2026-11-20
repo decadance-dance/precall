@@ -28,7 +28,7 @@ impl T {
     fn new(scenario: &str, out: &str) -> T {
         static N: AtomicU32 = AtomicU32::new(0);
         let root = std::env::temp_dir().join(format!(
-            "rrecall-runner-{}-{}",
+            "precall-runner-{}-{}",
             std::process::id(),
             N.fetch_add(1, Ordering::SeqCst)
         ));
@@ -83,20 +83,20 @@ impl T {
         // A umask that lets other users read what the runner creates unless it says otherwise.
         let mut cmd = Command::new("/bin/sh");
         cmd.args(["-c", "umask 022 && exec \"$0\" builtin \"$1\""])
-            .args([env!("CARGO_BIN_EXE_rrecall"), id])
+            .args([env!("CARGO_BIN_EXE_precall"), id])
             .env("PATH", path)
             .env("HOME", self.root.join("home"))
-            .env("RRECALL_STATE_DIR", self.root.join("state"))
+            .env("PRECALL_STATE_DIR", self.root.join("state"))
             .env("TMPDIR", self.root.join("tmp"))
-            .env("RRECALL_RUN_ID", "r1")
+            .env("PRECALL_RUN_ID", "r1")
             .env("GH_TOKEN", "must-not-reach-the-agent")
             .env_remove("CODEX_HOME")
-            .env_remove("RRECALL_PARAM_PRICES")
+            .env_remove("PRECALL_PARAM_PRICES")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         if let Some(p) = prices {
-            cmd.env("RRECALL_PARAM_PRICES", p);
+            cmd.env("PRECALL_PARAM_PRICES", p);
         }
         for (k, v) in env {
             cmd.env(k, v);
@@ -147,7 +147,7 @@ impl T {
     /// The runners' private dir in `TMPDIR`.
     fn private(&self) -> PathBuf {
         let uid = std::os::unix::fs::MetadataExt::uid(&std::fs::metadata(&self.root).unwrap());
-        self.root.join(format!("tmp/rrecall-{uid}"))
+        self.root.join(format!("tmp/precall-{uid}"))
     }
 
     /// The scratch dir of each call (in the private dir in `TMPDIR`) is gone after it.
@@ -225,10 +225,10 @@ fn claude_runs_read_only_with_the_prompt_on_stdin_and_reports_cost_and_model() {
     );
     let env = t.rec("claude.env.1");
     assert!(
-        !env.contains("GH_TOKEN") && !env.contains("RRECALL_"),
+        !env.contains("GH_TOKEN") && !env.contains("PRECALL_"),
         "{env}"
     );
-    assert!(t.rec("claude.cwd.1").contains("/rrecall-runner-"));
+    assert!(t.rec("claude.cwd.1").contains("/precall-runner-"));
     t.no_scratch_left();
 }
 
@@ -292,7 +292,7 @@ fn claude_effort_goes_after_the_model_on_both_turns_and_empty_means_unset() {
         "m",
         WRAP_TIMEOUT,
         Some(free),
-        &[("RRECALL_PARAM_EFFORT", "high".into())],
+        &[("PRECALL_PARAM_EFFORT", "high".into())],
     );
     assert!(o.ok, "{}", o.stderr);
     for n in [1, 2] {
@@ -310,7 +310,7 @@ fn claude_effort_goes_after_the_model_on_both_turns_and_empty_means_unset() {
         "m",
         60,
         None,
-        &[("RRECALL_PARAM_EFFORT", "".into())],
+        &[("PRECALL_PARAM_EFFORT", "".into())],
     );
     assert!(o.ok, "{}", o.stderr);
     assert!(!t.argv("claude.argv.1").iter().any(|a| a == "--effort"));
@@ -352,7 +352,7 @@ fn codex_runs_read_only_in_a_clean_home_and_prices_its_tokens() {
         ["exec", "--json", "-s", "read-only", "--skip-git-repo-check"]
     );
     let dir = after(&argv, "-C");
-    assert!(dir.contains("/rrecall-runner-"), "{dir}");
+    assert!(dir.contains("/precall-runner-"), "{dir}");
     assert_eq!(after(&argv, "-o"), format!("{dir}/reply.txt"));
     assert_eq!(argv.last().map(String::as_str), Some("-"));
     assert!(!argv.iter().any(|a| a == "-m" || a.contains("PROMPT TEXT")));
@@ -366,7 +366,7 @@ fn codex_runs_read_only_in_a_clean_home_and_prices_its_tokens() {
         "{env}"
     );
     assert!(
-        !env.contains("GH_TOKEN") && !env.contains("RRECALL_"),
+        !env.contains("GH_TOKEN") && !env.contains("PRECALL_"),
         "{env}"
     );
     t.no_scratch_left();
@@ -602,7 +602,7 @@ fn a_call_removes_only_the_scratch_dirs_of_calls_whose_runner_is_gone() {
     let dead = done.id();
     let tmp = t.root.join("tmp");
     let looks = [
-        tmp.join(format!("rrecall-agent-{dead}-project-notes")),
+        tmp.join(format!("precall-agent-{dead}-project-notes")),
         private.join(format!("agent-{dead}-project-notes")),
         private.join(format!("agent-{dead}-0a1b2c3d-0000-4000-8000-00000000000g")),
     ];
@@ -688,8 +688,8 @@ fn claude_with_connectors_runs_in_a_fresh_config_dir_without_hooks_and_allows_on
         60,
         None,
         &[
-            ("RRECALL_PARAM_CONNECTORS", "true".into()),
-            ("RRECALL_PARAM_TOOLS", tools.into()),
+            ("PRECALL_PARAM_CONNECTORS", "true".into()),
+            ("PRECALL_PARAM_TOOLS", tools.into()),
             ("CLAUDE_CONFIG_DIR", real.to_string_lossy().into()),
         ],
     );
@@ -743,7 +743,7 @@ fn claude_without_connectors_keeps_safe_mode_and_no_tool_search() {
         60,
         None,
         &[
-            ("RRECALL_PARAM_CONNECTORS", "false".into()),
+            ("PRECALL_PARAM_CONNECTORS", "false".into()),
             ("ENABLE_TOOL_SEARCH", "true".into()),
         ],
     );
@@ -777,8 +777,8 @@ fn claude_tools_must_be_exact_mcp_tool_names_and_need_connectors() {
             60,
             None,
             &[
-                ("RRECALL_PARAM_CONNECTORS", connectors.into()),
-                ("RRECALL_PARAM_TOOLS", tools.into()),
+                ("PRECALL_PARAM_CONNECTORS", connectors.into()),
+                ("PRECALL_PARAM_TOOLS", tools.into()),
             ],
         );
         assert!(!o.ok, "{connectors} {tools}");
@@ -796,7 +796,7 @@ fn a_relative_claude_config_dir_reaches_the_agent_as_an_absolute_path() {
         60,
         None,
         &[
-            ("RRECALL_PARAM_CONNECTORS", "true".into()),
+            ("PRECALL_PARAM_CONNECTORS", "true".into()),
             ("CLAUDE_CONFIG_DIR", "rel/config".into()),
         ],
     );
@@ -814,7 +814,7 @@ fn token() -> String {
     format!("ghp_{}", "aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3z5A")
 }
 
-/// A call with `RRECALL_AGENT_DIR` set (spec §6.8), and the files it left there.
+/// A call with `PRECALL_AGENT_DIR` set (spec §6.8), and the files it left there.
 fn logged(t: &T, id: &str) -> (Out, std::collections::BTreeMap<String, String>) {
     let dir = t.root.join("agent-dir");
     let _ = std::fs::remove_dir_all(&dir);
@@ -825,7 +825,7 @@ fn logged(t: &T, id: &str) -> (Out, std::collections::BTreeMap<String, String>) 
         "m",
         60,
         Some(prices),
-        &[("RRECALL_AGENT_DIR", dir.to_string_lossy().into_owned())],
+        &[("PRECALL_AGENT_DIR", dir.to_string_lossy().into_owned())],
     );
     let files = std::fs::read_dir(&dir)
         .unwrap()

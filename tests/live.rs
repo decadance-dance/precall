@@ -1,8 +1,8 @@
 //! Live tests of the built-in runners against the real `claude` and `codex` with the user's
 //! logins. They cost money: ignored, and run only with
-//! `RRECALL_LIVE=1 cargo test --test live -- --ignored --nocapture`. Codex reports no cost, so
-//! its test needs a price table: `RRECALL_LIVE_CODEX_PRICES='{"<model>":{"input":N,
-//! "cached_input":N,"output":N}}'` (USD per 1M tokens). `RRECALL_LIVE_CLAUDE_MODEL` picks the
+//! `PRECALL_LIVE=1 cargo test --test live -- --ignored --nocapture`. Codex reports no cost, so
+//! its test needs a price table: `PRECALL_LIVE_CODEX_PRICES='{"<model>":{"input":N,
+//! "cached_input":N,"output":N}}'` (USD per 1M tokens). `PRECALL_LIVE_CLAUDE_MODEL` picks the
 //! Claude model (default `haiku`).
 
 use serde_json::{Value, json};
@@ -10,9 +10,9 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 fn live() -> bool {
-    let on = std::env::var("RRECALL_LIVE").as_deref() == Ok("1");
+    let on = std::env::var("PRECALL_LIVE").as_deref() == Ok("1");
     if !on {
-        eprintln!("skipped: set RRECALL_LIVE=1 to run live tests");
+        eprintln!("skipped: set PRECALL_LIVE=1 to run live tests");
     }
     on
 }
@@ -26,7 +26,7 @@ fn call(id: &str, model: &str, prices: Option<String>) -> Value {
     let input =
         json!({"question": "How many legs does a spider have? Answer with the number only."});
     let runner_input = json!({
-        "prompt": rrecall::wire::render_prompt("Answer the question in the input.", &input, &schema),
+        "prompt": precall::wire::render_prompt("Answer the question in the input.", &input, &schema),
         "input": input,
         "output_schema": schema,
         "model": model,
@@ -45,18 +45,18 @@ fn call(id: &str, model: &str, prices: Option<String>) -> Value {
 /// Runs built-in runner `id` on `runner_input` (spec §6.8) and returns its output document,
 /// which must carry a cost and a model.
 fn runner(id: &str, prices: Option<String>, runner_input: &Value) -> Value {
-    let state = std::env::temp_dir().join(format!("rrecall-live-{id}-{}", std::process::id()));
+    let state = std::env::temp_dir().join(format!("precall-live-{id}-{}", std::process::id()));
     std::fs::create_dir_all(&state).unwrap();
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rrecall"));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_precall"));
     cmd.args(["builtin", id])
-        .env("RRECALL_STATE_DIR", &state)
-        .env("RRECALL_RUN_ID", "live")
-        .env_remove("RRECALL_PARAM_PRICES")
+        .env("PRECALL_STATE_DIR", &state)
+        .env("PRECALL_RUN_ID", "live")
+        .env_remove("PRECALL_PARAM_PRICES")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if let Some(p) = prices {
-        cmd.env("RRECALL_PARAM_PRICES", p);
+        cmd.env("PRECALL_PARAM_PRICES", p);
     }
     let started = std::time::Instant::now();
     let mut child = cmd.spawn().unwrap();
@@ -85,20 +85,20 @@ fn runner(id: &str, prices: Option<String>, runner_input: &Value) -> Value {
 }
 
 #[test]
-#[ignore = "live: costs money; RRECALL_LIVE=1"]
+#[ignore = "live: costs money; PRECALL_LIVE=1"]
 fn live_claude_runner_answers_with_cost_and_model() {
     if live() {
-        let model = std::env::var("RRECALL_LIVE_CLAUDE_MODEL").unwrap_or_else(|_| "haiku".into());
+        let model = std::env::var("PRECALL_LIVE_CLAUDE_MODEL").unwrap_or_else(|_| "haiku".into());
         call("claude", &model, None);
     }
 }
 
 #[test]
-#[ignore = "live: costs money; RRECALL_LIVE=1"]
+#[ignore = "live: costs money; PRECALL_LIVE=1"]
 fn live_codex_runner_answers_with_cost_and_model() {
     if live() {
-        let prices = std::env::var("RRECALL_LIVE_CODEX_PRICES")
-            .expect("set RRECALL_LIVE_CODEX_PRICES to the price table of the model Codex uses");
+        let prices = std::env::var("PRECALL_LIVE_CODEX_PRICES")
+            .expect("set PRECALL_LIVE_CODEX_PRICES to the price table of the model Codex uses");
         call("codex", "default", Some(prices));
     }
 }
@@ -107,12 +107,12 @@ fn live_codex_runner_answers_with_cost_and_model() {
 /// `claude` with the prompt a run renders, and reports how many verdicts match the labels
 /// (a `revise` counts as not accepted).
 #[test]
-#[ignore = "live: costs money; RRECALL_LIVE=1"]
+#[ignore = "live: costs money; PRECALL_LIVE=1"]
 fn live_builtin_judges_agree_with_their_labeled_sets() {
     if !live() {
         return;
     }
-    let model = std::env::var("RRECALL_LIVE_CLAUDE_MODEL").unwrap_or_else(|_| "haiku".into());
+    let model = std::env::var("PRECALL_LIVE_CLAUDE_MODEL").unwrap_or_else(|_| "haiku".into());
     for judge in ["support", "removal", "duplicate"] {
         let path = format!(
             "{}/tests/fixtures/judges/{judge}.json",
@@ -120,13 +120,13 @@ fn live_builtin_judges_agree_with_their_labeled_sets() {
         );
         let set: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         let input = set["input"].clone();
-        let schema = rrecall::wire::judge_schema();
-        let prompt = rrecall::plugin::builtin_prompt(judge, &format!("{judge}.md")).unwrap();
+        let schema = precall::wire::judge_schema();
+        let prompt = precall::plugin::builtin_prompt(judge, &format!("{judge}.md")).unwrap();
         let out = runner(
             "claude",
             None,
             &json!({
-                "prompt": rrecall::wire::render_prompt(&prompt, &input, &schema),
+                "prompt": precall::wire::render_prompt(&prompt, &input, &schema),
                 "input": input,
                 "output_schema": schema,
                 "model": model,
@@ -137,10 +137,10 @@ fn live_builtin_judges_agree_with_their_labeled_sets() {
         let expected = set["expected"].as_object().unwrap();
         let keys: Vec<String> = expected.keys().cloned().collect();
         let verdicts =
-            rrecall::wire::decode_verdicts(judge, &out["output"].to_string(), &keys).unwrap();
+            precall::wire::decode_verdicts(judge, &out["output"].to_string(), &keys).unwrap();
         let mut agree = 0;
         for v in &verdicts {
-            let accepted = v.verdict == rrecall::wire::VerdictKind::Accept;
+            let accepted = v.verdict == precall::wire::VerdictKind::Accept;
             if accepted == (expected[&v.key] == "accept") {
                 agree += 1;
             } else {

@@ -1,4 +1,4 @@
-//! `rrecall run`: the pipeline of spec §4.1 over the store's enabled plugin instances. The
+//! `precall run`: the pipeline of spec §4.1 over the store's enabled plugin instances. The
 //! invariants and the merge live in `merge`; this module runs the plugins around them, loops
 //! with back pressure, and writes the lock, the commit and the run report.
 

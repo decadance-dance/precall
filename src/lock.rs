@@ -1,11 +1,11 @@
-//! `rrecall.lock` (spec §4.2), the store's run lock (§4.1) and the UTC times a run writes.
+//! `precall.lock` (spec §4.2), the store's run lock (§4.1) and the UTC times a run writes.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const LOCK_FILE: &str = "rrecall.lock";
+pub const LOCK_FILE: &str = "precall.lock";
 
 /// The lock file: per collector its last settled run, per check, judge and view its plugin.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -148,7 +148,7 @@ pub struct StoreLock(#[allow(dead_code)] std::fs::File);
 /// and `wait` is false.
 pub fn acquire(store: &Path, wait: bool) -> Result<Option<StoreLock>> {
     // Inside `.git`, so the lock never shows in the store's working tree.
-    lock_file(&store.join(".git").join("rrecall-run.lock"), wait)
+    lock_file(&store.join(".git").join("precall-run.lock"), wait)
 }
 
 /// An exclusive `flock` on the file at `path` (created if missing): waits for it, or returns

@@ -1,5 +1,5 @@
 //! What the built-in collectors `files`, `git-history` and `github` share: their params, which
-//! a built-in reads from `RRECALL_PARAM_*` since its argv is never expanded (spec §6.2, §6.3),
+//! a built-in reads from `PRECALL_PARAM_*` since its argv is never expanded (spec §6.2, §6.3),
 //! and child processes run by argument vector.
 
 use anyhow::{Context, Result, bail};
@@ -10,7 +10,7 @@ use std::process::Command;
 /// Param `name` as the core passed it: a string as it is, any other value as JSON.
 pub fn param(name: &str) -> Value {
     let var = format!(
-        "RRECALL_PARAM_{}",
+        "PRECALL_PARAM_{}",
         name.to_ascii_uppercase().replace('-', "_")
     );
     let text = std::env::var(var).unwrap_or_default();

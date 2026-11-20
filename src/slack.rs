@@ -11,7 +11,7 @@
 pub const MANIFESTS: [&str; 1] = [r#"id = "slack"
 name = "Slack: decisions, people and blockers from named channels and DMs"
 version = "0.1.0"
-min_rrecall = "0.1.0"
+min_precall = "0.1.0"
 kind = "collector"
 
 [collector]

@@ -1,5 +1,5 @@
 //! The built-in checks of spec §10: `no-op`, `size-limits` and `secrets`. Each ships as a
-//! manifest inside the binary and runs as `rrecall builtin <id>` through the check protocol of
+//! manifest inside the binary and runs as `precall builtin <id>` through the check protocol of
 //! §6.5, so a user can disable one or replace it by `id` like any other plugin (§6.2).
 
 use crate::error;
@@ -8,25 +8,25 @@ use crate::secrets;
 use crate::wire::{JudgeInput, JudgeItem, Op, Verdict, VerdictKind};
 use anyhow::{Context, Result, anyhow};
 
-/// The built-in manifests. `rrecall` as the program stands for the running binary.
+/// The built-in manifests. `precall` as the program stands for the running binary.
 pub const MANIFESTS: [&str; 3] = [
     r#"id = "no-op"
 name = "No rewording: rejects an update that changes only the wording"
 version = "0.1.0"
-min_rrecall = "0.1.0"
+min_precall = "0.1.0"
 kind = "check"
 
 [check]
-command = ["rrecall", "builtin", "no-op"]
+command = ["precall", "builtin", "no-op"]
 "#,
     r#"id = "size-limits"
 name = "Title and body length limits"
 version = "0.1.0"
-min_rrecall = "0.1.0"
+min_precall = "0.1.0"
 kind = "check"
 
 [check]
-command = ["rrecall", "builtin", "size-limits"]
+command = ["precall", "builtin", "size-limits"]
 
 [params]
 title_max = 80
@@ -35,11 +35,11 @@ body_max = 600
     r#"id = "secrets"
 name = "Rejects proposals that hold something that looks like a credential"
 version = "0.1.0"
-min_rrecall = "0.1.0"
+min_precall = "0.1.0"
 kind = "check"
 
 [check]
-command = ["rrecall", "builtin", "secrets"]
+command = ["precall", "builtin", "secrets"]
 "#,
 ];
 

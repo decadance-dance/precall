@@ -1,4 +1,4 @@
-//! End-to-end tests: the `rrecall` binary against stores and repos built in temp dirs.
+//! End-to-end tests: the `precall` binary against stores and repos built in temp dirs.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -19,7 +19,7 @@ impl Env {
     fn new() -> Env {
         static N: AtomicU32 = AtomicU32::new(0);
         let root = std::env::temp_dir().join(format!(
-            "rrecall-cli-{}-{}",
+            "precall-cli-{}-{}",
             std::process::id(),
             N.fetch_add(1, Ordering::SeqCst)
         ));
@@ -35,11 +35,11 @@ impl Env {
     }
 
     fn store(&self, project: &str) -> PathBuf {
-        self.root.join("data/rrecall").join(project)
+        self.root.join("data/precall").join(project)
     }
 
     fn user_config(&self) -> PathBuf {
-        self.root.join("config/rrecall/config.toml")
+        self.root.join("config/precall/config.toml")
     }
 
     fn run_in(&self, cwd: &Path, args: &[&str]) -> Out {
@@ -47,16 +47,16 @@ impl Env {
     }
 
     fn run_env(&self, cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Out {
-        let o = Command::new(env!("CARGO_BIN_EXE_rrecall"))
+        let o = Command::new(env!("CARGO_BIN_EXE_precall"))
             .args(args)
             .current_dir(cwd)
             .env("HOME", self.root.join("home"))
             .env("XDG_DATA_HOME", self.root.join("data"))
             .env("XDG_CONFIG_HOME", self.root.join("config"))
-            .env_remove("RRECALL_PROJECT")
+            .env_remove("PRECALL_PROJECT")
             .env_remove("GIT_DIR")
             // `open` never starts a real browser in a test.
-            .env("RRECALL_BROWSER", FAKE_BROWSER)
+            .env("PRECALL_BROWSER", FAKE_BROWSER)
             .env("FAKE_BROWSER_LOG", self.root.join("browser.log"))
             .envs(env.iter().copied())
             .output()
@@ -77,7 +77,7 @@ impl Env {
         let o = self.run(args);
         assert_eq!(
             o.code, 0,
-            "rrecall {args:?}\nstdout: {}\nstderr: {}",
+            "precall {args:?}\nstdout: {}\nstderr: {}",
             o.stdout, o.stderr
         );
         o.stdout
@@ -138,7 +138,7 @@ fn init_creates_store_with_default_skeleton_and_found_sources() {
     let o = e.run_in(&repo, &["init"]);
     assert_eq!(o.code, 0, "{}", o.stderr);
     let store = e.store("lanternfish");
-    let cfg = std::fs::read_to_string(store.join("rrecall.toml")).unwrap();
+    let cfg = std::fs::read_to_string(store.join("precall.toml")).unwrap();
     assert!(
         cfg.contains("id = \"repo\"") && cfg.contains("use = \"files\""),
         "{cfg}"
@@ -171,7 +171,7 @@ fn init_creates_store_with_default_skeleton_and_found_sources() {
         std::fs::read_to_string(store.join(".gitignore")).unwrap(),
         "cache/\nruns/\nviews/\nstate/\n"
     );
-    // The repo is recorded so a run finds its `.rrecall/plugins/` from any directory.
+    // The repo is recorded so a run finds its `.precall/plugins/` from any directory.
     assert!(
         cfg.starts_with("# ")
             && cfg.contains(&format!(
@@ -223,7 +223,7 @@ fn init_names_and_store_overrides() {
     )
     .unwrap();
     e.ok(&["init", "kiln"]);
-    assert!(custom.join("rrecall.toml").exists());
+    assert!(custom.join("precall.toml").exists());
     // A user config with tables but no default runner gets one at the top, and still loads.
     let user = std::fs::read_to_string(e.user_config()).unwrap();
     assert!(
@@ -231,7 +231,7 @@ fn init_names_and_store_overrides() {
         "{user}"
     );
     assert!(!e.store("kiln").exists());
-    let cfg = std::fs::read_to_string(custom.join("rrecall.toml")).unwrap();
+    let cfg = std::fs::read_to_string(custom.join("precall.toml")).unwrap();
     assert!(
         !cfg.contains("use = ") && !cfg.contains("repo ="),
         "no sources found outside a repo: {cfg}"
@@ -242,7 +242,7 @@ fn init_names_and_store_overrides() {
     );
     // A branch added in the config appears as a branch.
     let extra = "\n[[skeleton.branch]]\nid = \"services\"\ntitle = \"Services\"\nquestion = \"Which services run?\"\n";
-    std::fs::write(custom.join("rrecall.toml"), format!("{cfg}{extra}")).unwrap();
+    std::fs::write(custom.join("precall.toml"), format!("{cfg}{extra}")).unwrap();
     assert!(
         e.ok(&["--project", "kiln", "ls"])
             .ends_with("- Decisions (decisions)\n- Services (services)\n")
@@ -260,13 +260,13 @@ fn project_from_flag_env_or_origin() {
     let e = Env::new();
     e.ok(&["init", "kiln"]);
     assert!(e.ok(&["--project", "kiln", "ls"]).contains("(layout)"));
-    let o = Command::new(env!("CARGO_BIN_EXE_rrecall"))
+    let o = Command::new(env!("CARGO_BIN_EXE_precall"))
         .arg("ls")
         .current_dir(e.work())
         .env("HOME", e.root.join("home"))
         .env("XDG_DATA_HOME", e.root.join("data"))
         .env("XDG_CONFIG_HOME", e.root.join("config"))
-        .env("RRECALL_PROJECT", "kiln")
+        .env("PRECALL_PROJECT", "kiln")
         .output()
         .unwrap();
     assert_eq!(
@@ -409,7 +409,7 @@ fn import_round_trip() {
     let store = e.store("kiln");
     let api = e.ok(&["--project", "kiln", "show", "api-gateway", "--json"]);
     assert!(api.contains(r#""sources":["import:outline.txt"]"#), "{api}");
-    let cfg = std::fs::read_to_string(store.join("rrecall.toml")).unwrap();
+    let cfg = std::fs::read_to_string(store.join("precall.toml")).unwrap();
     assert!(cfg.contains("[[skeleton.branch]]\nid = \"services\"\ntitle = \"Services\"\nquestion = \"Which services run in production?\""), "{cfg}");
     // The new branch and the nodes land in one commit.
     assert_eq!(
@@ -419,7 +419,7 @@ fn import_round_trip() {
     let files = git(&store, &["show", "--name-only", "--format=", "HEAD"]);
     assert_eq!(
         files,
-        "map/decisions.jsonl\nmap/layout.jsonl\nmap/services.jsonl\nrrecall.toml\n"
+        "map/decisions.jsonl\nmap/layout.jsonl\nmap/services.jsonl\nprecall.toml\n"
     );
     assert_eq!(git(&store, &["status", "--porcelain"]), "");
     // Import seeds an empty map only.
@@ -522,7 +522,7 @@ fn show_prints_block_with_children_as_titles() {
     assert_eq!(deep.matches("## ").count(), 5);
     // A branch shows its question and the config as its source.
     assert!(q(&e, &["show", "services"]).starts_with(
-        "## Services (services)\nWhich services run in production?\nsources: config:rrecall.toml\n"
+        "## Services (services)\nWhich services run in production?\nsources: config:precall.toml\n"
     ));
 }
 
@@ -541,7 +541,7 @@ fn show_max_tokens_cuts_at_a_node_boundary() {
     let footer = cut.lines().last().unwrap();
     assert!(
         footer.starts_with(&format!(
-            "[{} nodes left out; see them with: rrecall show ",
+            "[{} nodes left out; see them with: precall show ",
             53 - shown
         )),
         "{footer}"
@@ -554,7 +554,7 @@ fn show_max_tokens_cuts_at_a_node_boundary() {
     // Even a tiny budget prints the first node.
     let tiny = q(&e, &["show", "layout", "--depth", "1", "--max-tokens", "1"]);
     assert!(tiny.starts_with("## Layout (layout)\n"), "{tiny}");
-    assert!(tiny.ends_with("[9 nodes left out; see them with: rrecall show sync-server, rrecall show fetcher, rrecall show web-client, rrecall show mobile-app, rrecall show queue, rrecall show infrastructure-code, rrecall show docs-site, rrecall show test-suites, rrecall show release-tooling]\n"), "{tiny}");
+    assert!(tiny.ends_with("[9 nodes left out; see them with: precall show sync-server, precall show fetcher, precall show web-client, precall show mobile-app, precall show queue, precall show infrastructure-code, precall show docs-site, precall show test-suites, precall show release-tooling]\n"), "{tiny}");
 }
 
 #[test]
@@ -635,7 +635,7 @@ fn rewrite_of_imported_300_node_store_keeps_bytes() {
         files
     };
     let before = read_map();
-    let loaded = rrecall::store::Store::load(&store).unwrap();
+    let loaded = precall::store::Store::load(&store).unwrap();
     // Serializing the loaded map gives the stored bytes exactly, file by file.
     let rendered: Vec<(String, Vec<u8>)> = loaded
         .render_map()
@@ -876,11 +876,11 @@ fn agent_instructions_name_the_query_commands() {
     let e = Env::new();
     let text = e.ok(&["agent-instructions"]);
     for c in [
-        "rrecall ls",
-        "rrecall show <id>",
-        "rrecall find <text>",
-        "rrecall recent",
-        "rrecall why <id>",
+        "precall ls",
+        "precall show <id>",
+        "precall find <text>",
+        "precall recent",
+        "precall why <id>",
         "--json",
     ] {
         assert!(text.contains(c), "{c}: {text}");
@@ -948,7 +948,7 @@ fn a_failed_commit_leaves_the_store_as_it_was() {
     std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
     let snapshot = |dir: &Path| -> Vec<(String, Vec<u8>)> {
         let mut v: Vec<(String, Vec<u8>)> = [
-            "rrecall.toml",
+            "precall.toml",
             "map/layout.jsonl",
             "map/services.jsonl",
             "map/decisions.jsonl",
@@ -976,14 +976,14 @@ fn a_failed_commit_leaves_the_store_as_it_was() {
     let tulip = e.store("tulip");
     std::fs::create_dir_all(tulip.join(".git/hooks")).unwrap();
     std::fs::copy(&hook, tulip.join(".git/hooks/pre-commit")).unwrap();
-    let cfg = std::fs::read(tulip.join("rrecall.toml")).unwrap();
+    let cfg = std::fs::read(tulip.join("precall.toml")).unwrap();
     let file = e.write("outline.txt", SMALL_OUTLINE);
     assert_eq!(
         e.run(&["--project", "tulip", "import", file.to_str().unwrap()])
             .code,
         1
     );
-    assert_eq!(std::fs::read(tulip.join("rrecall.toml")).unwrap(), cfg);
+    assert_eq!(std::fs::read(tulip.join("precall.toml")).unwrap(), cfg);
     assert!(!tulip.join("map/layout.jsonl").exists());
     assert_eq!(git(&tulip, &["status", "--porcelain"]), "");
     // Once the hook is gone, the same command commits.
@@ -1028,12 +1028,12 @@ fn branch_files_keep_lf_and_untouched_files_keep_their_bytes() {
 fn why_follows_edits_to_a_config_branch() {
     let e = small_env();
     let store = e.store("kiln");
-    let cfg = std::fs::read_to_string(store.join("rrecall.toml")).unwrap();
+    let cfg = std::fs::read_to_string(store.join("precall.toml")).unwrap();
     let edited = cfg.replace("Which services run in production?", "Who runs it?");
-    std::fs::write(store.join("rrecall.toml"), &edited).unwrap();
+    std::fs::write(store.join("precall.toml"), &edited).unwrap();
     store_git(&store, &["commit", "-qam", "Change services question"]);
     std::fs::write(
-        store.join("rrecall.toml"),
+        store.join("precall.toml"),
         format!("# unrelated comment\n{edited}"),
     )
     .unwrap();
@@ -1233,7 +1233,7 @@ fn init_keeps_the_users_default_runner_and_enables_it() {
         std::fs::read_to_string(e.user_config()).unwrap(),
         "runner = \"codex\"\n\n[[projects]]\nname = \"kiln\"\n"
     );
-    let cfg = std::fs::read_to_string(e.store("kiln").join("rrecall.toml")).unwrap();
+    let cfg = std::fs::read_to_string(e.store("kiln").join("precall.toml")).unwrap();
     assert!(
         cfg.contains("[[plugins]]\nid = \"codex\"\n") && !cfg.contains("\"claude\""),
         "{cfg}"
@@ -1274,12 +1274,12 @@ fn init_refuses_a_default_runner_it_cannot_find_and_enables_one_it_finds() {
     let plugin = dir.join("plugins/fast");
     std::fs::create_dir_all(&plugin).unwrap();
     std::fs::write(
-        plugin.join("rrecall-plugin.toml"),
-        "id = \"fast\"\nname = \"Fast\"\nversion = \"0.1.0\"\nmin_rrecall = \"0.1.0\"\nkind = \"runner\"\n\n[runner]\ncommand = [\"/bin/cat\"]\n",
+        plugin.join("precall-plugin.toml"),
+        "id = \"fast\"\nname = \"Fast\"\nversion = \"0.1.0\"\nmin_precall = \"0.1.0\"\nkind = \"runner\"\n\n[runner]\ncommand = [\"/bin/cat\"]\n",
     )
     .unwrap();
     e.ok(&["init", "kiln"]);
-    let cfg = std::fs::read_to_string(e.store("kiln").join("rrecall.toml")).unwrap();
+    let cfg = std::fs::read_to_string(e.store("kiln").join("precall.toml")).unwrap();
     assert!(cfg.contains("[[plugins]]\nid = \"fast\"\n"), "{cfg}");
 }
 
@@ -1290,8 +1290,8 @@ fn init_refuses_a_default_runner_whose_id_another_instance_takes() {
     let plugin = dir.join("plugins/support");
     std::fs::create_dir_all(&plugin).unwrap();
     std::fs::write(
-        plugin.join("rrecall-plugin.toml"),
-        "id = \"support\"\nname = \"A runner\"\nversion = \"0.1.0\"\nmin_rrecall = \"0.1.0\"\nkind = \"runner\"\n\n[runner]\ncommand = [\"/bin/cat\"]\n",
+        plugin.join("precall-plugin.toml"),
+        "id = \"support\"\nname = \"A runner\"\nversion = \"0.1.0\"\nmin_precall = \"0.1.0\"\nkind = \"runner\"\n\n[runner]\ncommand = [\"/bin/cat\"]\n",
     )
     .unwrap();
     std::fs::write(e.user_config(), "runner = \"support\"\n").unwrap();

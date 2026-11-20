@@ -11,7 +11,7 @@
 # (the structured output to print; `out.N`, when present, for call N). Each call N records its argv to claude.argv.N,
 # its stdin to claude.stdin.N, its environment to claude.env.N and its cwd to claude.cwd.N.
 d="$HOME/agent"
-# `claude auth status` (rrecall doctor): logged in unless $HOME/agent/logged-out exists.
+# `claude auth status` (precall doctor): logged in unless $HOME/agent/logged-out exists.
 if [ "$1 $2" = "auth status" ]; then
     if [ -e "$d/logged-out" ]; then echo '{"loggedIn": false}'; exit 1; fi
     echo '{"loggedIn": true}'; exit 0

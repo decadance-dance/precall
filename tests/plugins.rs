@@ -1,4 +1,4 @@
-//! End-to-end tests of `rrecall doctor` and `rrecall plugin list | add | trust` (spec §2, §6.7):
+//! End-to-end tests of `precall doctor` and `precall plugin list | add | trust` (spec §2, §6.7):
 //! plugin sources are directories and local git repos built in temp dirs, binaries are fakes on
 //! `PATH`.
 
@@ -49,9 +49,9 @@ fn git_in(dir: &Path, args: &[&str]) -> String {
 fn check_plugin(dir: &Path, id: &str, version: &str, requires: &[&str]) {
     std::fs::create_dir_all(dir).unwrap();
     std::fs::write(
-        dir.join("rrecall-plugin.toml"),
+        dir.join("precall-plugin.toml"),
         format!(
-            "id = \"{id}\"\nname = \"Kettle check\"\nversion = \"{version}\"\nmin_rrecall = \"0.1.0\"\nkind = \"check\"\nrequires = {requires:?}\n\n[check]\ncommand = [\"./check.sh\"]\n"
+            "id = \"{id}\"\nname = \"Kettle check\"\nversion = \"{version}\"\nmin_precall = \"0.1.0\"\nkind = \"check\"\nrequires = {requires:?}\n\n[check]\ncommand = [\"./check.sh\"]\n"
         ),
     )
     .unwrap();
@@ -64,7 +64,7 @@ impl W {
     fn new() -> W {
         static N: AtomicU32 = AtomicU32::new(0);
         let root = std::env::temp_dir().join(format!(
-            "rrecall-plugins-{}-{}",
+            "precall-plugins-{}-{}",
             std::process::id(),
             N.fetch_add(1, Ordering::SeqCst)
         ));
@@ -91,25 +91,25 @@ impl W {
     }
 
     fn store(&self) -> PathBuf {
-        self.root.join("data/rrecall/kettle")
+        self.root.join("data/precall/kettle")
     }
 
     fn user_plugins(&self) -> PathBuf {
-        self.root.join("config/rrecall/plugins")
+        self.root.join("config/precall/plugins")
     }
 
     fn user_config(&self) -> String {
-        std::fs::read_to_string(self.root.join("config/rrecall/config.toml")).unwrap_or_default()
+        std::fs::read_to_string(self.root.join("config/precall/config.toml")).unwrap_or_default()
     }
 
-    /// Runs rrecall in the work dir with `stdin`.
+    /// Runs precall in the work dir with `stdin`.
     fn rr(&self, args: &[&str], stdin: &str) -> Out {
         self.rr_env(args, stdin, &[])
     }
 
     /// `rr` with extra environment, set last.
     fn rr_env(&self, args: &[&str], stdin: &str, env: &[(&str, String)]) -> Out {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_rrecall"));
+        let mut c = Command::new(env!("CARGO_BIN_EXE_precall"));
         c.args(args)
             .current_dir(self.root.join("work"))
             .env("HOME", self.root.join("home"))
@@ -124,7 +124,7 @@ impl W {
                 ),
             )
             .env("FAKE_GH_DIR", self.root.join("rec"))
-            .env_remove("RRECALL_PROJECT")
+            .env_remove("PRECALL_PROJECT")
             .env_remove("GIT_DIR")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -146,9 +146,9 @@ impl W {
         }
     }
 
-    /// Starts rrecall in the work dir with stdin closed; the caller waits.
+    /// Starts precall in the work dir with stdin closed; the caller waits.
     fn spawn(&self, args: &[&str]) -> std::process::Child {
-        Command::new(env!("CARGO_BIN_EXE_rrecall"))
+        Command::new(env!("CARGO_BIN_EXE_precall"))
             .args(args)
             .current_dir(self.root.join("work"))
             .env("HOME", self.root.join("home"))
@@ -162,7 +162,7 @@ impl W {
                     std::env::var("PATH").unwrap_or_default()
                 ),
             )
-            .env_remove("RRECALL_PROJECT")
+            .env_remove("PRECALL_PROJECT")
             .env_remove("GIT_DIR")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -174,8 +174,8 @@ impl W {
     /// Replaces the store config with `repo` and `plugins`, and commits it.
     fn config(&self, plugins: &str) {
         let text = format!("repo = {}\n{plugins}", q(&self.repo().to_string_lossy()));
-        std::fs::write(self.store().join("rrecall.toml"), text).unwrap();
-        git_in(&self.store(), &["add", "rrecall.toml"]);
+        std::fs::write(self.store().join("precall.toml"), text).unwrap();
+        git_in(&self.store(), &["add", "precall.toml"]);
         git_in(&self.store(), &["commit", "-q", "-m", "config"]);
     }
 }
@@ -199,7 +199,7 @@ fn plugin_add_from_a_path_shows_the_manifest_asks_and_records_source_and_hash() 
     let dir = w.user_plugins().join("steam-check");
     assert!(dir.join("check.sh").is_file());
     assert!(!dir.join(".git").exists(), ".git is not copied");
-    let hash = rrecall::plugin::content_hash(&dir).unwrap();
+    let hash = precall::plugin::content_hash(&dir).unwrap();
     let cfg = w.user_config();
     assert!(cfg.contains("[[installed]]"), "{cfg}");
     assert!(
@@ -289,7 +289,7 @@ fn plugin_add_refuses_an_installed_id_and_a_bad_manifest_before_asking() {
 
     let bad = w.root.join("src/bad");
     check_plugin(&bad, "bad-check", "1.0.0", &[]);
-    let m = bad.join("rrecall-plugin.toml");
+    let m = bad.join("precall-plugin.toml");
     let text = std::fs::read_to_string(&m).unwrap();
     std::fs::write(&m, format!("color = \"red\"\n{text}")).unwrap();
     let o = w.rr(&["plugin", "add", bad.to_str().unwrap()], "y\n");
@@ -302,7 +302,7 @@ fn plugin_add_refuses_an_installed_id_and_a_bad_manifest_before_asking() {
 #[test]
 fn plugin_trust_records_the_directory_and_a_changed_hash_needs_trust_again() {
     let w = W::with_store();
-    let dir = w.repo().join(".rrecall/plugins");
+    let dir = w.repo().join(".precall/plugins");
     check_plugin(&dir.join("lid-check"), "lid-check", "1.0.0", &[]);
     w.config("\n[[plugins]]\nid = \"lid-check\"\n");
     let l = w.rr(&["--project", "kettle", "plugin", "list"], "");
@@ -321,7 +321,7 @@ fn plugin_trust_records_the_directory_and_a_changed_hash_needs_trust_again() {
     assert_eq!(o.code, 0, "{}{}", o.stdout, o.stderr);
     assert!(o.stdout.contains("id = \"lid-check\""), "{}", o.stdout);
     assert!(o.stderr.contains("Trust "), "{}", o.stderr);
-    let hash = rrecall::plugin::content_hash(&dir).unwrap();
+    let hash = precall::plugin::content_hash(&dir).unwrap();
     let cfg = w.user_config();
     assert!(
         cfg.contains(&format!("path = {}", q(dir.to_str().unwrap()))),
@@ -352,7 +352,7 @@ fn plugin_trust_records_the_directory_and_a_changed_hash_needs_trust_again() {
     assert_eq!(run.code, 4, "{}", run.stderr);
     assert!(
         run.stderr.contains(&format!(
-            "rrecall --project kettle plugin trust '{}'",
+            "precall --project kettle plugin trust '{}'",
             dir.display()
         )),
         "{}",
@@ -452,7 +452,7 @@ fn doctor_fails_and_names_what_a_run_would_skip() {
         &w.store().join("plugins/kettle-check"),
         "kettle-check",
         "1.0.0",
-        &["no-such-tool-for-rrecall"],
+        &["no-such-tool-for-precall"],
     );
     w.config(&format!(
         "{DOCTOR_CONFIG}\n[[plugins]]\nid = \"kettle-check\"\n"
@@ -462,7 +462,7 @@ fn doctor_fails_and_names_what_a_run_would_skip() {
     let o = w.rr(&["--project", "kettle", "doctor"], "");
     assert_eq!(o.code, 1, "{}{}", o.stdout, o.stderr);
     for want in [
-        "fail  requires no-such-tool-for-rrecall",
+        "fail  requires no-such-tool-for-precall",
         "fail  fingerprint",
         "fail  login",
         "fail  runner claude",
@@ -483,7 +483,7 @@ fn doctor_fails_and_names_what_a_run_would_skip() {
 fn doctor_reports_an_untrusted_project_directory_as_the_run_would() {
     let w = W::with_store();
     check_plugin(
-        &w.repo().join(".rrecall/plugins/lid-check"),
+        &w.repo().join(".precall/plugins/lid-check"),
         "lid-check",
         "1.0.0",
         &[],
@@ -491,8 +491,8 @@ fn doctor_reports_an_untrusted_project_directory_as_the_run_would() {
     w.config("\n[[plugins]]\nid = \"lid-check\"\n");
     let o = w.rr(&["--project", "kettle", "doctor"], "");
     assert_eq!(o.code, 4, "{}", o.stderr);
-    let dir = w.repo().join(".rrecall/plugins");
-    let hint = format!("rrecall --project kettle plugin trust '{}'", dir.display());
+    let dir = w.repo().join(".precall/plugins");
+    let hint = format!("precall --project kettle plugin trust '{}'", dir.display());
     assert!(o.stderr.contains(&hint), "{}", o.stderr);
     let l = w.rr(&["--project", "kettle", "plugin", "list"], "");
     assert!(l.stdout.contains(&hint), "{}", l.stdout);
@@ -559,9 +559,9 @@ fn plugin_add_refuses_an_id_installed_under_another_directory_name() {
 #[test]
 fn plugin_add_appends_to_an_empty_inline_array() {
     let w = W::new();
-    std::fs::create_dir_all(w.root.join("config/rrecall")).unwrap();
+    std::fs::create_dir_all(w.root.join("config/precall")).unwrap();
     std::fs::write(
-        w.root.join("config/rrecall/config.toml"),
+        w.root.join("config/precall/config.toml"),
         "# mine\nrunner = \"claude\"\ninstalled = []\ntrusted = []\n",
     )
     .unwrap();
@@ -692,7 +692,7 @@ fn plugin_trust_refuses_a_directory_the_loader_never_reads() {
     let w = W::with_store();
     w.config("");
     check_plugin(
-        &w.repo().join(".rrecall/plugins/lid-check"),
+        &w.repo().join(".precall/plugins/lid-check"),
         "lid-check",
         "1.0.0",
         &[],
@@ -704,11 +704,11 @@ fn plugin_trust_refuses_a_directory_the_loader_never_reads() {
         "y\n",
     );
     assert_eq!(o.code, 2, "{}{}", o.stdout, o.stderr);
-    let want = w.repo().join(".rrecall/plugins");
+    let want = w.repo().join(".precall/plugins");
     assert!(o.stderr.contains(want.to_str().unwrap()), "{}", o.stderr);
     assert!(!w.user_config().contains("[[trusted]]"));
     // A path that resolves to the right directory is fine.
-    let roundabout = w.repo().join(".rrecall/../.rrecall/plugins");
+    let roundabout = w.repo().join(".precall/../.precall/plugins");
     let o = w.rr(
         &[
             "--project",
@@ -742,7 +742,7 @@ fn doctor_fails_a_program_without_the_execute_bit() {
 fn doctor_exits_4_on_a_user_config_a_run_cannot_load() {
     let w = W::with_store();
     std::fs::write(
-        w.root.join("config/rrecall/config.toml"),
+        w.root.join("config/precall/config.toml"),
         "unknown = true\n",
     )
     .unwrap();
@@ -763,13 +763,13 @@ fn doctor_runs_fingerprints_in_a_scratch_state_dir() {
     let dir = w.store().join("plugins/kettle-notes");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
-        dir.join("rrecall-plugin.toml"),
-        "id = \"kettle-notes\"\nname = \"N\"\nversion = \"1.0.0\"\nmin_rrecall = \"0.1.0\"\nkind = \"collector\"\n\n[collector]\nscope = [\"decisions\"]\nsource_kinds = [\"kettle-note\"]\nfingerprint = [\"./fp.sh\"]\ncommand = [\"./fp.sh\"]\n",
+        dir.join("precall-plugin.toml"),
+        "id = \"kettle-notes\"\nname = \"N\"\nversion = \"1.0.0\"\nmin_precall = \"0.1.0\"\nkind = \"collector\"\n\n[collector]\nscope = [\"decisions\"]\nsource_kinds = [\"kettle-note\"]\nfingerprint = [\"./fp.sh\"]\ncommand = [\"./fp.sh\"]\n",
     )
     .unwrap();
     std::fs::write(
         dir.join("fp.sh"),
-        "#!/bin/sh\necho \"$RRECALL_STATE_DIR\" > \"$RRECALL_STATE_DIR/seen\"\nls \"$RRECALL_STATE_DIR\" | wc -l\n",
+        "#!/bin/sh\necho \"$PRECALL_STATE_DIR\" > \"$PRECALL_STATE_DIR/seen\"\nls \"$PRECALL_STATE_DIR\" | wc -l\n",
     )
     .unwrap();
     std::fs::set_permissions(dir.join("fp.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -881,19 +881,19 @@ fn plugin_add_never_writes_through_a_link_from_the_tree() {
 fn plugin_trust_rejects_a_relative_repo_as_the_loader_does() {
     let w = W::with_store();
     check_plugin(
-        &w.root.join("work/relative/.rrecall/plugins/lid-check"),
+        &w.root.join("work/relative/.precall/plugins/lid-check"),
         "lid-check",
         "1.0.0",
         &[],
     );
-    std::fs::write(w.store().join("rrecall.toml"), "repo = \"relative\"\n").unwrap();
+    std::fs::write(w.store().join("precall.toml"), "repo = \"relative\"\n").unwrap();
     let o = w.rr(
         &[
             "--project",
             "kettle",
             "plugin",
             "trust",
-            "./relative/.rrecall/plugins",
+            "./relative/.precall/plugins",
         ],
         "y\n",
     );
@@ -908,14 +908,14 @@ fn concurrent_doctors_keep_their_own_scratch_state() {
     let dir = w.store().join("plugins/kettle-notes");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
-        dir.join("rrecall-plugin.toml"),
-        "id = \"kettle-notes\"\nname = \"N\"\nversion = \"1.0.0\"\nmin_rrecall = \"0.1.0\"\nkind = \"collector\"\n\n[collector]\nscope = [\"decisions\"]\nsource_kinds = [\"kettle-note\"]\nfingerprint = [\"./fp.sh\"]\ncommand = [\"./fp.sh\"]\n",
+        dir.join("precall-plugin.toml"),
+        "id = \"kettle-notes\"\nname = \"N\"\nversion = \"1.0.0\"\nmin_precall = \"0.1.0\"\nkind = \"collector\"\n\n[collector]\nscope = [\"decisions\"]\nsource_kinds = [\"kettle-note\"]\nfingerprint = [\"./fp.sh\"]\ncommand = [\"./fp.sh\"]\n",
     )
     .unwrap();
     // The first call parks until `go` exists, then checks that its scratch file survived.
     std::fs::write(
         dir.join("fp.sh"),
-        "#!/bin/sh\ntouch \"$RRECALL_STATE_DIR/mine.$$\"\ntouch \"$HOME/started\"\nwhile [ ! -e \"$HOME/go\" ]; do sleep 0.05; done\n[ -e \"$RRECALL_STATE_DIR/mine.$$\" ] || { echo 'my scratch file disappeared' >&2; exit 1; }\necho ok\n",
+        "#!/bin/sh\ntouch \"$PRECALL_STATE_DIR/mine.$$\"\ntouch \"$HOME/started\"\nwhile [ ! -e \"$HOME/go\" ]; do sleep 0.05; done\n[ -e \"$PRECALL_STATE_DIR/mine.$$\" ] || { echo 'my scratch file disappeared' >&2; exit 1; }\necho ok\n",
     )
     .unwrap();
     std::fs::set_permissions(dir.join("fp.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -942,9 +942,9 @@ fn concurrent_doctors_keep_their_own_scratch_state() {
 #[test]
 fn init_waits_for_the_user_config_lock() {
     let w = W::new();
-    let cfg_dir = w.root.join("config/rrecall");
+    let cfg_dir = w.root.join("config/precall");
     std::fs::create_dir_all(&cfg_dir).unwrap();
-    let held = rrecall::lock::lock_file(&cfg_dir.join("config.toml.lock"), true).unwrap();
+    let held = precall::lock::lock_file(&cfg_dir.join("config.toml.lock"), true).unwrap();
     let mut init = w.spawn(&["init", "kettle"]);
     // Unlocked, init finishes well within this window; locked out, it must still be waiting
     // at its end, having written neither the user config nor the store.

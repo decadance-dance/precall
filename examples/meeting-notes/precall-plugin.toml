@@ -1,7 +1,7 @@
 id = "meeting-notes"
 name = "Meeting notes in a fixed format"
 version = "0.1.0"
-min_rrecall = "0.1.0"
+min_precall = "0.1.0"
 kind = "collector"
 
 [collector]

@@ -1,6 +1,6 @@
 //! The built-in `html` view (spec §8): one self-contained `views/index.html` with the map, each
 //! node's history and the "changed since the last run" set embedded as data. It runs as
-//! `rrecall builtin html` in a run's view step (§4.1 step 10) and in-process for `rrecall open`.
+//! `precall builtin html` in a run's view step (§4.1 step 10) and in-process for `precall open`.
 
 use crate::history;
 use crate::query;
@@ -12,23 +12,23 @@ use std::path::{Path, PathBuf};
 pub const MANIFEST: &str = r#"id = "html"
 name = "One self-contained HTML page of the map"
 version = "0.1.0"
-min_rrecall = "0.1.0"
+min_precall = "0.1.0"
 kind = "view"
 
 [view]
-command = ["rrecall", "builtin", "html"]
+command = ["precall", "builtin", "html"]
 "#;
 
 /// The page: inline CSS and JS, and a `{{TITLE}}` and a `{{DATA}}` marker, in that order.
 const PAGE: &str = include_str!("view.html");
 
-/// `rrecall builtin html`: renders the store the core names in `RRECALL_STORE`.
+/// `precall builtin html`: renders the store the core names in `PRECALL_STORE`.
 pub fn run(input: &str) -> Result<String> {
     let input: Value = serde_json::from_str(input).context("reading the view input")?;
     let project = input["project"]
         .as_str()
         .context("the view input has no `project`")?;
-    let root = std::env::var_os("RRECALL_STORE").context("RRECALL_STORE is not set")?;
+    let root = std::env::var_os("PRECALL_STORE").context("PRECALL_STORE is not set")?;
     write(Path::new(&root), project)?;
     Ok("{}\n".into())
 }

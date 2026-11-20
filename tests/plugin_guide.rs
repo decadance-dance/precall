@@ -1,10 +1,10 @@
 //! The plugin author guide (`docs/plugins.md`) cannot drift from the code: every JSON example
-//! in it goes through the real wire types (`rrecall::wire`), its copy of the example manifest
+//! in it goes through the real wire types (`precall::wire`), its copy of the example manifest
 //! matches the file, and its steps install and run the example plugin with a fake runner.
 
-use rrecall::config::BranchDef;
-use rrecall::node::Node;
-use rrecall::wire::{self, Proposal, VerdictKind};
+use precall::config::BranchDef;
+use precall::node::Node;
+use precall::wire::{self, Proposal, VerdictKind};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -226,7 +226,7 @@ fn every_json_example_in_the_guide_is_what_the_wire_types_read_or_write() {
 #[test]
 fn the_guides_copy_of_the_example_manifest_is_the_file() {
     let b = blocks("toml", "file");
-    let file = "examples/meeting-notes/rrecall-plugin.toml";
+    let file = "examples/meeting-notes/precall-plugin.toml";
     let real = std::fs::read_to_string(root().join(file)).unwrap();
     assert_eq!(b[file], real, "{GUIDE} shows {file} as it is");
 }
@@ -236,10 +236,10 @@ fn every_manifest_sketch_in_the_guide_loads() {
     let sketches = blocks("toml", "manifest");
     assert!(!sketches.is_empty());
     for (tag, text) in sketches {
-        let dir = std::env::temp_dir().join(format!("rrecall-guide-{}-{tag}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("precall-guide-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("rrecall-plugin.toml"), &text).unwrap();
+        std::fs::write(dir.join("precall-plugin.toml"), &text).unwrap();
         // The files it names: prompts, and programs relative to the plugin directory.
         let raw: toml::Table = toml::from_str(&text).unwrap();
         for v in raw
@@ -262,7 +262,7 @@ fn every_manifest_sketch_in_the_guide_loads() {
                 std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
             }
         }
-        let r = rrecall::plugin::load_manifest(&dir);
+        let r = precall::plugin::load_manifest(&dir);
         let _ = std::fs::remove_dir_all(&dir);
         r.unwrap_or_else(|e| panic!("manifest sketch `{tag}`: {e:#}"));
     }
@@ -277,7 +277,7 @@ struct Out {
 }
 
 /// An isolated world: only `HOME` (so the XDG directories default under it) and `PATH` (the
-/// rrecall under test and the fake agents first) are set. The work dir is outside any git
+/// precall under test and the fake agents first) are set. The work dir is outside any git
 /// repository; the examples are read from this checkout.
 struct W {
     root: PathBuf,
@@ -291,7 +291,7 @@ impl Drop for W {
 
 impl W {
     fn new(name: &str) -> W {
-        let root = std::env::temp_dir().join(format!("rrecall-{name}-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("precall-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         for d in ["home/agent", "work"] {
             std::fs::create_dir_all(root.join(d)).unwrap();
@@ -306,7 +306,7 @@ impl W {
     }
 
     fn store(&self) -> PathBuf {
-        self.root.join("home/.local/share/rrecall/lantern")
+        self.root.join("home/.local/share/precall/lantern")
     }
 
     fn notes(&self) -> PathBuf {
@@ -315,7 +315,7 @@ impl W {
 
     /// Runs `program args` in `dir` with `y` on stdin and nothing but `HOME` and `PATH` set.
     fn exec(&self, dir: &Path, program: &str, args: &[&str]) -> Out {
-        let bin = PathBuf::from(env!("CARGO_BIN_EXE_rrecall"));
+        let bin = PathBuf::from(env!("CARGO_BIN_EXE_precall"));
         let mut c = Command::new(program);
         c.args(args)
             .current_dir(dir)
@@ -355,8 +355,8 @@ impl W {
     }
 
     fn rr(&self, args: &[&str]) -> Out {
-        let o = self.exec(&self.root.join("work"), env!("CARGO_BIN_EXE_rrecall"), args);
-        assert_eq!(o.code, 0, "rrecall {args:?}\n{}{}", o.stdout, o.stderr);
+        let o = self.exec(&self.root.join("work"), env!("CARGO_BIN_EXE_precall"), args);
+        assert_eq!(o.code, 0, "precall {args:?}\n{}{}", o.stdout, o.stderr);
         o
     }
 
@@ -365,7 +365,7 @@ impl W {
         let enable = blocks("toml", "step")["enable"].clone();
         assert!(enable.contains("/home/me/meetings"), "{enable}");
         let enable = enable.replace("/home/me/meetings", self.notes().to_str().unwrap());
-        let cfg = self.store().join("rrecall.toml");
+        let cfg = self.store().join("precall.toml");
         let text = std::fs::read_to_string(&cfg).unwrap() + "\n" + &enable;
         std::fs::write(&cfg, text).unwrap();
     }
@@ -396,7 +396,7 @@ fn the_guides_steps_install_enable_and_run_the_example_plugin() {
         o.stdout
     );
     w.step(&root(), &steps["init"]);
-    let cfg = std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap();
+    let cfg = std::fs::read_to_string(w.store().join("precall.toml")).unwrap();
     assert!(
         !cfg.contains("id = \"repo\"") && !cfg.contains("id = \"github\""),
         "`init` ran outside the checkout: {cfg}"
@@ -464,7 +464,7 @@ fn store_plugin(w: &W, id: &str, manifest: &str, script: &str) {
     use std::os::unix::fs::PermissionsExt;
     let dir = w.store().join("plugins").join(id);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("rrecall-plugin.toml"), manifest).unwrap();
+    std::fs::write(dir.join("precall-plugin.toml"), manifest).unwrap();
     let f = dir.join("run.sh");
     std::fs::write(&f, script).unwrap();
     std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -517,12 +517,12 @@ fn the_guides_runner_and_hook_examples_have_the_keys_the_pipeline_sends() {
     // A runner and a `commit.before` hook that record their stdin and answer from files.
     let record = |what: &str, answer: &str| {
         format!(
-            "#!/bin/sh\nn=1\nwhile [ -e \"$RRECALL_PARAM_REC/{what}.in.$n\" ]; do n=$((n + 1)); done\ncat > \"$RRECALL_PARAM_REC/{what}.in.$n\"\n{answer}\n"
+            "#!/bin/sh\nn=1\nwhile [ -e \"$PRECALL_PARAM_REC/{what}.in.$n\" ]; do n=$((n + 1)); done\ncat > \"$PRECALL_PARAM_REC/{what}.in.$n\"\n{answer}\n"
         )
     };
     let head = |id: &str, kind: &str| {
         format!(
-            "id = \"{id}\"\nname = \"Recorder\"\nversion = \"0.1.0\"\nmin_rrecall = \"0.1.0\"\nkind = \"{kind}\"\n\n"
+            "id = \"{id}\"\nname = \"Recorder\"\nversion = \"0.1.0\"\nmin_precall = \"0.1.0\"\nkind = \"{kind}\"\n\n"
         )
     };
     store_plugin(
@@ -530,7 +530,7 @@ fn the_guides_runner_and_hook_examples_have_the_keys_the_pipeline_sends() {
         "recorder",
         &(head("recorder", "runner")
             + "[runner]\ncommand = [\"./run.sh\"]\n\n[params]\nrec = \"\"\n"),
-        &record("runner", "cat \"$RRECALL_PARAM_REC/runner.out.$n\""),
+        &record("runner", "cat \"$PRECALL_PARAM_REC/runner.out.$n\""),
     );
     store_plugin(
         &w,
@@ -541,7 +541,7 @@ fn the_guides_runner_and_hook_examples_have_the_keys_the_pipeline_sends() {
     );
     let rec_s = rec.to_str().unwrap();
     std::fs::write(
-        w.store().join("rrecall.toml"),
+        w.store().join("precall.toml"),
         format!(
             "[[plugins]]\nid = \"no-op\"\n\n[[plugins]]\nid = \"recorder\"\nparams = {{ rec = {rec_s:?} }}\n\n[[plugins]]\nid = \"meeting-notes\"\nrunner = \"recorder\"\nparams = {{ path = {:?} }}\n\n[[plugins]]\nid = \"recorder-hook\"\nparams = {{ rec = {rec_s:?} }}\n",
             w.notes().to_str().unwrap()

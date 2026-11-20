@@ -29,7 +29,7 @@ const MAX_STDOUT: u64 = 64 << 20;
 
 /// The variable that gives a built-in runner the private directory where its agent streams and
 /// it exports what the agent wrote; the core keeps it as the call's agent log (spec §6.8).
-pub const AGENT_DIR: &str = "RRECALL_AGENT_DIR";
+pub const AGENT_DIR: &str = "PRECALL_AGENT_DIR";
 
 /// The agent log's size, its cut line included.
 // limit: the agent log keeps the first 16 MiB of what the agent streamed, redacted; a stream
@@ -37,7 +37,7 @@ pub const AGENT_DIR: &str = "RRECALL_AGENT_DIR";
 pub const AGENT_LOG_CAP: u64 = 16 << 20;
 
 /// Runs `template` (an argv of `inst`'s manifest) as a child process (spec §6.3): in the plugin
-/// directory, never through a shell, `input` as JSON on stdin, the `RRECALL_*` environment, and
+/// directory, never through a shell, `input` as JSON on stdin, the `PRECALL_*` environment, and
 /// killed with everything it started at the instance's timeout. stdout and stderr are kept,
 /// redacted, as `<run_dir>/<instance>.<entry>.stdout|stderr` (a later call with the same
 /// `entry` replaces them). Returns stdout of a run that exited 0, as the plugin printed it.
@@ -74,7 +74,7 @@ pub fn call_in(
 
 /// Runs the process and returns its stdout. The child writes to files that have no name
 /// while it runs, so a credential it prints never sits in the run dir as printed, not even
-/// when rrecall dies; once it ends, only the redacted copies are written under the log names.
+/// when precall dies; once it ends, only the redacted copies are written under the log names.
 fn run(
     ctx: &Ctx,
     inst: &Instance,
@@ -126,7 +126,7 @@ fn run(
 }
 
 /// The child's command: in the plugin directory, its own process group, `out` and `err` as
-/// its stdout and stderr, and the `RRECALL_*` environment.
+/// its stdout and stderr, and the `PRECALL_*` environment.
 fn command(
     ctx: &Ctx,
     inst: &Instance,
@@ -144,21 +144,21 @@ fn command(
         .stdout(out.try_clone()?)
         .stderr(err.try_clone()?)
         .process_group(0);
-    // A param the instance does not set must not leak in from rrecall's own environment.
+    // A param the instance does not set must not leak in from precall's own environment.
     for (k, _) in std::env::vars_os() {
-        if k.to_string_lossy().starts_with("RRECALL_PARAM_") {
+        if k.to_string_lossy().starts_with("PRECALL_PARAM_") {
             cmd.env_remove(k);
         }
     }
     cmd.env(
-        "RRECALL_BIN",
-        std::env::current_exe().context("locating the rrecall binary")?,
+        "PRECALL_BIN",
+        std::env::current_exe().context("locating the precall binary")?,
     )
-    .env("RRECALL_PROJECT", &ctx.project)
-    .env("RRECALL_STORE", &ctx.store)
-    .env("RRECALL_PLUGIN_DIR", &inst.plugin.dir)
-    .env("RRECALL_STATE_DIR", state)
-    .env("RRECALL_RUN_ID", &ctx.run_id)
+    .env("PRECALL_PROJECT", &ctx.project)
+    .env("PRECALL_STORE", &ctx.store)
+    .env("PRECALL_PLUGIN_DIR", &inst.plugin.dir)
+    .env("PRECALL_STATE_DIR", state)
+    .env("PRECALL_RUN_ID", &ctx.run_id)
     .envs(inst.env_params());
     Ok(cmd)
 }
@@ -341,7 +341,7 @@ fn last_line(f: &mut File) -> Result<String> {
 /// The absolute path `program` (an expanded argv[0]) names, checked once and then spawned as
 /// it is: an absolute path stays as it is; a relative one with a `/` is taken from the
 /// (canonical) plugin directory and must stay inside it with links resolved; a bare name is
-/// looked up on `path_var`, relative entries against `cwd`, rrecall's working directory.
+/// looked up on `path_var`, relative entries against `cwd`, precall's working directory.
 /// The file must be a native executable or a `#!` script whose interpreter is one: given
 /// anything else, the C library's exec falls back to `/bin/sh`, and §6.3 promises that a plugin
 /// never runs through a shell.
@@ -386,12 +386,12 @@ pub fn resolve_program(
                     && is_executable(Path::new(i))
                     && is_native(Path::new(i)) => {}
             _ => bail!(
-                "`{program}` does not name a native interpreter on its `#!` line (an absolute path to an executable); rrecall runs no program through a shell"
+                "`{program}` does not name a native interpreter on its `#!` line (an absolute path to an executable); precall runs no program through a shell"
             ),
         }
     } else if !is_native(&path) {
         bail!(
-            "`{program}` is neither a native executable nor a script starting with `#!`; rrecall runs no program through a shell"
+            "`{program}` is neither a native executable nor a script starting with `#!`; precall runs no program through a shell"
         );
     }
     Ok(path)
@@ -543,7 +543,7 @@ mod tests {
             std::fs::write(
                 d.join(plugin::MANIFEST),
                 format!(
-                    "id = \"{id}\"\nname = \"N\"\nversion = \"0.1.0\"\nmin_rrecall = \"0.1.0\"\nkind = \"{}\"\n{table}\n[params]\nscenario = \"ok\"\nout = \"\"\nrecord = \"\"\nlabel-x = \"\"\n",
+                    "id = \"{id}\"\nname = \"N\"\nversion = \"0.1.0\"\nmin_precall = \"0.1.0\"\nkind = \"{}\"\n{table}\n[params]\nscenario = \"ok\"\nout = \"\"\nrecord = \"\"\nlabel-x = \"\"\n",
                     table.trim_start_matches('[').split(']').next().unwrap()
                 ),
             )
@@ -602,14 +602,14 @@ mod tests {
         assert!(rec.contains(&format!("cwd: {}\n", dir.display())), "{rec}");
         let store = w.store();
         for line in [
-            format!("RRECALL_BIN={}", std::env::current_exe().unwrap().display()),
-            "RRECALL_PROJECT=kiln".into(),
-            format!("RRECALL_STORE={}", store.display()),
-            format!("RRECALL_PLUGIN_DIR={}", inst.plugin.dir.display()),
-            format!("RRECALL_STATE_DIR={}", store.join("state/prs").display()),
-            "RRECALL_RUN_ID=r1".into(),
-            "RRECALL_PARAM_SCENARIO=ok".into(),
-            "RRECALL_PARAM_LABEL_X=".into(),
+            format!("PRECALL_BIN={}", std::env::current_exe().unwrap().display()),
+            "PRECALL_PROJECT=kiln".into(),
+            format!("PRECALL_STORE={}", store.display()),
+            format!("PRECALL_PLUGIN_DIR={}", inst.plugin.dir.display()),
+            format!("PRECALL_STATE_DIR={}", store.join("state/prs").display()),
+            "PRECALL_RUN_ID=r1".into(),
+            "PRECALL_PARAM_SCENARIO=ok".into(),
+            "PRECALL_PARAM_LABEL_X=".into(),
         ] {
             assert!(rec.lines().any(|l| l == line), "{line} in {rec}");
         }
@@ -883,7 +883,7 @@ mod tests {
         let tok = ["gh", "p_", "Zq3vK9mW2xR7tY5pL8nB4cD6fG1hJ0kAa2Ss"].concat();
         let seen = w.t.0.join("seen");
         let script = format!(
-            "#!/bin/sh\nprintf '%s' '{tok}'\necho '{tok}' >&2\nls \"$RRECALL_STORE/runs/r1\" > {}\nsleep 5\n",
+            "#!/bin/sh\nprintf '%s' '{tok}'\necho '{tok}' >&2\nls \"$PRECALL_STORE/runs/r1\" > {}\nsleep 5\n",
             seen.display()
         );
         let mut inst = script_plugin(&w, "leak", &script);

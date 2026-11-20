@@ -167,8 +167,8 @@ pub fn show(
             .iter()
             .filter(|(n, _)| !n.parent.as_deref().is_some_and(|p| left_ids.contains(p)))
             .map(|(n, rel)| match depth - rel {
-                0 => format!("rrecall show {}", n.id),
-                d => format!("rrecall show {} --depth {d}", n.id),
+                0 => format!("precall show {}", n.id),
+                d => format!("precall show {} --depth {d}", n.id),
             })
             .collect();
         if json {

@@ -43,7 +43,7 @@ impl W {
     fn bare() -> W {
         static N: AtomicU32 = AtomicU32::new(0);
         let root = std::env::temp_dir().join(format!(
-            "rrecall-collectors-{}-{}",
+            "precall-collectors-{}-{}",
             std::process::id(),
             N.fetch_add(1, Ordering::SeqCst)
         ));
@@ -61,7 +61,7 @@ impl W {
     }
 
     fn store(&self) -> PathBuf {
-        self.root.join("data/rrecall/widget")
+        self.root.join("data/precall/widget")
     }
 
     fn path(&self) -> String {
@@ -72,9 +72,9 @@ impl W {
         )
     }
 
-    /// Runs rrecall with `stdin` and extra environment.
+    /// Runs precall with `stdin` and extra environment.
     fn raw(&self, args: &[&str], stdin: Option<&str>, env: &[(&str, &str)]) -> Out {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_rrecall"));
+        let mut c = Command::new(env!("CARGO_BIN_EXE_precall"));
         c.args(args)
             .current_dir(self.root.join("work"))
             .env("HOME", self.root.join("home"))
@@ -82,7 +82,7 @@ impl W {
             .env("XDG_CONFIG_HOME", self.root.join("config"))
             .env("PATH", self.path())
             .env("FAKE_GH_DIR", self.root.join("rec"))
-            .env_remove("RRECALL_PROJECT")
+            .env_remove("PRECALL_PROJECT")
             .env_remove("GIT_DIR")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -104,7 +104,7 @@ impl W {
         }
     }
 
-    /// `rrecall run` on the store; asserts the exit code.
+    /// `precall run` on the store; asserts the exit code.
     fn run(&self, code: i32) -> Out {
         let o = self.raw(&["--project", "widget", "run"], None, &[]);
         assert_eq!(o.code, code, "stdout: {}\nstderr: {}", o.stdout, o.stderr);
@@ -117,8 +117,8 @@ impl W {
             "repo = {}\n{plugins}{CHECKS}",
             q(&self.repo().to_string_lossy())
         );
-        std::fs::write(self.store().join("rrecall.toml"), text).unwrap();
-        git_in(&self.store(), &["add", "rrecall.toml"]);
+        std::fs::write(self.store().join("precall.toml"), text).unwrap();
+        git_in(&self.store(), &["add", "precall.toml"]);
         git_in(&self.store(), &["commit", "-q", "-m", "config"]);
     }
 
@@ -159,14 +159,14 @@ impl W {
     /// unchanged sources moves only the settled times (spec §4.2), and none within one second.
     fn only_the_lock_changed(&self, from: &str) -> bool {
         let changed = git_in(&self.store(), &["diff", "--name-only", from.trim(), "HEAD"]);
-        changed.lines().all(|l| l == "rrecall.lock")
+        changed.lines().all(|l| l == "precall.lock")
     }
 
-    /// `rrecall builtin <id> <entry>` with params as `RRECALL_PARAM_*`.
+    /// `precall builtin <id> <entry>` with params as `PRECALL_PARAM_*`.
     fn builtin(&self, id: &str, entry: &str, params: &[(&str, &str)], stdin: &str) -> Out {
         let env: Vec<(String, &str)> = params
             .iter()
-            .map(|(k, v)| (format!("RRECALL_PARAM_{}", k.to_uppercase()), *v))
+            .map(|(k, v)| (format!("PRECALL_PARAM_{}", k.to_uppercase()), *v))
             .collect();
         let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), *v)).collect();
         self.raw(&["builtin", id, entry], Some(stdin), &env)
@@ -532,8 +532,8 @@ fn git_history_reads_history_in_a_fixed_number_of_git_calls() {
             Some(r#"{"round": 1, "nodes": []}"#),
             &[
                 ("PATH", &env_path),
-                ("RRECALL_PARAM_PATH", &path),
-                ("RRECALL_PARAM_REPO", "acme/widget"),
+                ("PRECALL_PARAM_PATH", &path),
+                ("PRECALL_PARAM_REPO", "acme/widget"),
             ],
         );
         assert_eq!(o.code, 0, "{}", o.stderr);
@@ -798,7 +798,7 @@ fn files_pins_one_commit_for_its_files_citations_and_cursor() {
     let env_path = format!("{}:{}", wrap.display(), w.path());
     let mut env: Vec<(String, String)> = files_params(&w, true, &[])
         .into_iter()
-        .map(|(k, v)| (format!("RRECALL_PARAM_{}", k.to_uppercase()), v))
+        .map(|(k, v)| (format!("PRECALL_PARAM_{}", k.to_uppercase()), v))
         .collect();
     env.push(("PATH".into(), env_path));
     let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
@@ -1258,7 +1258,7 @@ fn agent_stdins(w: &W) -> Vec<String> {
 #[test]
 fn an_initd_store_runs_its_repo_and_github_collectors_through_the_default_runner() {
     let w = W::bare();
-    // `rrecall init` from inside a repository whose origin is on GitHub (work is the repo).
+    // `precall init` from inside a repository whose origin is on GitHub (work is the repo).
     let work = w.root.join("work");
     git_in(&work, &["init", "-q", "-b", "main"]);
     std::fs::write(work.join("README.md"), "Widget parses configs.\n").unwrap();
@@ -1285,7 +1285,7 @@ fn an_initd_store_runs_its_repo_and_github_collectors_through_the_default_runner
         "one call per collector, no proposals to judge\ninit: {}\nrun: {}\nconfig: {}",
         o.stdout,
         run.stdout,
-        std::fs::read_to_string(w.store().join("rrecall.toml")).unwrap()
+        std::fs::read_to_string(w.store().join("precall.toml")).unwrap()
     );
     let files = calls
         .iter()
@@ -1302,7 +1302,7 @@ fn an_initd_store_runs_its_repo_and_github_collectors_through_the_default_runner
         .unwrap();
     assert!(github.contains("Queue on Postgres"), "{github}");
     let lock: Value =
-        serde_json::from_str(&std::fs::read_to_string(w.store().join("rrecall.lock")).unwrap())
+        serde_json::from_str(&std::fs::read_to_string(w.store().join("precall.lock")).unwrap())
             .unwrap();
     for id in ["repo", "github"] {
         assert_eq!(lock["collectors"][id]["plugin"], "builtin", "{id}");
@@ -1342,9 +1342,9 @@ fn files_proposals_cite_references_that_resolve_and_respect_ownership() {
     std::fs::create_dir_all(&judge).unwrap();
     let rec = w.root.join("rec/accept");
     std::fs::write(
-        judge.join("rrecall-plugin.toml"),
+        judge.join("precall-plugin.toml"),
         format!(
-            "id = \"accept\"\nname = \"Accepts\"\nversion = \"0.1.0\"\nmin_rrecall = \"0.1.0\"\nkind = \"judge\"\n\n[judge]\ncommand = [{}]\n\n[params]\nscenario = \"all\"\nout = \"accept\"\nrecord = {}\n",
+            "id = \"accept\"\nname = \"Accepts\"\nversion = \"0.1.0\"\nmin_precall = \"0.1.0\"\nkind = \"judge\"\n\n[judge]\ncommand = [{}]\n\n[params]\nscenario = \"all\"\nout = \"accept\"\nrecord = {}\n",
             q(&format!("{}/tests/fixtures/bin/fake-plugin", env!("CARGO_MANIFEST_DIR"))),
             q(&rec.to_string_lossy())
         ),
@@ -1519,9 +1519,9 @@ fn files_keeps_each_blobs_text_answer_in_its_state_dir() {
     let p = files_params(&w, true, &[]);
     let mut env: Vec<(String, String)> = p
         .iter()
-        .map(|(k, v)| (format!("RRECALL_PARAM_{}", k.to_uppercase()), v.clone()))
+        .map(|(k, v)| (format!("PRECALL_PARAM_{}", k.to_uppercase()), v.clone()))
         .collect();
-    env.push(("RRECALL_STATE_DIR".into(), st));
+    env.push(("PRECALL_STATE_DIR".into(), st));
     let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     let fetch = || {
         let o = w.raw(&["builtin", "files", "fetch"], Some("{}"), &env);

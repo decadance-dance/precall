@@ -1,5 +1,5 @@
 //! The built-in runners of spec §10, `claude` and `codex` (§6.8). Each ships as a manifest
-//! inside the binary and runs as `rrecall builtin <id>`: it reads the runner input on stdin,
+//! inside the binary and runs as `precall builtin <id>`: it reads the runner input on stdin,
 //! runs `claude -p` or `codex exec` read-only with the prompt on stdin, and prints
 //! `{ "output", "cost_usd", "model" }`. Adapted from the headless runner of rreview (same
 //! author, same license).
@@ -19,17 +19,17 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::Duration;
 
-/// The built-in manifests. `rrecall` as the program stands for the running binary.
+/// The built-in manifests. `precall` as the program stands for the running binary.
 pub const MANIFESTS: [&str; 2] = [
     r#"id = "claude"
 name = "Claude Code, headless and read-only (claude -p)"
 version = "0.1.0"
-min_rrecall = "0.1.0"
+min_precall = "0.1.0"
 kind = "runner"
 requires = ["claude"]
 
 [runner]
-command = ["rrecall", "builtin", "claude"]
+command = ["precall", "builtin", "claude"]
 
 [params]
 prices = {}
@@ -40,12 +40,12 @@ effort = ""
     r#"id = "codex"
 name = "Codex, headless and read-only (codex exec)"
 version = "0.1.0"
-min_rrecall = "0.1.0"
+min_precall = "0.1.0"
 kind = "runner"
 requires = ["codex"]
 
 [runner]
-command = ["rrecall", "builtin", "codex"]
+command = ["precall", "builtin", "codex"]
 
 [params]
 prices = {}
@@ -53,7 +53,7 @@ prices = {}
 ];
 
 /// What an agent inherits from the runner's environment; every other variable, such as the
-/// `RRECALL_*` ones or a `GH_TOKEN`, is dropped.
+/// `PRECALL_*` ones or a `GH_TOKEN`, is dropped.
 const INHERIT: &[&str] = &[
     // Run at all, find the user's login (the macOS keychain).
     "PATH",
@@ -128,7 +128,7 @@ pub fn run(id: &str, stdin: &str) -> Result<String> {
         && let Err(e) = export(&scratch.0, logs)
     {
         eprintln!(
-            "rrecall: the agent's files were not kept in {}: {e:#}",
+            "precall: the agent's files were not kept in {}: {e:#}",
             logs.display()
         );
     }
@@ -264,7 +264,7 @@ impl Launch {
     /// kills everything it started.
     // limit: the core kills the runner's group at the caller's timeout, not the agent's; the
     // runner's own deadlines end before it (MARGIN), so only a runner killed early leaves one.
-    // limit: `allowed_runners` governs what rrecall sends the agent (input, resolved texts,
+    // limit: `allowed_runners` governs what precall sends the agent (input, resolved texts,
     // feedback); a read-only agent can still read files on the machine, the store included,
     // the same exposure as any coding-agent session there (spec §6.8).
     fn turn(
@@ -346,7 +346,7 @@ struct Access {
 }
 
 fn access_from_env() -> Result<Access> {
-    let param = |name: &str| std::env::var(format!("RRECALL_PARAM_{}", name.to_uppercase())).ok();
+    let param = |name: &str| std::env::var(format!("PRECALL_PARAM_{}", name.to_uppercase())).ok();
     let connectors = match param("connectors").as_deref() {
         None | Some("false") => false,
         Some("true") => true,
@@ -397,7 +397,7 @@ fn is_mcp_tool(name: &str) -> bool {
 /// Claude Code reads it (the macOS keychain entry, or `.credentials.json` elsewhere) from
 /// `CLAUDE_SECURESTORAGE_CONFIG_DIR`, set to the user's own config dir (empty for the default
 /// `~/.claude`), and refreshes it there in place as any session does; nothing is copied or linked.
-// limit: `main` makes a relative `CLAUDE_CONFIG_DIR` absolute against the dir rrecall started in;
+// limit: `main` makes a relative `CLAUDE_CONFIG_DIR` absolute against the dir precall started in;
 // if Claude Code names a keychain entry after the relative text, the call fails as not logged in.
 fn claude_config(dir: &Path) -> Result<Vec<(String, String)>> {
     let user = match std::env::var_os("CLAUDE_CONFIG_DIR").filter(|d| !d.is_empty()) {
@@ -571,12 +571,12 @@ impl Scratch {
     }
 }
 
-/// `rrecall-<uid>` in the temp dir, which every scratch dir lives in and the sweep looks in
+/// `precall-<uid>` in the temp dir, which every scratch dir lives in and the sweep looks in
 /// alone: made owner-only, and refused when it is not a dir of this user that only they reach,
 /// since the temp dir is shared.
 fn private_dir() -> Result<PathBuf> {
     let uid = unsafe { libc::getuid() };
-    let dir = std::env::temp_dir().join(format!("rrecall-{uid}"));
+    let dir = std::env::temp_dir().join(format!("precall-{uid}"));
     match fs::DirBuilder::new().mode(0o700).create(&dir) {
         Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => {
             return Err(e).with_context(|| format!("creating {}", dir.display()));
@@ -675,7 +675,7 @@ struct Price {
 type Prices = BTreeMap<String, Price>;
 
 fn prices_from_env() -> Result<Prices> {
-    let Some(text) = std::env::var_os("RRECALL_PARAM_PRICES") else {
+    let Some(text) = std::env::var_os("PRECALL_PARAM_PRICES") else {
         return Ok(Prices::new());
     };
     let prices: Prices = serde_json::from_str(&text.to_string_lossy()).map_err(|e| {
@@ -1109,7 +1109,7 @@ mod tests {
             format!("agent--1-{id}"),
             format!("agent-1-{id}-x"),
             format!("agent-1-{}", id.to_uppercase()),
-            format!("rrecall-agent-1-{id}"),
+            format!("precall-agent-1-{id}"),
         ] {
             assert_eq!(scratch_pid(&other), None, "{other}");
         }
@@ -1117,7 +1117,7 @@ mod tests {
 
     #[test]
     fn codex_usage_comes_from_its_session_log_else_its_events() {
-        let home = std::env::temp_dir().join(format!("rrecall-codex-usage-{}", std::process::id()));
+        let home = std::env::temp_dir().join(format!("precall-codex-usage-{}", std::process::id()));
         let day = home.join("sessions/2026/11/19");
         fs::create_dir_all(&day).unwrap();
         fs::write(

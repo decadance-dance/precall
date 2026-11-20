@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{TITLE}} · rrecall map</title>
+<title>{{TITLE}} · precall map</title>
 <style>
 :root {
   --bg: #f7f7f5; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6b66; --line: #dddcd6;
@@ -303,7 +303,7 @@ function inspect() {
     crumbs, el("h2", {}, n.title), meta,
     el("p", { class: "body" }, n.body),
     el("h3", {}, "Your note"),
-    n.note ? el("div", { class: "note" }, n.note) : el("p", { class: "empty" }, `No note. Add one: rrecall note ${n.id} "<text>"`),
+    n.note ? el("div", { class: "note" }, n.note) : el("p", { class: "empty" }, `No note. Add one: precall note ${n.id} "<text>"`),
     el("h3", {}, "Sources"), list(n.sources, s => el("code", {}, s)),
     el("h3", {}, `Children (${n.children.length})`), list(n.children, id => el("button", { onclick: () => select(id) }, byId.get(id).title)),
     el("h3", {}, "History, oldest first"), hist);

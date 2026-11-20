@@ -104,7 +104,7 @@ fn check_ref(rules: &Rules, r: &str) -> Result<(), String> {
     let k = kind_of(r);
     if CORE_KINDS.contains(&k) {
         return Err(format!(
-            "source `{r}`: the kind `{k}` belongs to rrecall itself"
+            "source `{r}`: the kind `{k}` belongs to precall itself"
         ));
     }
     if !rules.owned(k) {
@@ -157,7 +157,7 @@ pub fn validate(
     let g = rules.grant(&item.by);
     let own = |r: &str| g.kinds.iter().any(|k| k == kind_of(r));
     if p.op == Op::Add && p.id.is_some() {
-        return Err("I4: new nodes get their ids from rrecall; an `add` may not set `id`".into());
+        return Err("I4: new nodes get their ids from precall; an `add` may not set `id`".into());
     }
     let present = [
         ("id", p.id.is_some()),
@@ -229,7 +229,7 @@ pub fn validate(
             check_ref(rules, ev).map_err(|e| format!("evidence: {e}"))?;
             if n.note.is_some() {
                 return Err(format!(
-                    "I3: `{id}` has the user's note; only `rrecall rm` removes it"
+                    "I3: `{id}` has the user's note; only `precall rm` removes it"
                 ));
             }
         }
@@ -436,7 +436,7 @@ fn remove_set(
             failed.insert(
                 it.key(),
                 format!(
-                    "I3: `{}` has children that are not removed or moved in this run; remove it by hand with `rrecall rm --recursive`",
+                    "I3: `{}` has children that are not removed or moved in this run; remove it by hand with `precall rm --recursive`",
                     it.p.id.as_deref().unwrap_or_default()
                 ),
             );

@@ -1,4 +1,4 @@
-//! `rrecall plugin list | add | trust` (spec §6.7). None of them runs a plugin's command: the
+//! `precall plugin list | add | trust` (spec §6.7). None of them runs a plugin's command: the
 //! manifest preview and the user's answer are the safety step.
 
 use crate::config;
@@ -98,13 +98,13 @@ pub fn add(source: &str, git_ref: Option<&str>) -> Result<String> {
     ))
 }
 
-/// Trusts a project's `.rrecall/plugins/` directory at its current content hash, after showing
+/// Trusts a project's `.precall/plugins/` directory at its current content hash, after showing
 /// every manifest in it and asking.
 pub fn trust(project: Option<&str>, dir: &Path) -> Result<String> {
     let dir = dir
         .canonicalize()
         .map_err(|e| error::usage(format!("{}: {e}", dir.display())))?;
-    // The loader reads only the project's own `.rrecall/plugins/`; trusting any other
+    // The loader reads only the project's own `.precall/plugins/`; trusting any other
     // directory would record a decision nothing ever consults.
     let (name, store) = config::resolve_project(project)?;
     let cfg = config::load_store_config(&store)?;

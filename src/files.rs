@@ -15,7 +15,7 @@ use std::process::{Command, Stdio};
 pub const MANIFEST: &str = r#"id = "files"
 name = "A repository's or a folder's files, read by an agent"
 version = "0.1.0"
-min_rrecall = "0.1.0"
+min_precall = "0.1.0"
 kind = "collector"
 
 [collector]
@@ -23,10 +23,10 @@ kind = "collector"
 # the prompt tells the agent to propose only into `fetched.branches`.
 scope = ["layout", "how-it-works", "decisions", "blocked", "people"]
 source_kinds = ["{ref_kind}"]
-fingerprint = ["rrecall", "builtin", "files", "fingerprint"]
-fetch = ["rrecall", "builtin", "files", "fetch"]
+fingerprint = ["precall", "builtin", "files", "fingerprint"]
+fetch = ["precall", "builtin", "files", "fetch"]
 prompt = "files.md"
-resolve = ["rrecall", "builtin", "files", "resolve"]
+resolve = ["precall", "builtin", "files", "resolve"]
 
 [params]
 path = ""
@@ -338,7 +338,7 @@ impl Scope {
         };
         Some(if text.chars().count() > RESOLVE_MAX {
             let mut t: String = text.chars().take(RESOLVE_MAX).collect();
-            t.push_str("\n[cut by rrecall]");
+            t.push_str("\n[cut by precall]");
             t
         } else {
             text
@@ -370,7 +370,7 @@ fn git_bytes(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
 /// one `git cat-file --batch`, so no git attribute changes the answer. A blob's answer never
 /// changes, so it is kept in the instance's state dir and only new blobs are read.
 fn text_blobs(root: &Path, ids: &[&str]) -> Result<HashSet<String>> {
-    let cache = std::env::var_os("RRECALL_STATE_DIR").map(|d| PathBuf::from(d).join("text-blobs"));
+    let cache = std::env::var_os("PRECALL_STATE_DIR").map(|d| PathBuf::from(d).join("text-blobs"));
     let mut known: BTreeMap<String, bool> = cache
         .as_ref()
         .and_then(|p| std::fs::read_to_string(p).ok())

@@ -1,12 +1,12 @@
 use clap::{Parser, Subcommand};
-use rrecall::commands;
+use precall::commands;
 use std::process::ExitCode;
 
 /// Keeps a versioned map of a software project and answers questions about it.
 #[derive(Parser)]
-#[command(name = "rrecall", version)]
+#[command(name = "precall", version)]
 struct Cli {
-    /// The project (else RRECALL_PROJECT, else the current repo's origin remote looked up in the user config).
+    /// The project (else PRECALL_PROJECT, else the current repo's origin remote looked up in the user config).
     #[arg(long, global = true)]
     project: Option<String>,
     #[command(subcommand)]
@@ -110,12 +110,12 @@ enum PluginCmd {
         #[arg(long = "ref")]
         git_ref: Option<String>,
     },
-    /// Trust a project's `.rrecall/plugins/` directory at its current content.
+    /// Trust a project's `.precall/plugins/` directory at its current content.
     Trust { dir: std::path::PathBuf },
 }
 
 /// Plugins run in their own dir (spec §6.1), so a relative `CLAUDE_CONFIG_DIR` is made absolute
-/// against the dir rrecall was started in, before anything runs.
+/// against the dir precall was started in, before anything runs.
 fn absolute_claude_config() {
     if let Some(d) = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|d| !d.is_empty())
         && let Ok(abs) = std::path::absolute(&d)
@@ -147,9 +147,9 @@ fn main() -> ExitCode {
             only,
             force,
             no_wait,
-        } => rrecall::run::run(
+        } => precall::run::run(
             p,
-            &rrecall::run::Opts {
+            &precall::run::Opts {
                 only: only.clone(),
                 force: *force,
                 wait: !*no_wait,
@@ -164,12 +164,12 @@ fn main() -> ExitCode {
             recursive,
         } => commands::rm(p, id, reason.as_deref(), *recursive),
         Cmd::AgentInstructions => Ok(commands::AGENT_INSTRUCTIONS.to_string()),
-        Cmd::Doctor => rrecall::doctor::doctor(p),
-        Cmd::Plugin(PluginCmd::List) => rrecall::plugin_cmd::list(p),
+        Cmd::Doctor => precall::doctor::doctor(p),
+        Cmd::Plugin(PluginCmd::List) => precall::plugin_cmd::list(p),
         Cmd::Plugin(PluginCmd::Add { source, git_ref }) => {
-            rrecall::plugin_cmd::add(source, git_ref.as_deref())
+            precall::plugin_cmd::add(source, git_ref.as_deref())
         }
-        Cmd::Plugin(PluginCmd::Trust { dir }) => rrecall::plugin_cmd::trust(p, dir),
+        Cmd::Plugin(PluginCmd::Trust { dir }) => precall::plugin_cmd::trust(p, dir),
         Cmd::Builtin { id, entry } => commands::builtin(id, entry.as_deref()),
     };
     match out {
@@ -178,8 +178,8 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("rrecall: {e:#}");
-            ExitCode::from(rrecall::error::exit_code(&e))
+            eprintln!("precall: {e:#}");
+            ExitCode::from(precall::error::exit_code(&e))
         }
     }
 }

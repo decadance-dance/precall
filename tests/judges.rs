@@ -20,7 +20,7 @@ fn each_labeled_set_is_a_judge_input_with_one_label_per_proposal() {
     for judge in JUDGES {
         let set = set(judge);
         assert_eq!(set["judge"], judge);
-        let input: rrecall::wire::JudgeInput =
+        let input: precall::wire::JudgeInput =
             serde_json::from_value(set["input"].clone()).unwrap_or_else(|e| panic!("{judge}: {e}"));
         let keys: Vec<&str> = input.proposals.iter().map(|j| j.key.as_str()).collect();
         let expected = set["expected"].as_object().unwrap();
@@ -39,7 +39,7 @@ fn each_labeled_set_is_a_judge_input_with_one_label_per_proposal() {
             let refs = j.sources.as_ref().unwrap();
             assert!(!refs.is_empty(), "{judge}: {} cites nothing", j.key);
             for r in refs.keys().chain(j.proposal.sources.iter()) {
-                rrecall::node::check_source(r).unwrap_or_else(|e| panic!("{judge}: {r}: {e}"));
+                precall::node::check_source(r).unwrap_or_else(|e| panic!("{judge}: {r}: {e}"));
             }
         }
         // One model call per set, as a run would make it: no two proposals on one node (§4.1
@@ -63,7 +63,7 @@ fn each_labeled_set_is_a_judge_input_with_one_label_per_proposal() {
             input.nodes.iter().map(|n| n.id.as_str()).collect();
         for j in &input.proposals {
             if let Some(parent) = &j.proposal.parent {
-                let branch = rrecall::config::default_branches()
+                let branch = precall::config::default_branches()
                     .iter()
                     .any(|b| &b.id == parent);
                 assert!(

@@ -1,4 +1,4 @@
-//! The outline `rrecall import` reads: one `title | detail` per line, nesting by leading spaces.
+//! The outline `precall import` reads: one `title | detail` per line, nesting by leading spaces.
 
 #[derive(Debug, PartialEq)]
 pub struct Item {

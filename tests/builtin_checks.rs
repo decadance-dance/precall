@@ -1,14 +1,14 @@
 //! The built-in checks run as plugins: discovered from the binary, started by the process
 //! runner, speaking the check protocol of spec §6.5.
 
-use rrecall::config::UserConfig;
-use rrecall::plugin::{self, Spec};
-use rrecall::process::{self, Ctx};
-use rrecall::wire::{self, JudgeInput, VerdictKind};
+use precall::config::UserConfig;
+use precall::plugin::{self, Spec};
+use precall::process::{self, Ctx};
+use precall::wire::{self, JudgeInput, VerdictKind};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-const BIN: &str = env!("CARGO_BIN_EXE_rrecall");
+const BIN: &str = env!("CARGO_BIN_EXE_precall");
 
 struct Dir(PathBuf);
 impl Drop for Dir {
@@ -19,11 +19,11 @@ impl Drop for Dir {
 
 #[test]
 fn each_builtin_check_runs_through_the_process_runner() {
-    let root = Dir(std::env::temp_dir().join(format!("rrecall-builtin-{}", std::process::id())));
+    let root = Dir(std::env::temp_dir().join(format!("precall-builtin-{}", std::process::id())));
     let store = root.0.join("store");
     std::fs::create_dir_all(&store).unwrap();
     std::fs::write(
-        store.join("rrecall.toml"),
+        store.join("precall.toml"),
         "[[plugins]]\nid = \"no-op\"\n\n[[plugins]]\nid = \"size-limits\"\nparams = { body_max = 20 }\n\n[[plugins]]\nid = \"secrets\"\n",
     )
     .unwrap();
@@ -56,7 +56,7 @@ fn each_builtin_check_runs_through_the_process_runner() {
         let Spec::Check(c) = &mut inst.plugin.manifest.spec else {
             panic!("{} is not a check", inst.id)
         };
-        // In a test the running binary is the harness; point the program at rrecall.
+        // In a test the running binary is the harness; point the program at precall.
         c.command[0] = BIN.to_string();
         let command = c.command.clone();
         let input = JudgeInput {
